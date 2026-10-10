@@ -433,8 +433,8 @@ which says which files carry which license and points at `LICENSE` and
 `licenses/`. The Test Build's variant in `.github/workflows/package.yml`
 repeats the `assets` list for its own directory; change both together. Verify
 with `dpkg-deb -c` and by extracting `copyright` with `dpkg-deb -x`.
-The `Maintainer` field is not set yet; `dpkg-deb` warns about it until the
-maintainer chooses the contact to publish (#283).
+The `Maintainer` field is `maintainer` in `crates/ui/Cargo.toml`; the Test
+Build inherits it.
 
 GPUI reports renderer, display-server and font failures through the `log` crate.
 The app installs a small stderr logger (`crates/ui/src/diagnostics.rs`) that
