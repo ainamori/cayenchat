@@ -22,6 +22,7 @@ assets = [
 ]
 # The Test Build package (`cayenchat-test`) installs the same paths.
 conflicts = "cayenchat-test"
+maintainer = "Sugano `Koshian' Yoshihisa(E) <koshian@foxking.org>"
 
 [[bin]]
 name = "cayenchat"
