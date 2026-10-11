@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Turns downloaded bytes into a small static thumbnail.
 //!
 //! The format comes from the content (`ImageFormat::sniff`), never from the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! The application-wide record of previews: what is ready, loading, queued
 //! or failed. It decides what to load next but runs nothing itself; the UI
 //! runs the jobs it hands out on background threads and reports back.

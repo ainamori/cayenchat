@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Downloading preview candidates.
 //!
 //! [`HttpFetcher`] is the production loader: HTTP(S) only, redirects
