@@ -26,6 +26,7 @@ pub use peer_avatar::shareable as shareable_avatar;
 use std::{
     collections::HashMap,
     fmt,
+    ops::ControlFlow,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -40,6 +41,7 @@ use encoding_rs::Encoding;
 use futures_util::StreamExt;
 use irc::{
     client::{
+        ClientStream,
         data::user::AccessLevel,
         prelude::{Client, Config},
     },
@@ -1666,7 +1668,7 @@ async fn run_cancellable(
     transcript: Arc<AtomicBool>,
 ) {
     let started = Instant::now();
-    let mut transcript = Transcript {
+    let transcript = Transcript {
         events: events.clone(),
         started,
         requested: transcript,
@@ -1732,15 +1734,13 @@ async fn run_cancellable(
     let advertise_avatar = config.advertises_avatar();
     let registration_realname = config.wire_realname();
     let quit_message = config.wire_quit_message();
-    // The avatar mark is fixed for the connection, also for SETNAME.
-    let mut pending_setname = 0usize;
-    let mut peers = config.ircv3.peer_avatars.then(|| {
+    let peers = config.ircv3.peer_avatars.then(|| {
         peer_avatar::PeerAvatars::new(
             wire_encoding.eq_ignore_ascii_case("UTF-8"),
             config.shared_avatar.clone(),
         )
     });
-    let mut ctcp = ctcp::CtcpReplies::new(config.ircv3.peer_avatars);
+    let ctcp = ctcp::CtcpReplies::new(config.ircv3.peer_avatars);
     let mut negotiation = cap::CapNegotiation::new(
         config.ircv3,
         config.sasl,
@@ -1751,7 +1751,8 @@ async fn run_cancellable(
             &events,
             started,
             format!(
-                "Message tags are not requested with the {wire_encoding} encoding: tag values are UTF-8."
+                "Message tags are not requested with the {wire_encoding} encoding: \
+                 tag values are UTF-8."
             ),
         )
         .await;
@@ -1761,7 +1762,8 @@ async fn run_cancellable(
             &events,
             started,
             format!(
-                "Avatar metadata with the {wire_encoding} encoding: only ASCII avatar URLs are used, because metadata values are UTF-8."
+                "Avatar metadata with the {wire_encoding} encoding: only ASCII avatar URLs \
+                 are used, because metadata values are UTF-8."
             ),
         )
         .await;
@@ -1893,655 +1895,1010 @@ async fn run_cancellable(
         }
         transcript.record(WireDirection::Sent, line).await;
     }
-    let mut registration_deadline = tokio::time::Instant::now() + REGISTRATION_TIMEOUT;
-    let mut registered = false;
-    // Registration is paused while the UI asks for another nickname.
-    let mut awaiting_nick = false;
-    let mut refusal = None;
-    let mut current_nick = registration_nick;
-    let mut roster = RosterTracker::default();
-    let mut whois = WhoisCollector::default();
-    let mut replay = replay::ReplayTracker::default();
-    let mut batch_negotiated = false;
-    let mut metadata = metadata::MetadataState::new(wire_encoding.eq_ignore_ascii_case("UTF-8"));
-    let mut metadata_enabled = false;
-    let mut casemapping = CaseMapping::default();
-    let mut history = history::HistoryRequests::with_resume(config.resume_history);
-    let mut history_enabled = false;
-    let mut echoes = echo::Echoes::default();
-    let mut next_local_id = 0u64;
-    let mut accounts = accounts::Accounts::default();
-    let track_accounts = config.ircv3.accounts;
-    let mut targets_asked = false;
-    // Last reported Event::HistoryAvailable.
-    let mut history_available = false;
     let mut registration_progress = tokio::time::interval(Duration::from_secs(10));
     registration_progress.tick().await;
+    let wire_utf8 = wire_encoding.eq_ignore_ascii_case("UTF-8");
+    let mut worker = Worker {
+        client,
+        events,
+        started,
+        transcript,
+        wire_encoding,
+        quit_message,
+        advertise_avatar,
+        auto_join_channels,
+        targets_since,
+        track_accounts: config.ircv3.accounts,
+        modes_per_line,
+        pending_setname: 0,
+        peers,
+        ctcp,
+        negotiation,
+        registration_deadline: tokio::time::Instant::now() + REGISTRATION_TIMEOUT,
+        registered: false,
+        // Registration is paused while the UI asks for another nickname.
+        awaiting_nick: false,
+        refusal: None,
+        current_nick: registration_nick,
+        roster: RosterTracker::default(),
+        whois: WhoisCollector::default(),
+        replay: replay::ReplayTracker::default(),
+        batch_negotiated: false,
+        metadata: metadata::MetadataState::new(wire_utf8),
+        metadata_enabled: false,
+        casemapping: CaseMapping::default(),
+        history: history::HistoryRequests::with_resume(config.resume_history),
+        history_enabled: false,
+        echoes: echo::Echoes::default(),
+        next_local_id: 0,
+        accounts: accounts::Accounts::default(),
+        targets_asked: false,
+        // Last reported Event::HistoryAvailable.
+        history_available: false,
+    };
 
     loop {
         tokio::select! {
-            command = next_command(&mut commands, &events.quit) => {
-                let Some(command) = command else { break; };
-                match command {
-                    Outgoing::Message {target, text, display_text, notice} => {
-                        // With echo-message the local line is confirmed by
-                        // the server's echo; a label (labeled-response)
-                        // names it exactly.
-                        let shown = echo_text(&target, display_text);
-                        next_local_id += 1;
-                        let local_id = next_local_id;
-                        let label = if registered && negotiation.enabled(cap::ECHO_MESSAGE) {
-                            echoes.track(
-                                local_id,
-                                &target,
-                                notice,
-                                &text,
-                                shown != text,
-                                negotiation.enabled(cap::LABELED_RESPONSE),
-                            )
-                        } else {
-                            None
-                        };
-                        let tracked = label.is_some();
-                        let message = if notice {
-                            IrcMessage::from(IrcCommand::NOTICE(target.clone(), text))
-                        } else {
-                            IrcMessage::from(IrcCommand::PRIVMSG(target.clone(), text))
-                        };
-                        let message = echo::with_label(message, label.flatten());
-                        let line = transcript.line(&message);
-                        let result = validate_tagged_wire(&message, &wire_encoding)
-                            .and_then(|_| client.send(message).map_err(|error| error.to_string()));
-                        let event = match result {
-                            Ok(()) => {
-                                transcript.record(WireDirection::Sent, line).await;
-                                Event::OutgoingAccepted {
-                                    local_id: tracked.then_some(local_id),
-                                    channel: target,
-                                    text: shown,
-                                    notice,
-                                }
-                            }
-                            Err(error) => {
-                                echoes.untrack(local_id);
-                                Event::ServerLine(format!("Send failed: {error}"))
-                            }
-                        };
-                        if events.send(event).await.is_err() { break; }
-                    }
-                    Outgoing::Raw(message) => {
-                        let line = transcript.line(&message);
-                        let retry_nick = match &message.command {
-                            IrcCommand::NICK(nickname) if !registered => Some(nickname.clone()),
-                            _ => None,
-                        };
-                        let result = validate_wire(&message.to_string(), &wire_encoding)
-                            .and_then(|_| client.send(message).map_err(|error| error.to_string()));
-                        match result {
-                            Ok(()) => {
-                                transcript.record(WireDirection::Sent, line).await;
-                                if let Some(nickname) = retry_nick {
-                                    current_nick = nickname;
-                                    awaiting_nick = false;
-                                    refusal = None;
-                                    registration_deadline = tokio::time::Instant::now() + REGISTRATION_TIMEOUT;
-                                }
-                            }
-                            Err(error) => {
-                                if events.send(Event::ServerLine(format!("Command failed: {error}"))).await.is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Outgoing::OwnAvatar { request, url } => {
-                        let queued = metadata.request_own(
-                            request,
-                            url.as_deref(),
-                            registered && metadata_enabled,
-                            tokio::time::Instant::now(),
-                        );
-                        match queued {
-                            Ok(command) => {
-                                let message = IrcMessage::from(command);
-                                let line = transcript.line(&message);
-                                if let Err(error) = client.send(message) {
-                                    let _ = events.send(Event::Disconnected(error_chain(&error))).await;
-                                    return;
-                                }
-                                transcript.record(WireDirection::Sent, line).await;
-                            }
-                            Err(failure) => {
-                                if events.send(Event::OwnAvatarFailed { request, failure }).await.is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Outgoing::ShareAvatar(url) => {
-                        if let Some(peers) = peers.as_mut() {
-                            peers.set_share(url);
-                        }
-                    }
-                    Outgoing::SetName(realname) => {
-                        let failure = if !registered || !negotiation.enabled(cap::SETNAME) {
-                            Some(RealNameFailure::Unsupported)
-                        } else if pending_setname >= MAX_PENDING_SETNAME {
-                            Some(RealNameFailure::Busy)
-                        } else {
-                            let message = IrcMessage::from(IrcCommand::Raw(
-                                "SETNAME".into(),
-                                vec![peer_avatar::realname(base_realname(&realname), advertise_avatar)],
-                            ));
-                            let line = transcript.line(&message);
-                            match validate_wire(&message.to_string(), &wire_encoding)
-                                .and_then(|_| client.send(message).map_err(|error| error.to_string()))
-                            {
-                                Ok(()) => {
-                                    pending_setname += 1;
-                                    transcript.record(WireDirection::Sent, line).await;
-                                    None
-                                }
-                                Err(error) => Some(RealNameFailure::Rejected(error)),
-                            }
-                        };
-                        if let Some(failure) = failure
-                            && events.send(Event::RealNameFailed(failure)).await.is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Outgoing::OlderHistory { channel, request, reference, limit } => {
-                        let queued = if registered && history_enabled {
-                            history.enqueue_older(&channel, request, &reference, limit)
-                        } else {
-                            Err(history::Finished::failed_older(channel, request))
-                        };
-                        let sent = match queued {
-                            Ok(()) => request_history(&client, &events, &transcript, &mut history, registered).await,
-                            Err(finished) => history_finished(&events, started, finished).await,
-                        };
-                        if !sent {
-                            return;
-                        }
-                    }
-                    outgoing @ (Outgoing::Quit | Outgoing::QuitWith(_)) => {
-                        let reason = match outgoing {
-                            Outgoing::QuitWith(reason) => reason,
-                            _ => quit_message.clone(),
-                        };
-                        let quit = IrcMessage::from(IrcCommand::QUIT(Some(reason)));
-                        let line = transcript.line(&quit);
-                        if client.send(quit).is_ok() {
-                            transcript.record(WireDirection::Sent, line).await;
-                        }
-                        // Polling the stream writes the queue, QUIT included. The server
-                        // closes after QUIT, which ends the stream; reading (and discarding)
-                        // up to that point leaves nothing unread, since dropping a socket
-                        // with unread data sends RST and can discard a QUIT not yet sent.
-                        // EOF is taken as send completion: the server is assumed to close
-                        // only after receiving QUIT. A close before that is the server's own
-                        // doing, and a write after it would be reset, so waiting is futile.
-                        let _ = tokio::time::timeout(QUIT_FLUSH_LIMIT, async {
-                            while let Some(Ok(_)) = stream.next().await {}
-                        })
-                        .await;
-                        let _ = events.send(Event::Closed(USER_DISCONNECT.into())).await;
-                        break;
-                    }
+            command = next_command(&mut commands, &worker.events.quit) => {
+                if worker.on_command(command, &mut stream).await.is_break() {
+                    break;
                 }
             }
             incoming = stream.next() => {
-                match incoming {
-                    Some(Ok(message)) => {
-                        transcript.record(WireDirection::Received, transcript.line(&message)).await;
-                        // irc's transport enqueues PONG before exposing PING here.
-                        if let IrcCommand::PING(data, _) = &message.command {
-                            let pong = IrcMessage::from(IrcCommand::PONG(data.clone(), None));
-                            transcript.record(WireDirection::Sent, transcript.line(&pong)).await;
-                        }
-                        // irc's client state enqueues configured JOINs on end-of-MOTD.
-                        if matches!(message.command, IrcCommand::Response(Response::RPL_ENDOFMOTD | Response::ERR_NOMOTD, _)) {
-                            for channel in &auto_join_channels {
-                                let join = IrcMessage::from(IrcCommand::JOIN(channel.clone(), None, None));
-                                transcript.record(WireDirection::Sent, transcript.line(&join)).await;
-                            }
-                        }
-                        if !registered {
-                            match &message.command {
-                                IrcCommand::Response(response, _) => diagnostic(&events, started,
-                                    format!("Server replied {response:?}.")).await,
-                                IrcCommand::CAP(_, subcommand, _, _) => diagnostic(&events, started,
-                                    format!("Server CAP response: {subcommand:?}.")).await,
-                                _ => {}
-                            }
-                        }
-                        if !wire_encoding.eq_ignore_ascii_case("UTF-8") && requires_utf8(&message) {
-                            let _ = events.send(Event::Refused(
-                                "Server requires UTF-8 (UTF8ONLY); change this server's character encoding to UTF-8.".into()
-                            )).await;
-                            return;
-                        }
-                        match negotiation.observe(&message) {
-                            Ok(step) => {
-                                for note in step.notes {
-                                    diagnostic(&events, started, note).await;
-                                }
-                                for command in step.send {
-                                    let message = IrcMessage::from(command);
-                                    let line = transcript.line(&message);
-                                    if let Err(error) = client.send(message) {
-                                        let _ = events.send(Event::Disconnected(error_chain(&error))).await;
-                                        return;
-                                    }
-                                    transcript.record(WireDirection::Sent, line).await;
-                                }
-                            }
-                            Err(error) => {
-                                let _ = events.send(Event::Refused(error)).await;
-                                return;
-                            }
-                        }
-                        // CAP DEL (or ACK -batch) withdrew batch: forget open batches.
-                        if batch_negotiated && !negotiation.enabled(cap::BATCH) {
-                            replay.reset();
-                        }
-                        batch_negotiated = negotiation.enabled(cap::BATCH);
-                        // Metadata stopped (its own DEL, or batch went away):
-                        // every avatar of this connection becomes unknown.
-                        if metadata_enabled && !negotiation.enabled(cap::METADATA) {
-                            let reset = metadata.reset().into_iter().chain([Event::AvatarsReset]).collect();
-                            for event in merged(&mut peers, reset) {
-                                if events.send(event).await.is_err() {
-                                    return;
-                                }
-                            }
-                        }
-                        metadata_enabled = negotiation.enabled(cap::METADATA);
-                        // chathistory went away (its own DEL, or batch): the
-                        // request being answered ends without lines.
-                        if history_enabled && !negotiation.enabled(cap::CHATHISTORY) {
-                            for finished in history.reset() {
-                                if !history_finished(&events, started, finished).await {
-                                    return;
-                                }
-                            }
-                        }
-                        let history_started = !history_enabled && negotiation.enabled(cap::CHATHISTORY);
-                        history_enabled = negotiation.enabled(cap::CHATHISTORY);
-                        history.isupport(&message);
-                        modes::observe(&message, &modes_per_line);
-                        accounts.isupport(&message);
-                        if let Some(announced) = advertised_casemapping(&message)
-                            && announced != casemapping
-                        {
-                            casemapping = announced;
-                            metadata.set_casemapping(announced);
-                            roster.presence.set_casemapping(announced);
-                            history.set_casemapping(announced);
-                            accounts.set_casemapping(announced);
-                            if events.send(Event::CaseMapping(announced)).await.is_err() {
-                                return;
-                            }
-                        }
-                        if !registered && let Some(reason) = registration_refusal(&message) {
-                            refusal = Some(reason);
-                        }
-                        if matches!(message.command, IrcCommand::Response(Response::RPL_WELCOME, _)) {
-                            registered = true;
-                            transcript.registered = true;
-                            negotiation.registered();
-                            diagnostic(&events, started, "Registration completed (001 received).").await;
-                        }
-                        // Reported ahead of the 001's own Registered event;
-                        // the application forgets it only on disconnect.
-                        if history_available != (registered && history_enabled) {
-                            history_available = registered && history_enabled;
-                            if events.send(Event::HistoryAvailable(history_available)).await.is_err() {
-                                return;
-                            }
-                            // Once per connection: which conversations had
-                            // messages while we were away. Their history
-                            // follows through the same queue.
-                            if history_available && !targets_asked {
-                                targets_asked = true;
-                                let now = SystemTime::now();
-                                let since = targets_since.unwrap_or(now - TARGETS_DEFAULT_WINDOW);
-                                history.enqueue_targets(since.max(now - TARGETS_MAX_WINDOW), now);
-                                if !request_history(&client, &events, &transcript, &mut history, registered).await {
-                                    return;
-                                }
-                            }
-                        }
-                        // Subscribe once registered (the draft allows it earlier
-                        // only with `before-connect`), also after a later NEW.
-                        let start = if registered && metadata_enabled {
-                            metadata.start(tokio::time::Instant::now())
-                        } else {
-                            Vec::new()
-                        };
-                        if !start.is_empty() {
-                            for command in start {
-                                let message = IrcMessage::from(command);
-                                let line = transcript.line(&message);
-                                if let Err(error) = client.send(message) {
-                                    let _ = events.send(Event::Disconnected(error_chain(&error))).await;
-                                    return;
-                                }
-                                transcript.record(WireDirection::Sent, line).await;
-                            }
-                            if events.send(Event::MetadataReady).await.is_err() {
-                                return;
-                            }
-                        }
-                        // Enabled after registration (CAP NEW): the channels
-                        // already joined get their history too.
-                        if history_started && registered {
-                            for channel in client.list_channels().unwrap_or_default() {
-                                if let Some(note) = history.enqueue(&channel) {
-                                    diagnostic(&events, started, note).await;
-                                }
-                            }
-                        }
-                        // Our history replies are consumed whole; nothing in
-                        // them is live traffic.
-                        if history_enabled {
-                            match history.observe(&message) {
-                                history::Observed::Unrelated => {}
-                                history::Observed::Consumed => continue,
-                                history::Observed::Finished(finished) => {
-                                    if !history_finished(&events, started, finished).await
-                                        || !request_history(&client, &events, &transcript, &mut history, registered).await
-                                    {
-                                        return;
-                                    }
-                                    continue;
-                                }
-                            }
-                        }
-                        // The server withdrew setname: waiting requests end.
-                        if pending_setname > 0 && !negotiation.enabled(cap::SETNAME) {
-                            pending_setname = 0;
-                            if events.send(Event::RealNameFailed(RealNameFailure::Unsupported)).await.is_err() {
-                                return;
-                            }
-                        }
-                        // SETNAME is never chat: ours is reported, others' are
-                        // not tracked.
-                        match &message.command {
-                            IrcCommand::Raw(verb, args) if verb == "SETNAME" => {
-                                if message.source_nickname() == Some(current_nick.as_str()) {
-                                    pending_setname = pending_setname.saturating_sub(1);
-                                    let realname = args.last().map(String::as_str).unwrap_or_default();
-                                    let event = Event::RealNameChanged {
-                                        realname: peer_avatar::without_mark(realname).to_owned(),
-                                    };
-                                    if events.send(event).await.is_err() { return; }
-                                }
-                                continue;
-                            }
-                            IrcCommand::Raw(verb, args) if verb == "FAIL" && args.first().is_some_and(|c| c == "SETNAME") => {
-                                pending_setname = pending_setname.saturating_sub(1);
-                                let detail = args.last().filter(|_| args.len() > 1).cloned().unwrap_or_default();
-                                let event = Event::RealNameFailed(RealNameFailure::Rejected(detail));
-                                if events.send(event).await.is_err() { return; }
-                                continue;
-                            }
-                            _ => {}
-                        }
-                        if metadata_enabled {
-                            let handled = metadata.observe(&message, tokio::time::Instant::now(), &current_nick, |channel| {
-                                is_joined(&client, casemapping, channel)
-                            });
-                            if let Some(handled) = handled {
-                                for note in handled.notes {
-                                    diagnostic(&events, started, note).await;
-                                }
-                                for event in merged(&mut peers, handled.events) {
-                                    if events.send(event).await.is_err() { return; }
-                                }
-                                continue;
-                            }
-                        }
-                        // CTCP AVATAR and replies to our own lookups are
-                        // not chat and not server lines.
-                        let replayed = replay.replayed(&message);
-                        if let Some(peers) = peers.as_mut()
-                            && let Some(handled) = peers.observe(&message, &current_nick, &roster.presence, replayed, tokio::time::Instant::now())
-                        {
-                            if let Err(detail) = send_all(&client, &transcript,handled.send).await {
-                                let _ = events.send(Event::Disconnected(detail)).await;
-                                return;
-                            }
-                            for note in handled.notes {
-                                diagnostic(&events, started, note).await;
-                            }
-                            for event in handled.events {
-                                if events.send(event).await.is_err() { return; }
-                            }
-                            continue;
-                        }
-                        // Other CTCP requests and replies become one
-                        // readable server line, answered when asked.
-                        if let Some(handled) = ctcp.observe(&message, &current_nick, replayed, tokio::time::Instant::now()) {
-                            if let Err(detail) = send_all(&client, &transcript,handled.send).await {
-                                let _ = events.send(Event::Disconnected(detail)).await;
-                                return;
-                            }
-                            for event in handled.events {
-                                if events.send(event).await.is_err() { return; }
-                            }
-                            continue;
-                        }
-                        // Peer avatars end before metadata's events for the
-                        // same message are merged, so a departed user's
-                        // peer avatar cannot stand in for their metadata.
-                        let mut lifecycle = peers
-                            .as_mut()
-                            .map(|peers| peers.lifecycle(&message, &roster.presence, &current_nick))
-                            .unwrap_or_default();
-                        lifecycle.extend(merged(&mut peers, if metadata_enabled {
-                            if let IrcCommand::PART(channel, _) | IrcCommand::KICK(channel, _, _) = &message.command {
-                                metadata.forget_channel(channel);
-                            }
-                            let handled = metadata.lifecycle(&message, &roster.presence, &current_nick, replayed, tokio::time::Instant::now());
-                            for note in handled.notes {
-                                diagnostic(&events, started, note).await;
-                            }
-                            handled.events
-                        } else {
-                            Vec::new()
-                        }));
-                        let whois_reply = whois.observe(&message);
-                        if history_enabled && message.source_nickname() == Some(current_nick.as_str()) {
-                            match &message.command {
-                                IrcCommand::JOIN(channel, _, _) => {
-                                    if let Some(note) = history.enqueue(channel) {
-                                        diagnostic(&events, started, note).await;
-                                    }
-                                }
-                                IrcCommand::PART(channel, _) => {
-                                    for finished in history.forget(channel) {
-                                        if !history_finished(&events, started, finished).await {
-                                            return;
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        if let IrcCommand::KICK(channel, nickname, _) = &message.command
-                            && nickname == &current_nick
-                        {
-                            for finished in history.forget(channel) {
-                                if !history_finished(&events, started, finished).await {
-                                    return;
-                                }
-                            }
-                        }
-                        // Echoes, ACKs and errors of messages we sent.
-                        let mut echo_events = echoes.expire(tokio::time::Instant::now());
-                        if !negotiation.enabled(cap::ECHO_MESSAGE) && !echoes.outstanding().is_empty() {
-                            echo_events.extend(echoes.reset());
-                        }
-                        let echoed = echoes.observe(&message, &current_nick, negotiation.enabled(cap::LABELED_RESPONSE));
-                        let consumed = echoed.is_some();
-                        echo_events.extend(echoed.unwrap_or_default());
-                        for event in echo_events {
-                            if events.send(event).await.is_err() { return; }
-                        }
-                        if consumed { continue; }
-                        // Our WHOX reply is not a server line.
-                        if track_accounts && let Some(reply) = accounts.observe_who(&message) {
-                            for event in reply {
-                                if events.send(event).await.is_err() { return; }
-                            }
-                            if let Some(command) = accounts.next_who(tokio::time::Instant::now())
-                                && let Err(detail) = send_all(&client, &transcript,vec![command]).await
-                            {
-                                let _ = events.send(Event::Disconnected(detail)).await;
-                                return;
-                            }
-                            continue;
-                        }
-                        let mut account_events = if track_accounts {
-                            accounts.observe(&message, &current_nick, &roster.presence)
-                        } else {
-                            Vec::new()
-                        };
-                        let server_time = tags::server_time(&message, negotiation.enabled(cap::SERVER_TIME));
-                        for event in translate_message(&client, &mut roster, &mut replay, &current_nick, message, server_time, batch_negotiated).into_iter().chain(whois_reply.map(|info| Event::Whois(Box::new(info)))) {
-                            match &event {
-                                Event::Registered { nickname } | Event::NickChanged { nickname } => current_nick = nickname.clone(),
-                                // Someone speaking live may be asked about
-                                // their avatar; nobody else is.
-                                Event::ChannelMessage { sender, replayed: false, .. }
-                                | Event::PrivateMessage { sender, replayed: false, .. } => {
-                                    if let Some(note) = peers.as_mut().and_then(|peers| peers.speaker(sender, &current_nick, &roster.presence)) {
-                                        diagnostic(&events, started, note).await;
-                                    }
-                                }
-                                _ => {}
-                            }
-                            if track_accounts {
-                                match &event {
-                                    Event::Names { channel, users } => account_events.extend(accounts.names(channel, users)),
-                                    Event::Joined { channel } => accounts.joined(channel),
-                                    _ => {}
-                                }
-                            }
-                            if events.send(event).await.is_err() { return; }
-                        }
-                        for event in account_events {
-                            if events.send(event).await.is_err() { return; }
-                        }
-                        if track_accounts
-                            && let Some(command) = accounts.next_who(tokio::time::Instant::now())
-                            && let Err(detail) = send_all(&client, &transcript,vec![command]).await
-                        {
-                            let _ = events.send(Event::Disconnected(detail)).await;
-                            return;
-                        }
-                        for event in lifecycle {
-                            if events.send(event).await.is_err() { return; }
-                        }
-                        // After the JOIN's own events, so the channel exists
-                        // in the application before its history is asked for.
-                        if history_enabled && !request_history(&client, &events, &transcript, &mut history, registered).await {
-                            return;
-                        }
-                    }
-                    // irc consumes 432/433 and reports NoUsableNick because no
-                    // alternate nicknames are configured; the link stays usable.
-                    Some(Err(irc::error::Error::NoUsableNick)) if !registered => {
-                        diagnostic(&events, started,
-                            format!("Server rejected nickname {current_nick} (432/433); waiting for another nickname.")).await;
-                        awaiting_nick = true;
-                        refusal = Some(format!("Nickname {current_nick} is unavailable (432/433)."));
-                        if events.send(Event::NicknameRejected { nickname: current_nick.clone() }).await.is_err() {
-                            return;
-                        }
-                    }
-                    Some(Err(irc::error::Error::NoUsableNick)) => {
-                        if events.send(Event::ServerLine(
-                            "Nickname change rejected: the nickname is in use or invalid (432/433).".into()
-                        )).await.is_err() {
-                            return;
-                        }
-                    }
-                    Some(Err(error)) => {
-                        let detail = stream_error_detail(&error);
-                        diagnostic(&events, started, format!("IRC stream failed: {detail}")).await;
-                        let _ = events.send(refusal.take().map_or(Event::Disconnected(detail), Event::Refused)).await;
-                        break;
-                    }
-                    None => {
-                        diagnostic(&events, started, "Server closed the IRC stream.").await;
-                        let _ = events.send(refusal.take().map_or_else(
-                            || Event::Disconnected("Server closed the connection.".into()),
-                            Event::Refused,
-                        )).await;
-                        break;
-                    }
+                if worker.on_incoming(incoming).await.is_break() {
+                    break;
                 }
             }
             // Deferred avatar synchronizations (774), request timeouts and
             // spaced-out lookups; no timer runs while none is pending.
-            _ = tokio::time::sleep_until(metadata.next_deadline().unwrap_or_else(tokio::time::Instant::now)), if metadata_enabled && metadata.next_deadline().is_some() => {
-                let handled = metadata.tick(tokio::time::Instant::now(), |channel| {
-                    is_joined(&client, casemapping, channel)
-                });
-                for command in handled.send {
-                    let message = IrcMessage::from(command);
-                    let line = transcript.line(&message);
-                    if client.send(message).is_ok() {
-                        transcript.record(WireDirection::Sent, line).await;
-                    }
-                }
-                for note in handled.notes {
-                    diagnostic(&events, started, note).await;
-                }
-                for event in merged(&mut peers, handled.events) {
-                    if events.send(event).await.is_err() { return; }
+            _ = tokio::time::sleep_until(until(worker.metadata_deadline())),
+                if worker.metadata_deadline().is_some() =>
+            {
+                if worker.on_metadata_deadline().await.is_break() {
+                    break;
                 }
             }
             // Report an unconfirmed outgoing message even when the server
             // sends no further lines. No timer runs while none is pending.
-            _ = tokio::time::sleep_until(echoes.next_deadline().unwrap_or_else(tokio::time::Instant::now)), if echoes.next_deadline().is_some() => {
-                for event in echoes.expire(tokio::time::Instant::now()) {
-                    if events.send(event).await.is_err() { return; }
+            _ = tokio::time::sleep_until(until(worker.echo_deadline())),
+                if worker.echo_deadline().is_some() =>
+            {
+                if worker.on_echo_deadline().await.is_break() {
+                    break;
                 }
             }
             // An unanswered history request; no timer runs otherwise.
-            _ = tokio::time::sleep_until(history.next_deadline().unwrap_or_else(tokio::time::Instant::now)), if history_enabled && history.next_deadline().is_some() => {
-                if let Some(history::Observed::Finished(finished)) = history.tick(tokio::time::Instant::now())
-                    && (!history_finished(&events, started, finished).await
-                        || !request_history(&client, &events, &transcript, &mut history, registered).await)
-                {
-                    return;
+            _ = tokio::time::sleep_until(until(worker.history_deadline())),
+                if worker.history_deadline().is_some() =>
+            {
+                if worker.on_history_deadline().await.is_break() {
+                    break;
                 }
             }
             // Peer avatar lookups and queries, spaced out; no timer runs
             // while none is queued or outstanding.
-            _ = tokio::time::sleep_until(peers.as_ref().and_then(peer_avatar::PeerAvatars::next_deadline).unwrap_or_else(tokio::time::Instant::now)), if registered && peers.as_ref().and_then(peer_avatar::PeerAvatars::next_deadline).is_some() => {
-                let handled = peers.as_mut().map(|peers| peers.tick(tokio::time::Instant::now(), &current_nick, &roster.presence)).unwrap_or_default();
-                if let Err(detail) = send_all(&client, &transcript,handled.send).await {
-                    let _ = events.send(Event::Disconnected(detail)).await;
-                    return;
+            _ = tokio::time::sleep_until(until(worker.peer_deadline())),
+                if worker.peer_deadline().is_some() =>
+            {
+                if worker.on_peer_deadline().await.is_break() {
+                    break;
                 }
             }
-            _ = registration_progress.tick(), if !registered && !awaiting_nick => {
-                diagnostic(&events, started, "Still waiting for IRC registration (001 welcome).").await;
+            _ = registration_progress.tick(), if worker.waiting_for_registration() => {
+                worker.note("Still waiting for IRC registration (001 welcome).").await;
             }
-            _ = tokio::time::sleep_until(registration_deadline), if !registered && !awaiting_nick => {
-                diagnostic(&events, started, "IRC registration timed out.").await;
-                let _ = events.send(refusal.take().map_or_else(
-                    || Event::Disconnected("Registration timed out.".into()),
-                    Event::Refused,
-                )).await;
+            _ = tokio::time::sleep_until(worker.registration_deadline),
+                if worker.waiting_for_registration() =>
+            {
+                worker.on_registration_timeout().await;
                 break;
             }
         }
+    }
+}
+
+/// `Break` ends the connection loop.
+type Flow = ControlFlow<()>;
+
+/// The connection loop's state. `run_cancellable` keeps the command
+/// receiver and the IRC stream, which the `select!` polls, and calls one
+/// method here per branch.
+struct Worker {
+    client: Client,
+    events: EventSender,
+    started: Instant,
+    transcript: Transcript,
+    wire_encoding: String,
+    quit_message: String,
+    // The avatar mark is fixed for the connection, also for SETNAME.
+    advertise_avatar: bool,
+    auto_join_channels: Vec<String>,
+    targets_since: Option<SystemTime>,
+    track_accounts: bool,
+    modes_per_line: Arc<AtomicUsize>,
+    pending_setname: usize,
+    peers: Option<peer_avatar::PeerAvatars>,
+    ctcp: ctcp::CtcpReplies,
+    negotiation: cap::CapNegotiation,
+    registration_deadline: tokio::time::Instant,
+    registered: bool,
+    awaiting_nick: bool,
+    refusal: Option<String>,
+    current_nick: String,
+    roster: RosterTracker,
+    whois: WhoisCollector,
+    replay: replay::ReplayTracker,
+    batch_negotiated: bool,
+    metadata: metadata::MetadataState,
+    metadata_enabled: bool,
+    casemapping: CaseMapping,
+    history: history::HistoryRequests,
+    history_enabled: bool,
+    echoes: echo::Echoes,
+    next_local_id: u64,
+    accounts: accounts::Accounts,
+    targets_asked: bool,
+    history_available: bool,
+}
+
+/// The instant a `sleep_until` waits for; it is unused while the branch
+/// has no deadline and its precondition is false.
+fn until(deadline: Option<tokio::time::Instant>) -> tokio::time::Instant {
+    deadline.unwrap_or_else(tokio::time::Instant::now)
+}
+
+impl Worker {
+    async fn note(&self, message: impl Into<String>) {
+        diagnostic(&self.events, self.started, message).await;
+    }
+
+    /// Sends `event` to the application; `Break` if it is gone.
+    async fn emit(&self, event: Event) -> Flow {
+        match self.events.send(event).await {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(_) => ControlFlow::Break(()),
+        }
+    }
+
+    async fn emit_all(&self, events: impl IntoIterator<Item = Event>) -> Flow {
+        for event in events {
+            self.emit(event).await?;
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Sends `events` after merging them with the peer avatars.
+    async fn emit_merged(&mut self, events: Vec<Event>) -> Flow {
+        let events = merged(&mut self.peers, events);
+        self.emit_all(events).await
+    }
+
+    /// Reports a failed link and ends the loop.
+    async fn disconnect(&self, detail: String) -> Flow {
+        let _ = self.events.send(Event::Disconnected(detail)).await;
+        ControlFlow::Break(())
+    }
+
+    /// Sends commands the worker made itself; a failed link ends the loop.
+    async fn send_commands(&self, commands: Vec<IrcCommand>) -> Flow {
+        match send_all(&self.client, &self.transcript, commands).await {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(detail) => self.disconnect(detail).await,
+        }
+    }
+
+    async fn finish_history(&self, finished: history::Finished) -> Flow {
+        if history_finished(&self.events, self.started, finished).await {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
+        }
+    }
+
+    async fn send_next_history(&mut self) -> Flow {
+        let sent = request_history(
+            &self.client,
+            &self.events,
+            &self.transcript,
+            &mut self.history,
+            self.registered,
+        )
+        .await;
+        if sent {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
+        }
+    }
+
+    fn waiting_for_registration(&self) -> bool {
+        !self.registered && !self.awaiting_nick
+    }
+
+    fn metadata_deadline(&self) -> Option<tokio::time::Instant> {
+        self.metadata
+            .next_deadline()
+            .filter(|_| self.metadata_enabled)
+    }
+
+    fn echo_deadline(&self) -> Option<tokio::time::Instant> {
+        self.echoes.next_deadline()
+    }
+
+    fn history_deadline(&self) -> Option<tokio::time::Instant> {
+        self.history
+            .next_deadline()
+            .filter(|_| self.history_enabled)
+    }
+
+    fn peer_deadline(&self) -> Option<tokio::time::Instant> {
+        self.peers
+            .as_ref()
+            .and_then(peer_avatar::PeerAvatars::next_deadline)
+            .filter(|_| self.registered)
+    }
+
+    async fn on_command(&mut self, command: Option<Outgoing>, stream: &mut ClientStream) -> Flow {
+        let Some(command) = command else {
+            return ControlFlow::Break(());
+        };
+        match command {
+            Outgoing::Message {
+                target,
+                text,
+                display_text,
+                notice,
+            } => self.send_message(target, text, display_text, notice).await,
+            Outgoing::Raw(message) => self.send_raw(message).await,
+            Outgoing::OwnAvatar { request, url } => self.set_own_avatar(request, url).await,
+            Outgoing::ShareAvatar(url) => {
+                if let Some(peers) = self.peers.as_mut() {
+                    peers.set_share(url);
+                }
+                ControlFlow::Continue(())
+            }
+            Outgoing::SetName(realname) => self.set_name(realname).await,
+            Outgoing::OlderHistory {
+                channel,
+                request,
+                reference,
+                limit,
+            } => self.older_history(channel, request, reference, limit).await,
+            outgoing @ (Outgoing::Quit | Outgoing::QuitWith(_)) => {
+                let reason = match outgoing {
+                    Outgoing::QuitWith(reason) => reason,
+                    _ => self.quit_message.clone(),
+                };
+                self.quit(reason, stream).await
+            }
+        }
+    }
+
+    async fn send_message(
+        &mut self,
+        target: String,
+        text: String,
+        display_text: String,
+        notice: bool,
+    ) -> Flow {
+        // With echo-message the local line is confirmed by
+        // the server's echo; a label (labeled-response)
+        // names it exactly.
+        let shown = echo_text(&target, display_text);
+        self.next_local_id += 1;
+        let local_id = self.next_local_id;
+        let label = if self.registered && self.negotiation.enabled(cap::ECHO_MESSAGE) {
+            self.echoes.track(
+                local_id,
+                &target,
+                notice,
+                &text,
+                shown != text,
+                self.negotiation.enabled(cap::LABELED_RESPONSE),
+            )
+        } else {
+            None
+        };
+        let tracked = label.is_some();
+        let message = if notice {
+            IrcMessage::from(IrcCommand::NOTICE(target.clone(), text))
+        } else {
+            IrcMessage::from(IrcCommand::PRIVMSG(target.clone(), text))
+        };
+        let message = echo::with_label(message, label.flatten());
+        let line = self.transcript.line(&message);
+        let result = validate_tagged_wire(&message, &self.wire_encoding)
+            .and_then(|_| self.client.send(message).map_err(|error| error.to_string()));
+        let event = match result {
+            Ok(()) => {
+                self.transcript.record(WireDirection::Sent, line).await;
+                Event::OutgoingAccepted {
+                    local_id: tracked.then_some(local_id),
+                    channel: target,
+                    text: shown,
+                    notice,
+                }
+            }
+            Err(error) => {
+                self.echoes.untrack(local_id);
+                Event::ServerLine(format!("Send failed: {error}"))
+            }
+        };
+        self.emit(event).await
+    }
+
+    async fn send_raw(&mut self, message: IrcMessage) -> Flow {
+        let line = self.transcript.line(&message);
+        let retry_nick = match &message.command {
+            IrcCommand::NICK(nickname) if !self.registered => Some(nickname.clone()),
+            _ => None,
+        };
+        let result = validate_wire(&message.to_string(), &self.wire_encoding)
+            .and_then(|_| self.client.send(message).map_err(|error| error.to_string()));
+        match result {
+            Ok(()) => {
+                self.transcript.record(WireDirection::Sent, line).await;
+                if let Some(nickname) = retry_nick {
+                    self.current_nick = nickname;
+                    self.awaiting_nick = false;
+                    self.refusal = None;
+                    self.registration_deadline = tokio::time::Instant::now() + REGISTRATION_TIMEOUT;
+                }
+                ControlFlow::Continue(())
+            }
+            Err(error) => {
+                self.emit(Event::ServerLine(format!("Command failed: {error}")))
+                    .await
+            }
+        }
+    }
+
+    async fn set_own_avatar(&mut self, request: u64, url: Option<String>) -> Flow {
+        let queued = self.metadata.request_own(
+            request,
+            url.as_deref(),
+            self.registered && self.metadata_enabled,
+            tokio::time::Instant::now(),
+        );
+        match queued {
+            Ok(command) => {
+                let message = IrcMessage::from(command);
+                let line = self.transcript.line(&message);
+                if let Err(error) = self.client.send(message) {
+                    return self.disconnect(error_chain(&error)).await;
+                }
+                self.transcript.record(WireDirection::Sent, line).await;
+                ControlFlow::Continue(())
+            }
+            Err(failure) => self.emit(Event::OwnAvatarFailed { request, failure }).await,
+        }
+    }
+
+    async fn set_name(&mut self, realname: String) -> Flow {
+        let failure = if !self.registered || !self.negotiation.enabled(cap::SETNAME) {
+            Some(RealNameFailure::Unsupported)
+        } else if self.pending_setname >= MAX_PENDING_SETNAME {
+            Some(RealNameFailure::Busy)
+        } else {
+            let message = IrcMessage::from(IrcCommand::Raw(
+                "SETNAME".into(),
+                vec![peer_avatar::realname(
+                    base_realname(&realname),
+                    self.advertise_avatar,
+                )],
+            ));
+            let line = self.transcript.line(&message);
+            match validate_wire(&message.to_string(), &self.wire_encoding)
+                .and_then(|_| self.client.send(message).map_err(|error| error.to_string()))
+            {
+                Ok(()) => {
+                    self.pending_setname += 1;
+                    self.transcript.record(WireDirection::Sent, line).await;
+                    None
+                }
+                Err(error) => Some(RealNameFailure::Rejected(error)),
+            }
+        };
+        match failure {
+            Some(failure) => self.emit(Event::RealNameFailed(failure)).await,
+            None => ControlFlow::Continue(()),
+        }
+    }
+
+    async fn older_history(
+        &mut self,
+        channel: String,
+        request: u64,
+        reference: MessageReference,
+        limit: usize,
+    ) -> Flow {
+        let queued = if self.registered && self.history_enabled {
+            self.history
+                .enqueue_older(&channel, request, &reference, limit)
+        } else {
+            Err(history::Finished::failed_older(channel, request))
+        };
+        match queued {
+            Ok(()) => self.send_next_history().await,
+            Err(finished) => self.finish_history(finished).await,
+        }
+    }
+
+    async fn quit(&mut self, reason: String, stream: &mut ClientStream) -> Flow {
+        let quit = IrcMessage::from(IrcCommand::QUIT(Some(reason)));
+        let line = self.transcript.line(&quit);
+        if self.client.send(quit).is_ok() {
+            self.transcript.record(WireDirection::Sent, line).await;
+        }
+        // Polling the stream writes the queue, QUIT included. The server
+        // closes after QUIT, which ends the stream; reading (and discarding)
+        // up to that point leaves nothing unread, since dropping a socket
+        // with unread data sends RST and can discard a QUIT not yet sent.
+        // EOF is taken as send completion: the server is assumed to close
+        // only after receiving QUIT. A close before that is the server's own
+        // doing, and a write after it would be reset, so waiting is futile.
+        let _ = tokio::time::timeout(QUIT_FLUSH_LIMIT, async {
+            while let Some(Ok(_)) = stream.next().await {}
+        })
+        .await;
+        let _ = self
+            .events
+            .send(Event::Closed(USER_DISCONNECT.into()))
+            .await;
+        ControlFlow::Break(())
+    }
+
+    async fn on_incoming(
+        &mut self,
+        incoming: Option<Result<IrcMessage, irc::error::Error>>,
+    ) -> Flow {
+        match incoming {
+            Some(Ok(message)) => self.on_irc_message(message).await,
+            // irc consumes 432/433 and reports NoUsableNick because no
+            // alternate nicknames are configured; the link stays usable.
+            Some(Err(irc::error::Error::NoUsableNick)) if !self.registered => {
+                self.note(format!(
+                    "Server rejected nickname {} (432/433); waiting for another nickname.",
+                    self.current_nick
+                ))
+                .await;
+                self.awaiting_nick = true;
+                self.refusal = Some(format!(
+                    "Nickname {} is unavailable (432/433).",
+                    self.current_nick
+                ));
+                let nickname = self.current_nick.clone();
+                self.emit(Event::NicknameRejected { nickname }).await
+            }
+            Some(Err(irc::error::Error::NoUsableNick)) => {
+                self.emit(Event::ServerLine(
+                    "Nickname change rejected: the nickname is in use or invalid (432/433).".into(),
+                ))
+                .await
+            }
+            Some(Err(error)) => {
+                let detail = stream_error_detail(&error);
+                self.note(format!("IRC stream failed: {detail}")).await;
+                let event = self
+                    .refusal
+                    .take()
+                    .map_or(Event::Disconnected(detail), Event::Refused);
+                let _ = self.events.send(event).await;
+                ControlFlow::Break(())
+            }
+            None => {
+                self.note("Server closed the IRC stream.").await;
+                let event = self.refusal.take().map_or_else(
+                    || Event::Disconnected("Server closed the connection.".into()),
+                    Event::Refused,
+                );
+                let _ = self.events.send(event).await;
+                ControlFlow::Break(())
+            }
+        }
+    }
+
+    async fn on_irc_message(&mut self, message: IrcMessage) -> Flow {
+        self.record_received(&message).await;
+        if !self.wire_encoding.eq_ignore_ascii_case("UTF-8") && requires_utf8(&message) {
+            let _ = self
+                .events
+                .send(Event::Refused(
+                    "Server requires UTF-8 (UTF8ONLY); change this server's character \
+                     encoding to UTF-8."
+                        .into(),
+                ))
+                .await;
+            return ControlFlow::Break(());
+        }
+        let history_started = self.negotiate(&message).await?;
+        self.track_registration(&message, history_started).await?;
+        let replayed = self.replay.replayed(&message);
+        if self.consume_own_replies(&message).await?
+            || self.consume_avatar_and_ctcp(&message, replayed).await?
+        {
+            return ControlFlow::Continue(());
+        }
+        self.deliver(message, replayed).await
+    }
+
+    /// Records the line in the transcript, with the replies the library
+    /// queued for it, and explains registration progress.
+    async fn record_received(&self, message: &IrcMessage) {
+        self.transcript
+            .record(WireDirection::Received, self.transcript.line(message))
+            .await;
+        // irc's transport enqueues PONG before exposing PING here.
+        if let IrcCommand::PING(data, _) = &message.command {
+            let pong = IrcMessage::from(IrcCommand::PONG(data.clone(), None));
+            self.transcript
+                .record(WireDirection::Sent, self.transcript.line(&pong))
+                .await;
+        }
+        // irc's client state enqueues configured JOINs on end-of-MOTD.
+        if matches!(
+            message.command,
+            IrcCommand::Response(Response::RPL_ENDOFMOTD | Response::ERR_NOMOTD, _)
+        ) {
+            for channel in &self.auto_join_channels {
+                let join = IrcMessage::from(IrcCommand::JOIN(channel.clone(), None, None));
+                self.transcript
+                    .record(WireDirection::Sent, self.transcript.line(&join))
+                    .await;
+            }
+        }
+        if !self.registered {
+            match &message.command {
+                IrcCommand::Response(response, _) => {
+                    self.note(format!("Server replied {response:?}.")).await
+                }
+                IrcCommand::CAP(_, subcommand, _, _) => {
+                    self.note(format!("Server CAP response: {subcommand:?}."))
+                        .await
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Feeds the capability negotiation and what depends on the enabled
+    /// capabilities. `Continue` says whether chathistory was just enabled.
+    async fn negotiate(&mut self, message: &IrcMessage) -> ControlFlow<(), bool> {
+        match self.negotiation.observe(message) {
+            Ok(step) => {
+                for note in step.notes {
+                    self.note(note).await;
+                }
+                self.send_commands(step.send).await?;
+            }
+            Err(error) => {
+                let _ = self.events.send(Event::Refused(error)).await;
+                return ControlFlow::Break(());
+            }
+        }
+        // CAP DEL (or ACK -batch) withdrew batch: forget open batches.
+        if self.batch_negotiated && !self.negotiation.enabled(cap::BATCH) {
+            self.replay.reset();
+        }
+        self.batch_negotiated = self.negotiation.enabled(cap::BATCH);
+        // Metadata stopped (its own DEL, or batch went away):
+        // every avatar of this connection becomes unknown.
+        if self.metadata_enabled && !self.negotiation.enabled(cap::METADATA) {
+            let reset = self
+                .metadata
+                .reset()
+                .into_iter()
+                .chain([Event::AvatarsReset])
+                .collect();
+            self.emit_merged(reset).await?;
+        }
+        self.metadata_enabled = self.negotiation.enabled(cap::METADATA);
+        // chathistory went away (its own DEL, or batch): the
+        // request being answered ends without lines.
+        if self.history_enabled && !self.negotiation.enabled(cap::CHATHISTORY) {
+            for finished in self.history.reset() {
+                self.finish_history(finished).await?;
+            }
+        }
+        let history_started = !self.history_enabled && self.negotiation.enabled(cap::CHATHISTORY);
+        self.history_enabled = self.negotiation.enabled(cap::CHATHISTORY);
+        self.history.isupport(message);
+        modes::observe(message, &self.modes_per_line);
+        self.accounts.isupport(message);
+        if let Some(announced) = advertised_casemapping(message)
+            && announced != self.casemapping
+        {
+            self.casemapping = announced;
+            self.metadata.set_casemapping(announced);
+            self.roster.presence.set_casemapping(announced);
+            self.history.set_casemapping(announced);
+            self.accounts.set_casemapping(announced);
+            self.emit(Event::CaseMapping(announced)).await?;
+        }
+        ControlFlow::Continue(history_started)
+    }
+
+    /// Registration, and the work that follows from it: history, metadata
+    /// subscription.
+    async fn track_registration(&mut self, message: &IrcMessage, history_started: bool) -> Flow {
+        if !self.registered
+            && let Some(reason) = registration_refusal(message)
+        {
+            self.refusal = Some(reason);
+        }
+        if matches!(
+            message.command,
+            IrcCommand::Response(Response::RPL_WELCOME, _)
+        ) {
+            self.registered = true;
+            self.transcript.registered = true;
+            self.negotiation.registered();
+            self.note("Registration completed (001 received).").await;
+        }
+        // Reported ahead of the 001's own Registered event;
+        // the application forgets it only on disconnect.
+        if self.history_available != (self.registered && self.history_enabled) {
+            self.history_available = self.registered && self.history_enabled;
+            self.emit(Event::HistoryAvailable(self.history_available))
+                .await?;
+            // Once per connection: which conversations had
+            // messages while we were away. Their history
+            // follows through the same queue.
+            if self.history_available && !self.targets_asked {
+                self.targets_asked = true;
+                let now = SystemTime::now();
+                let since = self.targets_since.unwrap_or(now - TARGETS_DEFAULT_WINDOW);
+                self.history
+                    .enqueue_targets(since.max(now - TARGETS_MAX_WINDOW), now);
+                self.send_next_history().await?;
+            }
+        }
+        // Subscribe once registered (the draft allows it earlier
+        // only with `before-connect`), also after a later NEW.
+        let start = if self.registered && self.metadata_enabled {
+            self.metadata.start(tokio::time::Instant::now())
+        } else {
+            Vec::new()
+        };
+        if !start.is_empty() {
+            self.send_commands(start).await?;
+            self.emit(Event::MetadataReady).await?;
+        }
+        // Enabled after registration (CAP NEW): the channels
+        // already joined get their history too.
+        if history_started && self.registered {
+            for channel in self.client.list_channels().unwrap_or_default() {
+                if let Some(note) = self.history.enqueue(&channel) {
+                    self.note(note).await;
+                }
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Replies to our own requests (history, SETNAME). `Continue(true)`
+    /// means the message is not live traffic and goes no further.
+    async fn consume_own_replies(&mut self, message: &IrcMessage) -> ControlFlow<(), bool> {
+        // Our history replies are consumed whole; nothing in
+        // them is live traffic.
+        if self.history_enabled {
+            match self.history.observe(message) {
+                history::Observed::Unrelated => {}
+                history::Observed::Consumed => return ControlFlow::Continue(true),
+                history::Observed::Finished(finished) => {
+                    self.finish_history(finished).await?;
+                    self.send_next_history().await?;
+                    return ControlFlow::Continue(true);
+                }
+            }
+        }
+        // The server withdrew setname: waiting requests end.
+        if self.pending_setname > 0 && !self.negotiation.enabled(cap::SETNAME) {
+            self.pending_setname = 0;
+            self.emit(Event::RealNameFailed(RealNameFailure::Unsupported))
+                .await?;
+        }
+        // SETNAME is never chat: ours is reported, others' are
+        // not tracked.
+        match &message.command {
+            IrcCommand::Raw(verb, args) if verb == "SETNAME" => {
+                if message.source_nickname() == Some(self.current_nick.as_str()) {
+                    self.pending_setname = self.pending_setname.saturating_sub(1);
+                    let realname = args.last().map(String::as_str).unwrap_or_default();
+                    let event = Event::RealNameChanged {
+                        realname: peer_avatar::without_mark(realname).to_owned(),
+                    };
+                    self.emit(event).await?;
+                }
+                ControlFlow::Continue(true)
+            }
+            IrcCommand::Raw(verb, args)
+                if verb == "FAIL" && args.first().is_some_and(|c| c == "SETNAME") =>
+            {
+                self.pending_setname = self.pending_setname.saturating_sub(1);
+                let detail = args
+                    .last()
+                    .filter(|_| args.len() > 1)
+                    .cloned()
+                    .unwrap_or_default();
+                self.emit(Event::RealNameFailed(RealNameFailure::Rejected(detail)))
+                    .await?;
+                ControlFlow::Continue(true)
+            }
+            _ => ControlFlow::Continue(false),
+        }
+    }
+
+    /// Avatar metadata, CTCP AVATAR and other CTCP, which are not chat.
+    /// `Continue(true)` means the message goes no further.
+    async fn consume_avatar_and_ctcp(
+        &mut self,
+        message: &IrcMessage,
+        replayed: bool,
+    ) -> ControlFlow<(), bool> {
+        if self.metadata_enabled {
+            let handled = self.metadata.observe(
+                message,
+                tokio::time::Instant::now(),
+                &self.current_nick,
+                |channel| is_joined(&self.client, self.casemapping, channel),
+            );
+            if let Some(handled) = handled {
+                for note in handled.notes {
+                    self.note(note).await;
+                }
+                self.emit_merged(handled.events).await?;
+                return ControlFlow::Continue(true);
+            }
+        }
+        // CTCP AVATAR and replies to our own lookups are
+        // not chat and not server lines.
+        if let Some(peers) = self.peers.as_mut()
+            && let Some(handled) = peers.observe(
+                message,
+                &self.current_nick,
+                &self.roster.presence,
+                replayed,
+                tokio::time::Instant::now(),
+            )
+        {
+            self.send_commands(handled.send).await?;
+            for note in handled.notes {
+                self.note(note).await;
+            }
+            self.emit_all(handled.events).await?;
+            return ControlFlow::Continue(true);
+        }
+        // Other CTCP requests and replies become one
+        // readable server line, answered when asked.
+        if let Some(handled) = self.ctcp.observe(
+            message,
+            &self.current_nick,
+            replayed,
+            tokio::time::Instant::now(),
+        ) {
+            self.send_commands(handled.send).await?;
+            self.emit_all(handled.events).await?;
+            return ControlFlow::Continue(true);
+        }
+        ControlFlow::Continue(false)
+    }
+
+    /// Turns the message into events for the application.
+    async fn deliver(&mut self, message: IrcMessage, replayed: bool) -> Flow {
+        // Peer avatars end before metadata's events for the
+        // same message are merged, so a departed user's
+        // peer avatar cannot stand in for their metadata.
+        let mut lifecycle = self
+            .peers
+            .as_mut()
+            .map(|peers| peers.lifecycle(&message, &self.roster.presence, &self.current_nick))
+            .unwrap_or_default();
+        let metadata_events = if self.metadata_enabled {
+            if let IrcCommand::PART(channel, _) | IrcCommand::KICK(channel, _, _) = &message.command
+            {
+                self.metadata.forget_channel(channel);
+            }
+            let handled = self.metadata.lifecycle(
+                &message,
+                &self.roster.presence,
+                &self.current_nick,
+                replayed,
+                tokio::time::Instant::now(),
+            );
+            for note in handled.notes {
+                self.note(note).await;
+            }
+            handled.events
+        } else {
+            Vec::new()
+        };
+        lifecycle.extend(merged(&mut self.peers, metadata_events));
+        let whois_reply = self.whois.observe(&message);
+        self.track_own_membership(&message).await?;
+        // Echoes, ACKs and errors of messages we sent.
+        if self.observe_echoes(&message).await? {
+            return ControlFlow::Continue(());
+        }
+        // Our WHOX reply is not a server line.
+        if self.track_accounts
+            && let Some(reply) = self.accounts.observe_who(&message)
+        {
+            self.emit_all(reply).await?;
+            if let Some(command) = self.accounts.next_who(tokio::time::Instant::now()) {
+                self.send_commands(vec![command]).await?;
+            }
+            return ControlFlow::Continue(());
+        }
+        let mut account_events = if self.track_accounts {
+            self.accounts
+                .observe(&message, &self.current_nick, &self.roster.presence)
+        } else {
+            Vec::new()
+        };
+        let server_time = tags::server_time(&message, self.negotiation.enabled(cap::SERVER_TIME));
+        let translated = translate_message(
+            &self.client,
+            &mut self.roster,
+            &mut self.replay,
+            &self.current_nick,
+            message,
+            server_time,
+            self.batch_negotiated,
+        );
+        for event in translated
+            .into_iter()
+            .chain(whois_reply.map(|info| Event::Whois(Box::new(info))))
+        {
+            match &event {
+                Event::Registered { nickname } | Event::NickChanged { nickname } => {
+                    self.current_nick = nickname.clone()
+                }
+                // Someone speaking live may be asked about
+                // their avatar; nobody else is.
+                Event::ChannelMessage {
+                    sender,
+                    replayed: false,
+                    ..
+                }
+                | Event::PrivateMessage {
+                    sender,
+                    replayed: false,
+                    ..
+                } => {
+                    let note = self.peers.as_mut().and_then(|peers| {
+                        peers.speaker(sender, &self.current_nick, &self.roster.presence)
+                    });
+                    if let Some(note) = note {
+                        self.note(note).await;
+                    }
+                }
+                _ => {}
+            }
+            if self.track_accounts {
+                match &event {
+                    Event::Names { channel, users } => {
+                        account_events.extend(self.accounts.names(channel, users))
+                    }
+                    Event::Joined { channel } => self.accounts.joined(channel),
+                    _ => {}
+                }
+            }
+            self.emit(event).await?;
+        }
+        self.emit_all(account_events).await?;
+        if self.track_accounts
+            && let Some(command) = self.accounts.next_who(tokio::time::Instant::now())
+        {
+            self.send_commands(vec![command]).await?;
+        }
+        self.emit_all(lifecycle).await?;
+        // After the JOIN's own events, so the channel exists
+        // in the application before its history is asked for.
+        if self.history_enabled {
+            self.send_next_history().await?;
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Our own joins, parts and kicks decide which channels have history.
+    async fn track_own_membership(&mut self, message: &IrcMessage) -> Flow {
+        if self.history_enabled && message.source_nickname() == Some(self.current_nick.as_str()) {
+            match &message.command {
+                IrcCommand::JOIN(channel, _, _) => {
+                    if let Some(note) = self.history.enqueue(channel) {
+                        self.note(note).await;
+                    }
+                }
+                IrcCommand::PART(channel, _) => {
+                    for finished in self.history.forget(channel) {
+                        self.finish_history(finished).await?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let IrcCommand::KICK(channel, nickname, _) = &message.command
+            && nickname == &self.current_nick
+        {
+            for finished in self.history.forget(channel) {
+                self.finish_history(finished).await?;
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// `Continue(true)` means the server's echo or ACK consumed the message.
+    async fn observe_echoes(&mut self, message: &IrcMessage) -> ControlFlow<(), bool> {
+        let mut echo_events = self.echoes.expire(tokio::time::Instant::now());
+        if !self.negotiation.enabled(cap::ECHO_MESSAGE) && !self.echoes.outstanding().is_empty() {
+            echo_events.extend(self.echoes.reset());
+        }
+        let echoed = self.echoes.observe(
+            message,
+            &self.current_nick,
+            self.negotiation.enabled(cap::LABELED_RESPONSE),
+        );
+        let consumed = echoed.is_some();
+        echo_events.extend(echoed.unwrap_or_default());
+        self.emit_all(echo_events).await?;
+        ControlFlow::Continue(consumed)
+    }
+
+    async fn on_metadata_deadline(&mut self) -> Flow {
+        let handled = self.metadata.tick(tokio::time::Instant::now(), |channel| {
+            is_joined(&self.client, self.casemapping, channel)
+        });
+        for command in handled.send {
+            let message = IrcMessage::from(command);
+            let line = self.transcript.line(&message);
+            if self.client.send(message).is_ok() {
+                self.transcript.record(WireDirection::Sent, line).await;
+            }
+        }
+        for note in handled.notes {
+            self.note(note).await;
+        }
+        self.emit_merged(handled.events).await
+    }
+
+    async fn on_echo_deadline(&mut self) -> Flow {
+        let expired = self.echoes.expire(tokio::time::Instant::now());
+        self.emit_all(expired).await
+    }
+
+    async fn on_history_deadline(&mut self) -> Flow {
+        if let Some(history::Observed::Finished(finished)) =
+            self.history.tick(tokio::time::Instant::now())
+        {
+            self.finish_history(finished).await?;
+            self.send_next_history().await?;
+        }
+        ControlFlow::Continue(())
+    }
+
+    async fn on_peer_deadline(&mut self) -> Flow {
+        let handled = self
+            .peers
+            .as_mut()
+            .map(|peers| {
+                peers.tick(
+                    tokio::time::Instant::now(),
+                    &self.current_nick,
+                    &self.roster.presence,
+                )
+            })
+            .unwrap_or_default();
+        self.send_commands(handled.send).await
+    }
+
+    async fn on_registration_timeout(&mut self) {
+        self.note("IRC registration timed out.").await;
+        let event = self.refusal.take().map_or_else(
+            || Event::Disconnected("Registration timed out.".into()),
+            Event::Refused,
+        );
+        let _ = self.events.send(event).await;
     }
 }
 
