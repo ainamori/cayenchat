@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-use super::{ChatWindow, MemberMenu};
+use super::{ChatWindow, MemberMenu, Worker};
 use cayenchat_irc_core::Event;
 use cayenchat_model::NetworkId;
 use gpui::{TestAppContext, point, px};
@@ -25,7 +25,7 @@ fn right_click_on_self_closes_the_peer_menu(cx: &mut TestAppContext) {
             vec![Event::Registered {
                 nickname: "alice".into(),
             }],
-            false,
+            Worker::Running,
             cx,
         );
         chat.member_menu = Some(MemberMenu {

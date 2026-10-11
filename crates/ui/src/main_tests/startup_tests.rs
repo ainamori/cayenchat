@@ -91,7 +91,8 @@ fn every_server_marked_for_startup_connects_with_its_own_identity() {
 
 #[test]
 fn irc_metadata_keeps_a_usable_account_only() {
-    let meta = |account| super::irc_message_meta(None, None, account, false);
+    let meta =
+        |account| super::irc_message_meta(None, None, account, cayenchat_model::Provenance::Live);
     assert_eq!(meta(Some("alice")).account.unwrap().as_str(), "alice");
     assert!(meta(Some("*")).account.is_none());
     assert!(meta(Some("")).account.is_none());

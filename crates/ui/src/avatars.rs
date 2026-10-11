@@ -306,7 +306,7 @@ mod tests {
     use cayenchat_model::NetworkId;
     use gpui::{Entity, Focusable, Pixels, TestAppContext, VisualTestContext};
 
-    use crate::ChatWindow;
+    use crate::{ChatWindow, Worker};
 
     const BOB: &str = "https://avatars.example.com/u/bob?s={size}";
     const BOB_URL: &str = "https://avatars.example.com/u/bob?s=32";
@@ -404,7 +404,7 @@ mod tests {
 
     fn events(chat: &Entity<ChatWindow>, cx: &mut VisualTestContext, batch: Vec<Event>) {
         chat.update(cx, |chat, cx| {
-            chat.handle_events(NetworkId(1), batch, false, cx);
+            chat.handle_events(NetworkId(1), batch, Worker::Running, cx);
         });
         cx.run_until_parked();
     }

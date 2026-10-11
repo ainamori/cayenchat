@@ -17,7 +17,30 @@ use cayenchat_model::{
     Network, NetworkId, Provenance, TimeOfDay, Timestamp, display, names::CaseMapping,
 };
 use timeline::DuplicateFilter;
-pub use timeline::MessageMeta;
+pub use timeline::{Kind, MessageMeta};
+
+/// Whether adding a message marks its conversation unread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unread {
+    Mark,
+    Leave,
+}
+
+/// What [`AppState::private_conversation`] does when the peer has no
+/// conversation yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Missing {
+    Create,
+    Ignore,
+}
+
+/// What a timeline item is, for [`new_message`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Line {
+    Text,
+    /// A nick change, a quit, a note.
+    Activity,
+}
 
 /// Upper bound on conversations per network, so a hostile server or bouncer
 /// cannot grow memory without limit by announcing endless channel joins.
@@ -836,7 +859,7 @@ impl AppState {
         if !self.networks.iter().any(|network| network.id == id) {
             return;
         }
-        let mut message = new_message("server".into(), text, false, meta);
+        let mut message = new_message("server".into(), text, Line::Text, meta);
         message.sequence = self.next_sequence();
         let messages = self.server_messages.entry(id).or_default();
         push_bounded(messages, message);
@@ -892,8 +915,8 @@ impl AppState {
     }
 
     /// The private conversation with `peer_key` on `network`, named `name`
-    /// (the peer's current display name). It is created when `create` is
-    /// set and the network has room; `None` means the caller keeps the
+    /// (the peer's current display name). It is created when `missing` is
+    /// [`Missing::Create`] and the network has room; `None` means the caller keeps the
     /// message in the server log. An existing conversation takes `name`,
     /// so it follows the spelling the peer uses now.
     pub fn private_conversation(
@@ -901,7 +924,7 @@ impl AppState {
         network: NetworkId,
         peer_key: &str,
         name: &str,
-        create: bool,
+        missing: Missing,
     ) -> Option<ConversationId> {
         if let Some(id) = self.private_id(network, peer_key) {
             if let Some(conversation) = self.conversation_mut(id)
@@ -911,7 +934,7 @@ impl AppState {
             }
             return Some(id);
         }
-        if !create
+        if missing == Missing::Ignore
             || self
                 .conversations
                 .iter()
@@ -984,24 +1007,25 @@ impl AppState {
         true
     }
 
-    /// Adds a message to conversation `id` (any kind). `unread` marks it
-    /// unread when it is not selected. Returns `false` for a duplicate.
+    /// Adds a message to conversation `id` (any kind). [`Unread::Mark`]
+    /// marks it unread when it is not selected. Returns `false` for a
+    /// duplicate.
     pub fn append_conversation_message(
         &mut self,
         id: ConversationId,
         sender: &str,
         text: &str,
-        notice: bool,
+        kind: Kind,
         meta: MessageMeta,
-        unread: bool,
+        unread: Unread,
     ) -> bool {
-        let (text, meta) = notice_marked(text, notice, meta);
-        let mut message = new_message(sender.into(), text, false, meta);
-        message.notice = notice;
+        let (text, meta) = notice_marked(text, kind, meta);
+        let mut message = new_message(sender.into(), text, Line::Text, meta);
+        message.notice = kind.is_notice();
         if !self.append_to_conversation(id, message) {
             return false;
         }
-        if unread {
+        if unread == Unread::Mark {
             self.mark_unread(id);
         }
         true
@@ -1011,7 +1035,7 @@ impl AppState {
     pub fn append_conversation_activity(&mut self, id: ConversationId, text: String) {
         self.append_to_conversation(
             id,
-            new_message(String::new(), text, true, MessageMeta::live()),
+            new_message(String::new(), text, Line::Activity, MessageMeta::live()),
         );
     }
 
@@ -1169,16 +1193,16 @@ impl AppState {
         name: &str,
         sender: &str,
         text: &str,
-        notice: bool,
-        replayed: bool,
+        kind: Kind,
+        provenance: Provenance,
     ) {
         self.append_channel_message_at(
             network,
             name,
             sender,
             text,
-            notice,
-            MessageMeta::replayed(replayed),
+            kind,
+            MessageMeta::with_provenance(provenance),
         );
     }
 
@@ -1193,20 +1217,20 @@ impl AppState {
         name: &str,
         sender: &str,
         text: &str,
-        notice: bool,
+        kind: Kind,
         meta: MessageMeta,
     ) -> bool {
         // Only joined or configured channels get a conversation; anything else
         // a server sends lands in the bounded server log instead.
-        let (text, meta) = notice_marked(text, notice, meta);
+        let (text, meta) = notice_marked(text, kind, meta);
         let Some(id) = self.channel_id(network, name) else {
             let prefix = format!("{name} <{sender}> ");
             let meta = meta.after_prefix(prefix.len());
             self.append_server_message_at(network, prefix + &text, meta);
             return true;
         };
-        let mut message = new_message(sender.into(), text, false, meta);
-        message.notice = notice;
+        let mut message = new_message(sender.into(), text, Line::Text, meta);
+        message.notice = kind.is_notice();
         if !self.append_to_conversation(id, message) {
             return false;
         }
@@ -1226,7 +1250,7 @@ impl AppState {
         meta: MessageMeta,
     ) {
         if let Some(id) = self.channel_id(network, name) {
-            self.append_to_conversation(id, new_message(String::new(), text, true, meta));
+            self.append_to_conversation(id, new_message(String::new(), text, Line::Activity, meta));
         }
     }
 
@@ -1246,7 +1270,7 @@ impl AppState {
         id: ConversationId,
         sequence: u64,
         text: Option<String>,
-        notice: bool,
+        kind: Kind,
         meta: MessageMeta,
     ) -> bool {
         let Some(conversation) = self.conversation_mut(id) else {
@@ -1261,14 +1285,14 @@ impl AppState {
         let message = &mut conversation.messages[index];
         if let Some(text) = text {
             let text = display::neutralize_bidi_owned(text);
-            message.text = if notice {
+            message.text = if kind.is_notice() {
                 format!("[NOTICE] {text}")
             } else {
                 text
             };
             message.links = Links::new(links::find(&message.text));
         }
-        message.notice = notice;
+        message.notice = kind.is_notice();
         message.delivery_failed = false;
         if meta.native_id.is_some() {
             message.native_id = meta.native_id;
@@ -1479,7 +1503,7 @@ impl AppState {
             let mut message = new_message(
                 String::new(),
                 note,
-                true,
+                Line::Activity,
                 MessageMeta {
                     provenance: Provenance::Requested,
                     ..MessageMeta::live()
@@ -1496,7 +1520,7 @@ impl AppState {
             let mut message = new_message(
                 line.sender,
                 line.text,
-                false,
+                Line::Text,
                 MessageMeta {
                     provenance: Provenance::Requested,
                     ..line.meta
@@ -1637,7 +1661,7 @@ impl AppState {
                 let mut message = new_message(
                     line.sender,
                     line.text,
-                    false,
+                    Line::Text,
                     MessageMeta {
                         provenance: Provenance::Requested,
                         ..line.meta
@@ -1989,16 +2013,16 @@ fn display_time(received: Option<SystemTime>) -> TimeOfDay {
 /// bidirectional controls (`display::neutralize_bidi`).
 /// The text a NOTICE is shown with (behind a `[NOTICE]` marker) and its
 /// metadata.
-fn notice_marked(text: &str, notice: bool, meta: MessageMeta) -> (String, MessageMeta) {
+fn notice_marked(text: &str, kind: Kind, meta: MessageMeta) -> (String, MessageMeta) {
     const MARKER: &str = "[NOTICE] ";
-    if notice {
+    if kind.is_notice() {
         (format!("{MARKER}{text}"), meta.after_prefix(MARKER.len()))
     } else {
         (text.into(), meta)
     }
 }
 
-fn new_message(sender: String, text: String, activity: bool, meta: MessageMeta) -> Message {
+fn new_message(sender: String, text: String, line: Line, meta: MessageMeta) -> Message {
     let text = display::neutralize_bidi_owned(text);
     Message {
         time: display_time(meta.server_time),
@@ -2012,7 +2036,7 @@ fn new_message(sender: String, text: String, activity: bool, meta: MessageMeta) 
         links: Links::new(links::find(&text)),
         text,
         highlights: Highlights::new(meta.highlights),
-        activity,
+        activity: line == Line::Activity,
         notice: false,
         provenance: meta.provenance,
         delivery_failed: false,

@@ -44,7 +44,8 @@ mod whois;
 mod window_layout;
 
 use cayenchat_app::{
-    AppState, Command, ConnectionStatus, MessageMeta, MoveTo, NetworkConfig, Selection,
+    AppState, Command, ConnectionStatus, Kind, MessageMeta, Missing, MoveTo, NetworkConfig,
+    Selection, Unread,
     attachments::AttachmentFlow,
     notifications::{self, BurstLimiter, IncomingMessage, NotificationRules, Trigger},
     own_avatar::{Confirmed, OwnAvatar},
@@ -55,7 +56,9 @@ use cayenchat_irc_core::{
     Ircv3Options, MemberCommand, MessageReference, OlderHistoryStatus, RealNameFailure,
     SaslCredentials, WhoisInfo, WireDirection, valid_channel,
 };
-use cayenchat_model::{ConversationId, Network, NetworkId, TimeOfDay, Timestamp, display, names};
+use cayenchat_model::{
+    ConversationId, Network, NetworkId, Provenance, TimeOfDay, Timestamp, display, names,
+};
 use cayenchat_storage::{
     Appearance, AutoJoinEntry, ChannelNumberModifier, CredentialError, CredentialStore,
     Ircv3Preferences, Language, Notifications, Secret, SecretKey, ServerProfile, Settings,
@@ -108,6 +111,15 @@ const RETRY_DELAYS: [Duration; 5] = [
 const SUB_LOG_LIMIT: usize = 1_000;
 /// Worker events applied per update before yielding to input and redraws.
 const EVENT_BATCH_LIMIT: usize = 256;
+
+/// Whether the IRC worker is still delivering events to
+/// [`ChatWindow::handle_events`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Worker {
+    Running,
+    /// Its event stream ended.
+    Closed,
+}
 
 fn channel_activity_text(actor: &str, kind: ChannelActivityKind) -> String {
     fn with_detail(actor: &str, action: &str, detail: Option<String>) -> String {
@@ -340,13 +352,22 @@ fn irc_message_meta(
     server_time: Option<std::time::SystemTime>,
     msgid: Option<&str>,
     account: Option<&str>,
-    replayed: bool,
+    provenance: Provenance,
 ) -> MessageMeta {
     MessageMeta {
         server_time,
         native_id: msgid.and_then(cayenchat_model::NativeMessageId::new),
         account: account.and_then(cayenchat_model::ServicesAccount::new),
-        ..MessageMeta::replayed(replayed)
+        ..MessageMeta::with_provenance(provenance)
+    }
+}
+
+/// The provenance of an event's `replayed` flag.
+fn event_provenance(replayed: bool) -> Provenance {
+    if replayed {
+        Provenance::Replayed
+    } else {
+        Provenance::Live
     }
 }
 
@@ -366,7 +387,7 @@ fn history_lines(messages: Vec<HistoryMessage>) -> Vec<TimelineLine> {
                 message.server_time,
                 message.msgid.as_deref(),
                 message.account.as_deref(),
-                true,
+                Provenance::Replayed,
             ),
         })
         .collect()
@@ -1273,7 +1294,11 @@ impl ChatWindow {
         cx.spawn(async move |this, cx| {
             loop {
                 let first = events.recv().await;
-                let closed = first.is_none();
+                let worker = if first.is_none() {
+                    Worker::Closed
+                } else {
+                    Worker::Running
+                };
                 let mut batch: Vec<Event> = first.into_iter().collect();
                 while batch.len() < EVENT_BATCH_LIMIT
                     && let Some(event) = events.try_recv()
@@ -1283,7 +1308,7 @@ impl ChatWindow {
                 let keep_going = this
                     .update(cx, |this, cx| {
                         this.is_current(network, generation)
-                            && this.handle_events(network, batch, closed, cx)
+                            && this.handle_events(network, batch, worker, cx)
                     })
                     .unwrap_or(false);
                 if !keep_going {
@@ -2898,15 +2923,16 @@ impl ChatWindow {
         });
     }
 
-    /// Applies a batch of worker events. `worker_closed` means the worker's
-    /// event stream ended. Returns whether to keep listening.
+    /// Applies a batch of worker events. [`Worker::Closed`] means the
+    /// worker's event stream ended. Returns whether to keep listening.
     fn handle_events(
         &mut self,
         network: NetworkId,
         batch: Vec<Event>,
-        worker_closed: bool,
+        worker: Worker,
         cx: &mut Context<Self>,
     ) -> bool {
+        let worker_closed = worker == Worker::Closed;
         let changed = !batch.is_empty();
         let mut disconnected = false;
         let mut refused = false;
@@ -3094,14 +3120,23 @@ impl ChatWindow {
                 let found = self.find_mentions(network, &sender, &text, replayed);
                 let meta = MessageMeta {
                     highlights: found.ranges.clone(),
-                    ..irc_message_meta(server_time, msgid.as_deref(), account.as_deref(), replayed)
+                    ..irc_message_meta(
+                        server_time,
+                        msgid.as_deref(),
+                        account.as_deref(),
+                        event_provenance(replayed),
+                    )
                 };
                 // A copy of a message the conversation already has (overlapping
                 // history) neither notifies nor highlights again.
-                if !self
-                    .state
-                    .append_channel_message_at(network, &channel, &sender, &text, notice, meta)
-                {
+                if !self.state.append_channel_message_at(
+                    network,
+                    &channel,
+                    &sender,
+                    &text,
+                    Kind::from_notice(notice),
+                    meta,
+                ) {
                     return;
                 }
                 let conversation = self.state.channel_id(network, &channel);
@@ -3147,21 +3182,35 @@ impl ChatWindow {
                 let found = self.find_mentions(network, &sender, &text, replayed);
                 let meta = MessageMeta {
                     highlights: found.ranges.clone(),
-                    ..irc_message_meta(server_time, msgid.as_deref(), account.as_deref(), replayed)
+                    ..irc_message_meta(
+                        server_time,
+                        msgid.as_deref(),
+                        account.as_deref(),
+                        event_provenance(replayed),
+                    )
                 };
                 // A PRIVMSG opens a private conversation; a NOTICE (usually
                 // services and bots) joins one only if it already exists,
                 // and otherwise stays in the server log as before.
                 let key = cayenchat_irc_core::text::nickname_key(&sender);
+                let missing = if notice {
+                    Missing::Ignore
+                } else {
+                    Missing::Create
+                };
                 let conversation = self
                     .state
-                    .private_conversation(network, &key, &sender, !notice);
+                    .private_conversation(network, &key, &sender, missing);
                 match conversation {
                     Some(id) => {
-                        if !self
-                            .state
-                            .append_conversation_message(id, &sender, &text, notice, meta, true)
-                        {
+                        if !self.state.append_conversation_message(
+                            id,
+                            &sender,
+                            &text,
+                            Kind::from_notice(notice),
+                            meta,
+                            Unread::Mark,
+                        ) {
                             return;
                         }
                         if !notice && !replayed {
@@ -3200,7 +3249,12 @@ impl ChatWindow {
                 msgid,
                 replayed,
             } => {
-                let meta = irc_message_meta(server_time, msgid.as_deref(), None, replayed);
+                let meta = irc_message_meta(
+                    server_time,
+                    msgid.as_deref(),
+                    None,
+                    event_provenance(replayed),
+                );
                 self.append_own_private(network, &target, &text, notice, meta);
             }
             Event::UserNickChanged { from, to } => {
@@ -3227,9 +3281,9 @@ impl ChatWindow {
                 resumed: false,
             } if !valid_channel(&channel) => {
                 let key = cayenchat_irc_core::text::nickname_key(&channel);
-                if let Some(id) = self
-                    .state
-                    .private_conversation(network, &key, &channel, true)
+                if let Some(id) =
+                    self.state
+                        .private_conversation(network, &key, &channel, Missing::Create)
                 {
                     self.state.history_requested_for(id);
                 }
@@ -3372,8 +3426,14 @@ impl ChatWindow {
                         .get(&network)
                         .and_then(|session| session.own_nickname.as_deref())
                         .unwrap_or("me");
-                    self.state
-                        .append_channel_message(network, &channel, nickname, &text, notice, false);
+                    self.state.append_channel_message(
+                        network,
+                        &channel,
+                        nickname,
+                        &text,
+                        Kind::from_notice(notice),
+                        Provenance::Live,
+                    );
                 } else if cayenchat_irc_core::valid_nickname(&channel) {
                     self.append_own_private(network, &channel, &text, notice, MessageMeta::live());
                 } else {
@@ -3414,8 +3474,10 @@ impl ChatWindow {
                     .get_mut(&network)
                     .and_then(|session| session.pending_sends.remove(&local_id));
                 if let Some((id, sequence, notice)) = pending {
-                    let meta = irc_message_meta(server_time, msgid.as_deref(), None, false);
-                    self.state.confirm_message(id, sequence, text, notice, meta);
+                    let meta =
+                        irc_message_meta(server_time, msgid.as_deref(), None, Provenance::Live);
+                    self.state
+                        .confirm_message(id, sequence, text, Kind::from_notice(notice), meta);
                 }
             }
             Event::OutgoingFailed { local_id, reason } => {
@@ -3494,10 +3556,19 @@ impl ChatWindow {
     ) {
         let own = self.own_nickname(network).unwrap_or("me").to_owned();
         let key = cayenchat_irc_core::text::nickname_key(target);
-        match self.state.private_conversation(network, &key, target, true) {
+        match self
+            .state
+            .private_conversation(network, &key, target, Missing::Create)
+        {
             Some(id) => {
-                self.state
-                    .append_conversation_message(id, &own, text, notice, meta, false);
+                self.state.append_conversation_message(
+                    id,
+                    &own,
+                    text,
+                    Kind::from_notice(notice),
+                    meta,
+                    Unread::Leave,
+                );
             }
             None => self.state.append_server_message_at(
                 network,

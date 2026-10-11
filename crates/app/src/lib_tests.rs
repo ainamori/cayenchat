@@ -125,7 +125,14 @@ fn live_events_update_channel_roster_unread_and_connection_state() {
     state.set_status(NetworkId(1), ConnectionStatus::Registered);
     state.joined_channel(NetworkId(1), "#two");
     state.set_members(NetworkId(1), "#two", vec!["@alice".into()]);
-    state.append_channel_message(NetworkId(1), "#two", "alice", "hello", false, false);
+    state.append_channel_message(
+        NetworkId(1),
+        "#two",
+        "alice",
+        "hello",
+        Kind::Message,
+        Provenance::Live,
+    );
     assert_eq!(state.conversations().len(), 2);
     assert!(state.is_unread(ConversationId(2)));
     state.dispatch(Command::SelectChannel(ConversationId(2)));
@@ -153,8 +160,22 @@ fn live_events_update_channel_roster_unread_and_connection_state() {
 #[test]
 fn channel_messages_keep_arrival_order_across_channels() {
     let mut state = AppState::live("irc.example.org".into(), vec!["#one".into(), "#two".into()]);
-    state.append_channel_message(NetworkId(1), "#two", "alice", "first", false, false);
-    state.append_channel_message(NetworkId(1), "#one", "bob", "latest", false, false);
+    state.append_channel_message(
+        NetworkId(1),
+        "#two",
+        "alice",
+        "first",
+        Kind::Message,
+        Provenance::Live,
+    );
+    state.append_channel_message(
+        NetworkId(1),
+        "#one",
+        "bob",
+        "latest",
+        Kind::Message,
+        Provenance::Live,
+    );
 
     let mut messages: Vec<_> = state
         .conversations()
@@ -190,7 +211,14 @@ fn channel_activity_is_ordered_without_marking_unread() {
     let mut state = AppState::live("irc.example.org".into(), vec!["#one".into(), "#two".into()]);
     state.append_channel_activity(NetworkId(1), "#two", "alice has joined (u@h)".into());
     assert!(!state.is_unread(ConversationId(2)));
-    state.append_channel_message(NetworkId(1), "#two", "alice", "hello", false, false);
+    state.append_channel_message(
+        NetworkId(1),
+        "#two",
+        "alice",
+        "hello",
+        Kind::Message,
+        Provenance::Live,
+    );
     assert!(state.is_unread(ConversationId(2)));
     let channel = &state.conversations()[1];
     assert!(channel.messages[0].activity);
@@ -210,8 +238,8 @@ fn retained_text_has_no_bidirectional_controls() {
         "#one",
         "mal\u{202E}lory",
         "see invoice\u{202E}fdp.exe",
-        false,
-        false,
+        Kind::Message,
+        Provenance::Live,
     );
     state.append_server_message(NetworkId(1), "motd \u{2067}x".into());
     state.set_topic(NetworkId(1), "#one", "topic\u{202D}");
@@ -231,7 +259,14 @@ fn retained_text_has_no_bidirectional_controls() {
 #[test]
 fn server_traffic_for_unjoined_channels_does_not_create_conversations() {
     let mut state = AppState::live("irc.example.org".into(), vec!["#one".into()]);
-    state.append_channel_message(NetworkId(1), "#stray", "mallory", "hi", false, false);
+    state.append_channel_message(
+        NetworkId(1),
+        "#stray",
+        "mallory",
+        "hi",
+        Kind::Message,
+        Provenance::Live,
+    );
     state.append_channel_activity(NetworkId(1), "#stray", "mallory has joined".into());
     state.set_members(NetworkId(1), "#stray", vec!["mallory".into()]);
     assert_eq!(state.conversations().len(), 1);
@@ -259,7 +294,14 @@ fn channels_are_found_under_irc_case_mapping() {
     let id = state.channel_id(NetworkId(1), "#foo[1]").unwrap();
     assert_eq!(state.channel_id(NetworkId(1), "#Foo{1}"), Some(id));
     assert_eq!(state.channel_id(NetworkId(2), "#foo[1]"), None);
-    state.append_channel_message(NetworkId(1), "#FOO{1}", "bob", "hi", false, false);
+    state.append_channel_message(
+        NetworkId(1),
+        "#FOO{1}",
+        "bob",
+        "hi",
+        Kind::Message,
+        Provenance::Live,
+    );
     let channel = state.conversations().iter().find(|c| c.id == id).unwrap();
     assert_eq!(channel.messages.len(), 1);
     assert_eq!(
@@ -295,7 +337,14 @@ fn advertised_casemapping_keeps_distinct_channels_apart() {
         state.channel_id(NetworkId(2), "#foo[1]"),
         state.channel_id(NetworkId(2), "#foo{1}")
     );
-    state.append_channel_message(NetworkId(1), "#foo{1}", "bob", "hi", false, false);
+    state.append_channel_message(
+        NetworkId(1),
+        "#foo{1}",
+        "bob",
+        "hi",
+        Kind::Message,
+        Provenance::Live,
+    );
     let messages = |id| {
         state
             .conversations()
@@ -464,7 +513,7 @@ fn a_parted_channels_place_survives_another_move() {
 fn private_conversations_stay_after_channels() {
     let mut state = two_networks();
     let query = state
-        .private_conversation(NetworkId(1), "alice", "alice", true)
+        .private_conversation(NetworkId(1), "alice", "alice", Missing::Create)
         .unwrap();
     let a = state.channel_id(NetworkId(1), "#a").unwrap();
     assert_eq!(state.move_conversation(a, MoveTo::Place(query)), None);
@@ -503,8 +552,22 @@ fn configured_networks_start_disconnected_and_keep_channels_grouped() {
 #[test]
 fn resetting_one_network_keeps_the_others() {
     let mut state = two_networks();
-    state.append_channel_message(NetworkId(2), "#a", "bob", "kept", false, false);
-    state.append_channel_message(NetworkId(1), "#b", "bob", "dropped", false, false);
+    state.append_channel_message(
+        NetworkId(2),
+        "#a",
+        "bob",
+        "kept",
+        Kind::Message,
+        Provenance::Live,
+    );
+    state.append_channel_message(
+        NetworkId(1),
+        "#b",
+        "bob",
+        "dropped",
+        Kind::Message,
+        Provenance::Live,
+    );
     state.append_server_message(NetworkId(1), "old".into());
     let old: Vec<_> = state
         .conversations()
@@ -573,7 +636,14 @@ fn syncing_networks_adds_renames_reorders_and_removes() {
         .collect();
     assert_eq!(names, [(3, "#new"), (1, "#a"), (1, "#b")]);
     // Messages for the removed network are ignored.
-    state.append_channel_message(NetworkId(2), "#a", "bob", "late", false, false);
+    state.append_channel_message(
+        NetworkId(2),
+        "#a",
+        "bob",
+        "late",
+        Kind::Message,
+        Provenance::Live,
+    );
     assert!(state.server_messages(NetworkId(2)).is_empty());
 }
 
@@ -618,7 +688,7 @@ fn server_times_show_as_local_time_without_changing_arrival_order() {
         "#test",
         "bob",
         "first",
-        false,
+        Kind::Message,
         MessageMeta::at(Some(later)),
     );
     state.append_channel_message_at(
@@ -626,10 +696,17 @@ fn server_times_show_as_local_time_without_changing_arrival_order() {
         "#test",
         "bob",
         "second",
-        false,
+        Kind::Message,
         MessageMeta::at(Some(earlier)),
     );
-    state.append_channel_message_at(network, "#test", "bob", "third", false, MessageMeta::live());
+    state.append_channel_message_at(
+        network,
+        "#test",
+        "bob",
+        "third",
+        Kind::Message,
+        MessageMeta::live(),
+    );
     state.append_channel_activity_at(
         network,
         "#test",
@@ -683,9 +760,14 @@ fn highlights_follow_markers_and_server_log_prefixes() {
         highlights: vec![alice.clone()],
         ..MessageMeta::live()
     };
-    for (channel, notice) in [("#a", false), ("#a", true), ("#elsewhere", true)] {
+    let lines = [
+        ("#a", Kind::Message),
+        ("#a", Kind::Notice),
+        ("#elsewhere", Kind::Notice),
+    ];
+    for (channel, kind) in lines {
         let text = "hi alice";
-        assert!(state.append_channel_message_at(network, channel, "bob", text, notice, marked()));
+        assert!(state.append_channel_message_at(network, channel, "bob", text, kind, marked()));
     }
     let channel = state.conversations().iter().find(|c| c.name == "#a");
     let logs = channel.unwrap().messages.iter();
@@ -717,16 +799,23 @@ fn retained_messages_keep_full_server_time_identity_and_provenance() {
         "#a",
         "bob",
         "tagged",
-        false,
+        Kind::Message,
         meta(Some(stamp), Some("abc"), Provenance::Live),
     );
-    state.append_channel_message_at(network, "#a", "bob", "plain", false, MessageMeta::live());
+    state.append_channel_message_at(
+        network,
+        "#a",
+        "bob",
+        "plain",
+        Kind::Message,
+        MessageMeta::live(),
+    );
     state.append_channel_message_at(
         network,
         "#a",
         "bob",
         "played back",
-        false,
+        Kind::Message,
         meta(Some(stamp + 1), None, Provenance::Replayed),
     );
     state.append_channel_message_at(
@@ -734,7 +823,7 @@ fn retained_messages_keep_full_server_time_identity_and_provenance() {
         "#a",
         "bob",
         "requested",
-        false,
+        Kind::Message,
         meta(None, Some("def"), Provenance::Requested),
     );
     let messages = &state.conversations()[0].messages;
@@ -767,7 +856,7 @@ fn retained_messages_keep_full_server_time_identity_and_provenance() {
         "#stray",
         "eve",
         "hi",
-        false,
+        Kind::Message,
         meta(Some(stamp), Some("stray1"), Provenance::Replayed),
     );
     let stray = state.server_messages(network).last().unwrap();
@@ -786,7 +875,7 @@ fn duplicates_by_msgid_are_dropped_without_taking_a_sequence_or_unread_mark() {
         "#a",
         "bob",
         "live",
-        false,
+        Kind::Message,
         meta(Some(10), Some("m1"), Provenance::Live),
     ));
     state.dispatch(Command::SelectChannel(ConversationId(1)));
@@ -800,7 +889,7 @@ fn duplicates_by_msgid_are_dropped_without_taking_a_sequence_or_unread_mark() {
             "#a",
             "bob",
             "live",
-            false,
+            Kind::Message,
             meta(Some(10), Some("m1"), provenance),
         ));
     }
@@ -817,7 +906,7 @@ fn duplicates_by_msgid_are_dropped_without_taking_a_sequence_or_unread_mark() {
         "#b",
         "bob",
         "live",
-        false,
+        Kind::Message,
         meta(Some(10), Some("m1"), Provenance::Live),
     ));
     // Without an identifier, history is matched by its fingerprint only.
@@ -826,7 +915,7 @@ fn duplicates_by_msgid_are_dropped_without_taking_a_sequence_or_unread_mark() {
         "#a",
         "carol",
         "no id",
-        false,
+        Kind::Message,
         meta(Some(20), None, Provenance::Replayed),
     );
     state.append_channel_message_at(
@@ -834,7 +923,7 @@ fn duplicates_by_msgid_are_dropped_without_taking_a_sequence_or_unread_mark() {
         "#a",
         "carol",
         "no id",
-        false,
+        Kind::Message,
         meta(Some(20), None, Provenance::Requested),
     );
     state.append_channel_message_at(
@@ -842,12 +931,19 @@ fn duplicates_by_msgid_are_dropped_without_taking_a_sequence_or_unread_mark() {
         "#a",
         "carol",
         "no id",
-        false,
+        Kind::Message,
         meta(Some(20), None, Provenance::Live),
     );
     // Nothing identifies lines without a timestamp or msgid; all stay.
     for _ in 0..2 {
-        state.append_channel_message(network, "#a", "dave", "again", false, true);
+        state.append_channel_message(
+            network,
+            "#a",
+            "dave",
+            "again",
+            Kind::Message,
+            Provenance::Replayed,
+        );
     }
     assert_eq!(
         texts(&state, 0),
@@ -866,7 +962,7 @@ fn duplicate_state_is_bounded_and_dropped_with_its_conversations() {
             "#a",
             "bob",
             "x",
-            false,
+            Kind::Message,
             meta(None, Some(&id), Provenance::Live),
         );
     }
@@ -877,7 +973,14 @@ fn duplicate_state_is_bounded_and_dropped_with_its_conversations() {
     );
     // Plain lines create no filter.
     state.joined_channel(network, "#plain");
-    state.append_channel_message(network, "#plain", "bob", "x", false, false);
+    state.append_channel_message(
+        network,
+        "#plain",
+        "bob",
+        "x",
+        Kind::Message,
+        Provenance::Live,
+    );
     assert_eq!(state.duplicates.len(), 1);
     state.reset_network(network, vec!["#a".into()]);
     assert!(state.duplicates.is_empty());
@@ -887,7 +990,7 @@ fn duplicate_state_is_bounded_and_dropped_with_its_conversations() {
         "#a",
         "bob",
         "x",
-        false,
+        Kind::Message,
         meta(None, Some("m0"), Provenance::Replayed),
     ));
 }
@@ -914,10 +1017,17 @@ fn requested_history_goes_where_it_was_requested_without_unread_marks() {
         "#a",
         "carol",
         "live",
-        false,
+        Kind::Message,
         meta(Some(30), Some("live1"), Provenance::Live),
     );
-    state.append_channel_message(network, "#b", "dave", "other channel", false, false);
+    state.append_channel_message(
+        network,
+        "#b",
+        "dave",
+        "other channel",
+        Kind::Message,
+        Provenance::Live,
+    );
     state.dispatch(Command::SelectChannel(ConversationId(1)));
     state.dispatch(Command::SelectChannel(ConversationId(2)));
     let added = state.insert_channel_history(
@@ -947,7 +1057,14 @@ fn requested_history_goes_where_it_was_requested_without_unread_marks() {
     assert!(!state.is_unread(ConversationId(1)), "history is not news");
     // Unrelated channels are untouched, and later lines follow.
     assert_eq!(texts(&state, 1), ["other channel"]);
-    state.append_channel_message(network, "#a", "carol", "later", false, false);
+    state.append_channel_message(
+        network,
+        "#a",
+        "carol",
+        "later",
+        Kind::Message,
+        Provenance::Live,
+    );
     let messages = &state.conversations()[0].messages;
     assert_eq!(messages.last().unwrap().text, "later");
     assert!(
@@ -971,7 +1088,7 @@ fn requested_history_skips_what_playback_already_delivered() {
         "#a",
         "bob",
         "played",
-        false,
+        Kind::Message,
         meta(Some(5), None, Provenance::Replayed),
     );
     state.history_requested(network, "#a");
@@ -987,7 +1104,7 @@ fn requested_history_skips_what_playback_already_delivered() {
         "#a",
         "bob",
         "newer",
-        false,
+        Kind::Message,
         meta(Some(6), None, Provenance::Replayed),
     );
     assert_eq!(texts(&state, 0), ["played", "newer"]);
@@ -1025,10 +1142,24 @@ fn requested_history_is_bounded_by_the_reserve_and_the_log_limit() {
     let mut state = AppState::live("irc.example".into(), vec!["#a".into()]);
     let network = NetworkId(1);
     for index in 0..MAX_RETAINED - 10 {
-        state.append_channel_message(network, "#a", "bob", &format!("live {index}"), false, false);
+        state.append_channel_message(
+            network,
+            "#a",
+            "bob",
+            &format!("live {index}"),
+            Kind::Message,
+            Provenance::Live,
+        );
     }
     state.history_requested(network, "#a");
-    state.append_channel_message(network, "#a", "bob", "after", false, false);
+    state.append_channel_message(
+        network,
+        "#a",
+        "bob",
+        "after",
+        Kind::Message,
+        Provenance::Live,
+    );
     let lines = (0..HISTORY_RESERVE + 50)
         .map(|index| line(&format!("h{index}"), None, None))
         .collect();
@@ -1056,8 +1187,15 @@ fn private(
     text: &str,
 ) -> Option<ConversationId> {
     let key = nick.to_lowercase();
-    let id = state.private_conversation(network, &key, nick, true)?;
-    state.append_conversation_message(id, nick, text, false, MessageMeta::live(), true);
+    let id = state.private_conversation(network, &key, nick, Missing::Create)?;
+    state.append_conversation_message(
+        id,
+        nick,
+        text,
+        Kind::Message,
+        MessageMeta::live(),
+        Unread::Mark,
+    );
     Some(id)
 }
 
@@ -1101,7 +1239,14 @@ fn private_conversations_are_created_once_per_peer_and_network() {
     );
     // A channel lookup never finds a private conversation.
     assert!(state.channel_id(NetworkId(1), "bob").is_none());
-    state.append_channel_message(NetworkId(1), "bob", "x", "y", false, false);
+    state.append_channel_message(
+        NetworkId(1),
+        "bob",
+        "x",
+        "y",
+        Kind::Message,
+        Provenance::Live,
+    );
     assert_eq!(
         state
             .conversations()
@@ -1118,8 +1263,15 @@ fn private_conversations_are_created_once_per_peer_and_network() {
 fn notices_are_flagged_but_a_privmsg_that_looks_like_one_is_not() {
     let mut state = AppState::live("irc.example".into(), vec!["#a".into()]);
     let network = NetworkId(1);
-    state.append_channel_message(network, "#a", "bob", "psst", true, false);
-    state.append_channel_message(network, "#a", "eve", "[NOTICE] psst", false, false);
+    state.append_channel_message(network, "#a", "bob", "psst", Kind::Notice, Provenance::Live);
+    state.append_channel_message(
+        network,
+        "#a",
+        "eve",
+        "[NOTICE] psst",
+        Kind::Message,
+        Provenance::Live,
+    );
     let id = state.channel_id(network, "#a").unwrap();
     let messages = &state
         .conversations()
@@ -1137,7 +1289,7 @@ fn notices_and_overflow_do_not_create_private_conversations() {
     let network = NetworkId(1);
     assert!(
         state
-            .private_conversation(network, "nickserv", "NickServ", false)
+            .private_conversation(network, "nickserv", "NickServ", Missing::Ignore)
             .is_none()
     );
     assert!(state.conversations().is_empty());
@@ -1214,38 +1366,45 @@ fn private_messages_use_timeline_identity_and_bounds() {
     let mut state = AppState::live("irc.example".into(), vec![]);
     let network = NetworkId(1);
     let bob = state
-        .private_conversation(network, "bob", "bob", true)
+        .private_conversation(network, "bob", "bob", Missing::Create)
         .unwrap();
     assert!(state.append_conversation_message(
         bob,
         "bob",
         "hi",
-        false,
+        Kind::Message,
         meta(Some(1), Some("p1"), Provenance::Live),
-        true,
+        Unread::Mark,
     ));
     assert!(!state.append_conversation_message(
         bob,
         "bob",
         "hi",
-        false,
+        Kind::Message,
         meta(Some(1), Some("p1"), Provenance::Replayed),
-        true,
+        Unread::Mark,
     ));
     // Our own lines do not mark it unread.
     state.dispatch(Command::SelectServer(network));
     state.dispatch(Command::SelectChannel(bob));
     state.dispatch(Command::SelectServer(network));
-    state.append_conversation_message(bob, "me", "sent", false, MessageMeta::live(), false);
+    state.append_conversation_message(
+        bob,
+        "me",
+        "sent",
+        Kind::Message,
+        MessageMeta::live(),
+        Unread::Leave,
+    );
     assert!(!state.is_unread(bob));
     for index in 0..MAX_RETAINED + 5 {
         state.append_conversation_message(
             bob,
             "bob",
             &index.to_string(),
-            false,
+            Kind::Message,
             MessageMeta::live(),
-            true,
+            Unread::Mark,
         );
     }
     let messages = &state.conversations()[0].messages;
@@ -1262,9 +1421,23 @@ fn avatars_follow_message_sequences_and_network_lifetime() {
     let mut state = AppState::live("irc.example".into(), vec!["#a".into()]);
     let network = NetworkId(1);
     state.joined_channel(network, "#a");
-    state.append_channel_message(network, "#a", "bob", "before", false, false);
+    state.append_channel_message(
+        network,
+        "#a",
+        "bob",
+        "before",
+        Kind::Message,
+        Provenance::Live,
+    );
     state.set_avatar(network, "bob", Some("https://example.com/b.png"));
-    state.append_channel_message(network, "#a", "bob", "after", false, false);
+    state.append_channel_message(
+        network,
+        "#a",
+        "bob",
+        "after",
+        Kind::Message,
+        Provenance::Live,
+    );
     let messages = &state.conversations()[0].messages;
     let avatar = |state: &AppState, index: usize| {
         let message = &state.conversations()[0].messages[index];
@@ -1282,7 +1455,14 @@ fn avatars_follow_message_sequences_and_network_lifetime() {
 
     // Reconnecting ends the occupancy; the shown message keeps it.
     state.end_avatars(network);
-    state.append_channel_message(network, "#a", "bob", "reconnected", false, false);
+    state.append_channel_message(
+        network,
+        "#a",
+        "bob",
+        "reconnected",
+        Kind::Message,
+        Provenance::Live,
+    );
     assert_eq!(
         avatar(&state, 1).as_deref(),
         Some("https://example.com/b.png")
@@ -1326,7 +1506,7 @@ fn paging_channel() -> (AppState, NetworkId, ConversationId) {
         "#a",
         "carol",
         "live",
-        false,
+        Kind::Message,
         meta(Some(1_100), Some("m1100"), Provenance::Live),
     );
     (state, network, id)
@@ -1365,7 +1545,14 @@ fn older_pages_refer_to_the_oldest_line_and_go_before_everything() {
 
     // A live line arrives while the page is on its way.
     state.dispatch(Command::SelectChannel(ConversationId(2)));
-    state.append_channel_message(network, "#a", "dave", "meanwhile", false, false);
+    state.append_channel_message(
+        network,
+        "#a",
+        "dave",
+        "meanwhile",
+        Kind::Message,
+        Provenance::Live,
+    );
     let last = state.last_message_sequence();
     let added = state.insert_older_history(id, request.request, page(400..403), false);
     assert_eq!(added, 3);
@@ -1453,7 +1640,7 @@ fn overlapping_older_pages_add_only_new_lines() {
         "#a",
         "bob",
         "x",
-        false,
+        Kind::Message,
         meta(Some(50), None, Provenance::Live),
     );
     let request = state.request_older_history(id).unwrap();
@@ -1564,7 +1751,7 @@ fn older_pages_wait_for_recent_history_and_skip_private_or_unidentified_logs() {
         "#a",
         "bob",
         "x",
-        false,
+        Kind::Message,
         meta(Some(5), Some("m5"), Provenance::Live),
     );
     assert!(state.request_older_history(id).is_none(), "no paging yet");
@@ -1581,20 +1768,20 @@ fn older_pages_wait_for_recent_history_and_skip_private_or_unidentified_logs() {
     let mut plain = AppState::live("irc.example".into(), vec!["#a".into()]);
     plain.set_history_paging(network, true);
     plain.joined_channel(network, "#a");
-    plain.append_channel_message(network, "#a", "bob", "x", false, false);
+    plain.append_channel_message(network, "#a", "bob", "x", Kind::Message, Provenance::Live);
     assert!(plain.request_older_history(id).is_none());
 
     // Private conversations are not paged yet.
     let peer = state
-        .private_conversation(network, "bob", "bob", true)
+        .private_conversation(network, "bob", "bob", Missing::Create)
         .unwrap();
     state.append_conversation_message(
         peer,
         "bob",
         "hi",
-        false,
+        Kind::Message,
         meta(Some(9), Some("p9"), Provenance::Live),
-        false,
+        Unread::Leave,
     );
     state.set_status(network, ConnectionStatus::Registered);
     assert!(state.request_older_history(peer).is_none());
@@ -1618,7 +1805,14 @@ fn older_pages_stay_within_the_log_bound() {
     assert_eq!(messages.last().unwrap().text, "live", "live lines stay");
     // Live traffic trims the oldest lines as before; paging may resume.
     for index in 0..10 {
-        state.append_channel_message(NetworkId(1), "#a", "bob", &index.to_string(), false, false);
+        state.append_channel_message(
+            NetworkId(1),
+            "#a",
+            "bob",
+            &index.to_string(),
+            Kind::Message,
+            Provenance::Live,
+        );
     }
     assert!(state.conversations()[0].messages.len() <= MAX_RETAINED);
     assert!(state.request_older_history(id).is_some());
@@ -1628,7 +1822,14 @@ fn older_pages_stay_within_the_log_bound() {
 #[test]
 fn links_are_found_when_the_text_is_set() {
     let (mut state, network, id) = paging_channel();
-    state.append_channel_message(network, "#a", "me", "see https://a.example/", false, false);
+    state.append_channel_message(
+        network,
+        "#a",
+        "me",
+        "see https://a.example/",
+        Kind::Message,
+        Provenance::Live,
+    );
     let sequence = state.latest_sequence();
     let links = |state: &AppState| {
         let channel = &state.conversations()[0];
@@ -1638,21 +1839,28 @@ fn links_are_found_when_the_text_is_set() {
     assert_eq!(links(&state), [(4..22, "https://a.example/".to_owned())]);
     // The server's echo replaces the text, and the links with it.
     let echoed = Some("see https://b.example/x".into());
-    assert!(state.confirm_message(id, sequence, echoed, true, MessageMeta::live()));
+    assert!(state.confirm_message(id, sequence, echoed, Kind::Notice, MessageMeta::live()));
     assert_eq!(links(&state), [(13..32, "https://b.example/x".to_owned())]);
 }
 
 #[test]
 fn a_confirmed_own_message_takes_the_servers_text_id_and_time_once() {
     let (mut state, network, id) = paging_channel();
-    state.append_channel_message(network, "#a", "me", "hello  world", false, false);
+    state.append_channel_message(
+        network,
+        "#a",
+        "me",
+        "hello  world",
+        Kind::Message,
+        Provenance::Live,
+    );
     let sequence = state.latest_sequence();
     // The server collapsed the space and recorded an id and time.
     assert!(state.confirm_message(
         id,
         sequence,
         Some("hello world".into()),
-        false,
+        Kind::Message,
         meta(Some(2_000_000), Some("mine1"), Provenance::Live),
     ));
     let sent = state.conversations()[0]
@@ -1671,19 +1879,19 @@ fn a_confirmed_own_message_takes_the_servers_text_id_and_time_once() {
         "#a",
         "me",
         "hello world",
-        false,
+        Kind::Message,
         meta(Some(2_000_000), Some("mine1"), Provenance::Replayed),
     );
     assert!(!appended);
     assert_eq!(state.conversations()[0].messages.len(), before);
     // A message that is gone (trimmed) is not an error.
-    assert!(!state.confirm_message(id, 0, None, false, MessageMeta::live()));
+    assert!(!state.confirm_message(id, 0, None, Kind::Message, MessageMeta::live()));
 }
 
 #[test]
 fn a_rejected_own_message_is_marked_and_a_later_confirmation_clears_it() {
     let (mut state, network, id) = paging_channel();
-    state.append_channel_message(network, "#a", "me", "oops", false, false);
+    state.append_channel_message(network, "#a", "me", "oops", Kind::Message, Provenance::Live);
     let sequence = state.latest_sequence();
     state.fail_message(id, sequence);
     let flagged = |state: &AppState| {
@@ -1695,7 +1903,7 @@ fn a_rejected_own_message_is_marked_and_a_later_confirmation_clears_it() {
             .delivery_failed
     };
     assert!(flagged(&state));
-    assert!(state.confirm_message(id, sequence, None, false, MessageMeta::live()));
+    assert!(state.confirm_message(id, sequence, None, Kind::Message, MessageMeta::live()));
     assert!(!flagged(&state));
 }
 
@@ -1705,7 +1913,7 @@ fn live(state: &mut AppState, text: &str, millis: u64, msgid: Option<&str>) {
         "#a",
         "bob",
         text,
-        false,
+        Kind::Message,
         meta(Some(millis), msgid, Provenance::Live),
     );
 }
@@ -1722,8 +1930,22 @@ fn cut_off() -> (AppState, NetworkId, ConversationId) {
     live(&mut state, "A0", 900, Some("m900"));
     live(&mut state, "A", 1_000, Some("m1000"));
     // Our own echo carries nothing identifying.
-    state.append_channel_message(network, "#a", "alice", "mine", false, false);
-    state.append_channel_message(network, "#b", "carol", "unidentified", false, false);
+    state.append_channel_message(
+        network,
+        "#a",
+        "alice",
+        "mine",
+        Kind::Message,
+        Provenance::Live,
+    );
+    state.append_channel_message(
+        network,
+        "#b",
+        "carol",
+        "unidentified",
+        Kind::Message,
+        Provenance::Live,
+    );
     state.set_status(network, ConnectionStatus::Disconnected("gone".into()));
     (state, network, ConversationId(1))
 }
@@ -1793,7 +2015,7 @@ fn missed_lines_go_where_the_cut_was_without_duplicates_or_news() {
         "#a",
         "bob",
         "C",
-        false,
+        Kind::Message,
         meta(Some(1_600), Some("m1600"), Provenance::Replayed),
     );
     state.dispatch(Command::SelectChannel(ConversationId(2)));
