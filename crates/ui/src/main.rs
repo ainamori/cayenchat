@@ -109,6 +109,15 @@ const SUB_LOG_LIMIT: usize = 1_000;
 /// Worker events applied per update before yielding to input and redraws.
 const EVENT_BATCH_LIMIT: usize = 256;
 
+/// Whether the IRC worker is still delivering events to
+/// [`ChatWindow::handle_events`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Worker {
+    Running,
+    /// Its event stream ended.
+    Closed,
+}
+
 fn channel_activity_text(actor: &str, kind: ChannelActivityKind) -> String {
     fn with_detail(actor: &str, action: &str, detail: Option<String>) -> String {
         match detail.filter(|detail| !detail.is_empty()) {
@@ -1273,7 +1282,11 @@ impl ChatWindow {
         cx.spawn(async move |this, cx| {
             loop {
                 let first = events.recv().await;
-                let closed = first.is_none();
+                let worker = if first.is_none() {
+                    Worker::Closed
+                } else {
+                    Worker::Running
+                };
                 let mut batch: Vec<Event> = first.into_iter().collect();
                 while batch.len() < EVENT_BATCH_LIMIT
                     && let Some(event) = events.try_recv()
@@ -1283,7 +1296,7 @@ impl ChatWindow {
                 let keep_going = this
                     .update(cx, |this, cx| {
                         this.is_current(network, generation)
-                            && this.handle_events(network, batch, closed, cx)
+                            && this.handle_events(network, batch, worker, cx)
                     })
                     .unwrap_or(false);
                 if !keep_going {
@@ -2898,15 +2911,16 @@ impl ChatWindow {
         });
     }
 
-    /// Applies a batch of worker events. `worker_closed` means the worker's
-    /// event stream ended. Returns whether to keep listening.
+    /// Applies a batch of worker events. [`Worker::Closed`] means the
+    /// worker's event stream ended. Returns whether to keep listening.
     fn handle_events(
         &mut self,
         network: NetworkId,
         batch: Vec<Event>,
-        worker_closed: bool,
+        worker: Worker,
         cx: &mut Context<Self>,
     ) -> bool {
+        let worker_closed = worker == Worker::Closed;
         let changed = !batch.is_empty();
         let mut disconnected = false;
         let mut refused = false;

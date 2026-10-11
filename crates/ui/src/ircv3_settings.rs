@@ -1374,7 +1374,7 @@ mod own_avatar_tests {
     use cayenchat_model::NetworkId;
     use gpui::{Entity, TestAppContext, VisualTestContext};
 
-    use crate::ChatWindow;
+    use crate::{ChatWindow, Worker};
 
     const URL: &str = "https://example.com/me.png";
 
@@ -1406,7 +1406,7 @@ mod own_avatar_tests {
             };
             let done = until(&event);
             chat.update(cx, |chat, cx| {
-                chat.handle_events(NetworkId(1), vec![event], false, cx);
+                chat.handle_events(NetworkId(1), vec![event], Worker::Running, cx);
             });
             if done {
                 break;
@@ -1466,12 +1466,17 @@ mod own_avatar_tests {
             session.irc = Some(connection);
             // Asked for avatars, registered, never enabled.
             session.metadata_requested = true;
-            chat.handle_events(NetworkId(1), vec![registered()], false, cx);
+            chat.handle_events(NetworkId(1), vec![registered()], Worker::Running, cx);
         });
         assert!(unsupported(&chat, cx));
         // Enabled: supported.
         chat.update(cx, |chat, cx| {
-            chat.handle_events(NetworkId(1), vec![Event::MetadataReady], false, cx);
+            chat.handle_events(
+                NetworkId(1),
+                vec![Event::MetadataReady],
+                Worker::Running,
+                cx,
+            );
         });
         let ready = status(&chat, cx);
         assert!(!ready.unsupported && ready.can_request);
@@ -1481,7 +1486,7 @@ mod own_avatar_tests {
             let session = chat.sessions.get_mut(&NetworkId(1)).unwrap();
             session.own_avatar.connection_ended();
             session.metadata_requested = false;
-            chat.handle_events(NetworkId(1), vec![registered()], false, cx);
+            chat.handle_events(NetworkId(1), vec![registered()], Worker::Running, cx);
         });
         assert!(!unsupported(&chat, cx));
     }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-use super::ChatWindow;
+use super::{ChatWindow, Worker};
 use cayenchat_irc_core::Event;
 use cayenchat_model::NetworkId;
 use gpui::{Modifiers, TestAppContext, point, px};
@@ -41,7 +41,7 @@ fn the_pointer_is_a_hand_over_a_url_in_the_channel_log(cx: &mut TestAppContext) 
                 message("https://example.org/x"),
                 message("hello there"),
             ],
-            false,
+            Worker::Running,
             cx,
         );
         let channel = chat.state.conversations()[0].id;
@@ -102,7 +102,7 @@ fn the_combined_log_flows_channel_network_and_nickname_into_the_text(cx: &mut Te
                     replayed: false,
                 },
             ],
-            false,
+            Worker::Running,
             cx,
         );
         let channel = chat.state.conversations()[0].id;

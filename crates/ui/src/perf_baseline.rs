@@ -37,7 +37,7 @@ use cayenchat_irc_core::{Event, WireDirection};
 use cayenchat_model::NetworkId;
 use gpui::{Focusable, TestAppContext};
 
-use crate::{ChatWindow, Selection};
+use crate::{ChatWindow, Selection, Worker};
 
 const CHANNELS: usize = 10;
 const MEMBERS: usize = 50;
@@ -269,7 +269,7 @@ fn run(cx: &mut TestAppContext, servers: usize, images: bool, avatars: bool, sho
     }
     for network in &networks {
         chat.update(cx, |chat, cx| {
-            chat.handle_events(*network, setup.clone(), false, cx)
+            chat.handle_events(*network, setup.clone(), Worker::Running, cx)
         });
     }
     let mut sequence = 0;
@@ -282,7 +282,7 @@ fn run(cx: &mut TestAppContext, servers: usize, images: bool, avatars: bool, sho
     for network in &networks {
         for batch in history.chunks(EVENT_BATCH) {
             chat.update(cx, |chat, cx| {
-                chat.handle_events(*network, batch.to_vec(), false, cx)
+                chat.handle_events(*network, batch.to_vec(), Worker::Running, cx)
             });
         }
     }
@@ -389,7 +389,11 @@ fn run(cx: &mut TestAppContext, servers: usize, images: bool, avatars: bool, sho
             })
             .collect();
         let network = networks[index % networks.len()];
-        burst.time(|| chat.update(cx, |chat, cx| chat.handle_events(network, batch, false, cx)));
+        burst.time(|| {
+            chat.update(cx, |chat, cx| {
+                chat.handle_events(network, batch, Worker::Running, cx)
+            })
+        });
     }
     burst.report();
 
@@ -419,7 +423,7 @@ fn run(cx: &mut TestAppContext, servers: usize, images: bool, avatars: bool, sho
         }];
         roster.time(|| {
             chat.update(cx, |chat, cx| {
-                chat.handle_events(networks[0], names, false, cx)
+                chat.handle_events(networks[0], names, Worker::Running, cx)
             })
         });
     }
@@ -441,7 +445,7 @@ fn run(cx: &mut TestAppContext, servers: usize, images: bool, avatars: bool, sho
             .collect();
         burst.time(|| {
             chat.update(cx, |chat, cx| {
-                chat.handle_events(networks[0], names, false, cx)
+                chat.handle_events(networks[0], names, Worker::Running, cx)
             })
         });
     }

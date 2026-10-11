@@ -314,7 +314,7 @@ mod tests {
     use cayenchat_model::NetworkId;
     use gpui::{Entity, Focusable, TestAppContext, VisualTestContext};
 
-    use crate::ChatWindow;
+    use crate::{ChatWindow, Worker};
 
     const A: &str = "https://images.example.com/a.png";
     const B: &str = "https://images.example.com/b.png";
@@ -406,7 +406,7 @@ mod tests {
                 vec![Event::Registered {
                     nickname: "me".into(),
                 }],
-                false,
+                Worker::Running,
                 cx,
             );
             let channel = chat.state.conversations()[0].id;
@@ -433,7 +433,7 @@ mod tests {
                     account: None,
                     replayed: false,
                 }],
-                false,
+                Worker::Running,
                 cx,
             );
         });
@@ -584,7 +584,7 @@ mod tests {
                     account: None,
                     replayed: false,
                 }],
-                false,
+                Worker::Running,
                 cx,
             );
         });
@@ -631,7 +631,7 @@ mod tests {
                 vec![Event::Registered {
                     nickname: "me".into(),
                 }],
-                false,
+                Worker::Running,
                 cx,
             );
             chat.handle_events(
@@ -646,7 +646,7 @@ mod tests {
                     account: None,
                     replayed: false,
                 }],
-                false,
+                Worker::Running,
                 cx,
             );
             let channel = chat

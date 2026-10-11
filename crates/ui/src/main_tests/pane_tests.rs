@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-use super::{ChatWindow, LogPosition, LogSelection, Selection};
+use super::{ChatWindow, LogPosition, LogSelection, Selection, Worker};
 use cayenchat_model::NetworkId;
 use cayenchat_storage::Settings;
 use gpui::EntityInputHandler as _;
@@ -32,7 +32,7 @@ fn the_title_shows_the_member_count_of_a_channel(cx: &mut TestAppContext) {
                     channel: "#a".into(),
                 },
             ],
-            false,
+            Worker::Running,
             cx,
         );
         let channel = chat.state.conversations()[0].id;
@@ -119,15 +119,15 @@ fn rosters_around_a_case_mapping_change_update_both_conversations(cx: &mut TestA
         ChatWindow::with_settings(settings.clone(), None, window, cx)
     });
     separate.update(cx, |chat, cx| {
-        chat.handle_events(NetworkId(1), setup(), false, cx);
+        chat.handle_events(NetworkId(1), setup(), Worker::Running, cx);
         for event in events() {
-            chat.handle_events(NetworkId(1), vec![event], false, cx);
+            chat.handle_events(NetworkId(1), vec![event], Worker::Running, cx);
         }
     });
     let expected = separate.read_with(cx, |chat, _| rosters(chat));
     chat.update(cx, |chat, cx| {
-        chat.handle_events(NetworkId(1), setup(), false, cx);
-        chat.handle_events(NetworkId(1), events(), false, cx);
+        chat.handle_events(NetworkId(1), setup(), Worker::Running, cx);
+        chat.handle_events(NetworkId(1), events(), Worker::Running, cx);
         assert_eq!(rosters(chat), expected);
     });
     assert!(
@@ -170,7 +170,7 @@ fn clicking_members_selects_them_and_the_menu_keeps_a_chosen_group(cx: &mut Test
                     channel: "#a".into(),
                 },
             ],
-            false,
+            Worker::Running,
             cx,
         );
         let members = ["@op", "alice", "bob", "carol"].map(String::from).to_vec();
@@ -360,7 +360,7 @@ fn member_rows_do_not_overlap(cx: &mut TestAppContext) {
                         ],
                     },
                 ],
-                false,
+                Worker::Running,
                 cx,
             );
             let channel = chat.state.conversations()[0].id;
@@ -414,7 +414,7 @@ fn focused_lists_take_the_standard_movement_keys(cx: &mut TestAppContext) {
                 users: vec!["@op".into(), "alice".into(), "bob".into()],
             });
         }
-        chat.handle_events(NetworkId(1), events, false, cx);
+        chat.handle_events(NetworkId(1), events, Worker::Running, cx);
         let first = chat.state.conversations()[0].id;
         chat.state
             .dispatch(cayenchat_app::Command::SelectChannel(first));
@@ -666,7 +666,7 @@ fn member_keys_scroll_only_when_the_row_leaves_the_view(cx: &mut TestAppContext)
                     users,
                 },
             ],
-            false,
+            Worker::Running,
             cx,
         );
         let first = chat.state.conversations()[0].id;
@@ -783,7 +783,7 @@ fn a_member_who_leaves_stays_unchosen_when_the_nickname_is_taken_again(cx: &mut 
                 },
                 names(&["@op", "alice", "bob"]),
             ],
-            false,
+            Worker::Running,
             cx,
         );
         let channel = chat.state.conversations()[0].id;
@@ -812,7 +812,7 @@ fn a_member_who_leaves_stays_unchosen_when_the_nickname_is_taken_again(cx: &mut 
     // She quits, and someone else uses the nickname: not chosen.
     for users in [&["@op", "bob"][..], &["@op", "alice", "bob"][..]] {
         chat.update(cx, |chat, cx| {
-            chat.handle_events(NetworkId(1), vec![names(users)], false, cx)
+            chat.handle_events(NetworkId(1), vec![names(users)], Worker::Running, cx)
         });
         cx.run_until_parked();
     }
@@ -830,7 +830,7 @@ fn a_member_who_leaves_stays_unchosen_when_the_nickname_is_taken_again(cx: &mut 
             names(&["@op", "bob"]),
             names(&["@op", "alice", "bob", "carol"]),
         ];
-        chat.handle_events(NetworkId(1), batch, false, cx)
+        chat.handle_events(NetworkId(1), batch, Worker::Running, cx)
     });
     cx.run_until_parked();
     assert!(chosen(&chat, cx).is_empty());
@@ -842,7 +842,7 @@ fn a_member_who_leaves_stays_unchosen_when_the_nickname_is_taken_again(cx: &mut 
         chat.handle_events(
             NetworkId(1),
             vec![names(&["@op", "alice", "bob"])],
-            false,
+            Worker::Running,
             cx,
         )
     });
@@ -870,7 +870,7 @@ fn a_member_who_leaves_stays_unchosen_when_the_nickname_is_taken_again(cx: &mut 
     assert_eq!(now, ["alice", "bob"]);
     for users in [&["@op", "bob"][..], &["@op", "alice", "bob"][..]] {
         chat.update(cx, |chat, cx| {
-            chat.handle_events(NetworkId(1), vec![names(users)], false, cx)
+            chat.handle_events(NetworkId(1), vec![names(users)], Worker::Running, cx)
         });
         cx.run_until_parked();
     }
@@ -1476,11 +1476,21 @@ fn a_connection_the_user_ended_is_not_reconnected(cx: &mut TestAppContext) {
             session.retry_pending = false;
         };
         connected(chat);
-        chat.handle_events(network, vec![Event::Disconnected("gone".into())], false, cx);
+        chat.handle_events(
+            network,
+            vec![Event::Disconnected("gone".into())],
+            Worker::Running,
+            cx,
+        );
         assert!(chat.sessions[&network].retry_pending, "a lost link retries");
         // `/quit` reaches the worker as a command; it reports the end as Closed.
         connected(chat);
-        chat.handle_events(network, vec![Event::Closed("bye".into())], false, cx);
+        chat.handle_events(
+            network,
+            vec![Event::Closed("bye".into())],
+            Worker::Running,
+            cx,
+        );
         let session = &chat.sessions[&network];
         assert!(session.manual_disconnect && !session.retry_pending);
     });
@@ -1532,7 +1542,7 @@ fn repeated_message_ids_are_shown_and_notified_once(cx: &mut TestAppContext) {
                 mention("m1", false),
                 mention("m2", false),
             ],
-            false,
+            Worker::Running,
             cx,
         );
         assert_eq!(chat.notifier.shown.len(), 2);
@@ -1615,7 +1625,7 @@ fn requested_history_is_inserted_quietly_before_newer_lines(cx: &mut TestAppCont
                     ],
                 },
             ],
-            false,
+            Worker::Running,
             cx,
         );
         assert_eq!(chat.notifier.shown.len(), 1, "only the live mention");
@@ -1715,7 +1725,7 @@ fn discovered_direct_messages_open_quietly_and_overlap_is_dropped(cx: &mut TestA
                     ],
                 },
             ],
-            false,
+            Worker::Running,
             cx,
         );
         let key = |nick: &str| cayenchat_irc_core::text::nickname_key(nick);
@@ -1818,7 +1828,7 @@ fn scrolling_to_the_top_loads_one_older_page_quietly(cx: &mut TestAppContext) {
                     messages: vec![line("recent", 1_790_550_000, "r1")],
                 },
             ],
-            false,
+            Worker::Running,
             cx,
         );
         let b = chat.state.channel_id(NetworkId(1), "#b").unwrap();
@@ -1878,7 +1888,7 @@ fn scrolling_to_the_top_loads_one_older_page_quietly(cx: &mut TestAppContext) {
                     status: OlderHistoryStatus::Beginning,
                 },
             ],
-            false,
+            Worker::Running,
             cx,
         );
         assert_eq!(chat.notifier.shown.len(), before, "history never notifies");
@@ -1915,7 +1925,7 @@ fn scrolling_to_the_top_loads_one_older_page_quietly(cx: &mut TestAppContext) {
                 messages: vec![line("stale", 1_790_530_000, "s1")],
                 status: OlderHistoryStatus::More,
             }],
-            false,
+            Worker::Running,
             cx,
         );
         assert_eq!(chat.state.conversations()[1].messages.len(), 3);
@@ -1960,7 +1970,7 @@ fn sent_messages_are_confirmed_in_place_and_unconfirmed_ones_are_marked(cx: &mut
                 accepted(Some(3), "never answered"),
                 accepted(None, "no echo-message here"),
             ],
-            false,
+            Worker::Running,
             cx,
         );
         let id = chat.state.channel_id(NetworkId(1), "#a").unwrap();
@@ -1990,7 +2000,7 @@ fn sent_messages_are_confirmed_in_place_and_unconfirmed_ones_are_marked(cx: &mut
                     reason: "Cannot send to channel".into(),
                 },
             ],
-            false,
+            Worker::Running,
             cx,
         );
         // Replaced in place, not added again.
@@ -2014,7 +2024,7 @@ fn sent_messages_are_confirmed_in_place_and_unconfirmed_ones_are_marked(cx: &mut
         chat.handle_events(
             NetworkId(1),
             vec![Event::Disconnected("gone".into())],
-            false,
+            Worker::Running,
             cx,
         );
         assert!(lines(chat).contains(&("never answered".to_owned(), true)));
@@ -2031,7 +2041,7 @@ fn sent_messages_are_confirmed_in_place_and_unconfirmed_ones_are_marked(cx: &mut
         chat.handle_events(
             NetworkId(1),
             vec![Event::Disconnected("still gone".into())],
-            false,
+            Worker::Running,
             cx,
         );
         assert_eq!(lost(chat), 1);
@@ -2075,7 +2085,7 @@ fn tracked_accounts_fill_whois_and_are_forgotten_with_the_connection(cx: &mut Te
                     nickname: "EVE".into(),
                 },
             ],
-            false,
+            Worker::Running,
             cx,
         );
         let accounts = |chat: &ChatWindow| chat.sessions[&NetworkId(1)].user_accounts.clone();
@@ -2099,7 +2109,7 @@ fn tracked_accounts_fill_whois_and_are_forgotten_with_the_connection(cx: &mut Te
         chat.handle_events(
             NetworkId(1),
             vec![Event::Disconnected("gone".into())],
-            false,
+            Worker::Running,
             cx,
         );
         assert!(accounts(chat).is_empty());
@@ -2166,7 +2176,7 @@ fn a_reconnect_recovers_missed_lines_where_the_log_was_cut_off(cx: &mut TestAppC
                 message("A", 1_790_550_000, "m1"),
                 Event::Disconnected("connection reset".into()),
             ]),
-            false,
+            Worker::Running,
             cx,
         );
         // The next connection resumes #a after its last line.
@@ -2202,7 +2212,7 @@ fn a_reconnect_recovers_missed_lines_where_the_log_was_cut_off(cx: &mut TestAppC
                     incomplete: true,
                 },
             ]),
-            false,
+            Worker::Running,
             cx,
         );
         assert_eq!(
@@ -2269,7 +2279,7 @@ fn private_messages_get_their_own_conversations(cx: &mut TestAppContext) {
                 vec![Event::Registered {
                     nickname: "alice".into(),
                 }],
-                false,
+                Worker::Running,
                 cx,
             );
         }
@@ -2311,14 +2321,14 @@ fn private_messages_get_their_own_conversations(cx: &mut TestAppContext) {
                     replayed: false,
                 },
             ],
-            false,
+            Worker::Running,
             cx,
         );
         // The same nickname on the other server is someone else.
         chat.handle_events(
             two,
             vec![pm("bob", "other server", false, false)],
-            false,
+            Worker::Running,
             cx,
         );
 
@@ -2379,7 +2389,12 @@ fn private_messages_get_their_own_conversations(cx: &mut TestAppContext) {
         chat.state
             .dispatch(cayenchat_app::Command::SelectChannel(bob));
         chat.window_active = true;
-        chat.handle_events(one, vec![pm("bob", "seen", false, false)], false, cx);
+        chat.handle_events(
+            one,
+            vec![pm("bob", "seen", false, false)],
+            Worker::Running,
+            cx,
+        );
         assert_eq!(chat.notifier.shown.len(), 3);
         assert!(!chat.state.is_highlighted(bob));
 
@@ -2397,7 +2412,7 @@ fn private_messages_get_their_own_conversations(cx: &mut TestAppContext) {
                 },
                 pm("bob", "a new bob", false, false),
             ],
-            false,
+            Worker::Running,
             cx,
         );
         let robert = chat
@@ -2628,7 +2643,7 @@ fn colored_mentions_highlight_where_they_are_drawn(cx: &mut TestAppContext) {
                     replayed: false,
                 },
             ],
-            false,
+            Worker::Running,
             cx,
         );
         let channel = &chat.state.conversations()[0];
@@ -2686,7 +2701,7 @@ fn action_verbs_and_senders_are_not_keywords_and_old_lines_stay(cx: &mut TestApp
                 message("\u{1}ACTION waves\u{1}"),
                 message("\u{1}ACTION deploys\u{1}"),
             ],
-            false,
+            Worker::Running,
             cx,
         );
         let shown = |chat: &ChatWindow, index: usize| -> Vec<String> {
@@ -2712,7 +2727,7 @@ fn action_verbs_and_senders_are_not_keywords_and_old_lines_stay(cx: &mut TestApp
                 },
                 message("hello carol, deploy"),
             ],
-            false,
+            Worker::Running,
             cx,
         );
         assert_eq!(shown(chat, waves + 1), ["deploy"]);
@@ -2762,7 +2777,7 @@ fn highlights_and_private_messages_notify_unless_visible(cx: &mut TestAppContext
                     channel: "#b".into(),
                 },
             ],
-            false,
+            Worker::Running,
             cx,
         );
         chat.state.dispatch(cayenchat_app::Command::SelectChannel(
@@ -2815,14 +2830,14 @@ fn highlights_and_private_messages_notify_unless_visible(cx: &mut TestAppContext
                     replayed: false,
                 },
             ],
-            false,
+            Worker::Running,
             cx,
         );
         chat.window_active = false;
         chat.handle_events(
             NetworkId(1),
             vec![message("#a", "alice: away now")],
-            false,
+            Worker::Running,
             cx,
         );
         assert!(
@@ -2833,7 +2848,7 @@ fn highlights_and_private_messages_notify_unless_visible(cx: &mut TestAppContext
         chat.handle_events(
             NetworkId(1),
             vec![message("#a", "alice: ignored")],
-            false,
+            Worker::Running,
             cx,
         );
         chat.notification_burst = cayenchat_app::notifications::BurstLimiter::default();
@@ -2842,7 +2857,7 @@ fn highlights_and_private_messages_notify_unless_visible(cx: &mut TestAppContext
         chat.handle_events(
             NetworkId(1),
             vec![message("#a", "alice: with sound")],
-            false,
+            Worker::Running,
             cx,
         );
         let loud = chat.notifier.shown.pop().expect("sound notification");
@@ -2904,7 +2919,7 @@ fn highlights_and_private_messages_notify_unless_visible(cx: &mut TestAppContext
                 msgid: None,
                 account: None,
             }],
-            false,
+            Worker::Running,
             cx,
         );
         assert!(!chat.state.is_highlighted(b));
@@ -2948,7 +2963,7 @@ fn old_server_times_display_locally_and_still_notify(cx: &mut TestAppContext) {
                     channel: "#b".into(),
                 },
             ],
-            false,
+            Worker::Running,
             cx,
         );
         chat.state.dispatch(cayenchat_app::Command::SelectChannel(
@@ -2978,7 +2993,7 @@ fn old_server_times_display_locally_and_still_notify(cx: &mut TestAppContext) {
                     replayed: false,
                 },
             ],
-            false,
+            Worker::Running,
             cx,
         );
         let b = &chat.state.conversations()[1];
@@ -3047,7 +3062,7 @@ fn safe_channel_events_keep_messages_and_members_in_the_channel(cx: &mut TestApp
                     notice: true,
                 },
             ],
-            false,
+            Worker::Running,
             cx,
         );
         let conversations = chat.state.conversations();
@@ -3073,7 +3088,7 @@ fn safe_channel_events_keep_messages_and_members_in_the_channel(cx: &mut TestApp
             vec![Event::Parted {
                 channel: channel.into(),
             }],
-            false,
+            Worker::Running,
             cx,
         );
         assert!(!chat.state.is_active_channel(id));
@@ -3139,8 +3154,13 @@ fn events_stay_with_their_server_and_removed_servers_disappear(cx: &mut TestAppC
     chat.update(cx, |chat, cx| {
         assert_eq!(chat.state.networks().len(), 2);
         assert_eq!(chat.sessions[&custom_net].profile_id, custom);
-        chat.handle_events(custom_net, session_events("#a", "custom"), false, cx);
-        chat.handle_events(ircnet, session_events("#a", "ircnet"), false, cx);
+        chat.handle_events(
+            custom_net,
+            session_events("#a", "custom"),
+            Worker::Running,
+            cx,
+        );
+        chat.handle_events(ircnet, session_events("#a", "ircnet"), Worker::Running, cx);
         fn texts(chat: &ChatWindow, network: NetworkId) -> Vec<String> {
             chat.state
                 .conversations()
@@ -3159,7 +3179,7 @@ fn events_stay_with_their_server_and_removed_servers_disappear(cx: &mut TestAppC
         chat.handle_events(
             custom_net,
             vec![Event::Disconnected("gone".into())],
-            false,
+            Worker::Running,
             cx,
         );
         assert!(matches!(
@@ -3219,8 +3239,8 @@ fn each_server_that_rejects_a_nickname_gets_its_own_field(cx: &mut TestAppContex
         }]
     };
     chat.update(cx, |chat, cx| {
-        chat.handle_events(first, rejected("alice"), false, cx);
-        chat.handle_events(second, rejected("bob"), false, cx);
+        chat.handle_events(first, rejected("alice"), Worker::Running, cx);
+        chat.handle_events(second, rejected("bob"), Worker::Running, cx);
     });
     cx.run_until_parked();
     let rows = |chat: &ChatWindow, cx: &gpui::App| {
@@ -3251,7 +3271,7 @@ fn each_server_that_rejects_a_nickname_gets_its_own_field(cx: &mut TestAppContex
 
     // A second rejection on the same server updates its row.
     chat.update(cx, |chat, cx| {
-        chat.handle_events(first, rejected("alice_x"), false, cx)
+        chat.handle_events(first, rejected("alice_x"), Worker::Running, cx)
     });
     let after = chat.read_with(cx, |chat, cx| rows(chat, cx));
     assert_eq!(after.len(), 2);
@@ -3264,7 +3284,7 @@ fn each_server_that_rejects_a_nickname_gets_its_own_field(cx: &mut TestAppContex
             vec![Event::Registered {
                 nickname: "alice_x_".into(),
             }],
-            false,
+            Worker::Running,
             cx,
         )
     });
