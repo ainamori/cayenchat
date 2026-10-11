@@ -60,6 +60,11 @@ pub(crate) struct SettingsForm {
     pub(crate) dark_sub_log_alternate: Entity<TextInput>,
     pub(crate) url_tooltip_color: Entity<TextInput>,
     pub(crate) dark_url_tooltip_color: Entity<TextInput>,
+    pub(crate) link_color: Entity<TextInput>,
+    pub(crate) dark_link_color: Entity<TextInput>,
+    /// Empty is automatic.
+    pub(crate) link_background: Entity<TextInput>,
+    pub(crate) dark_link_background: Entity<TextInput>,
     /// Percent, as typed.
     pub(crate) url_tooltip_opacity: Entity<TextInput>,
     pub(crate) main_log_font: Entity<TextInput>,
@@ -226,6 +231,20 @@ impl SettingsForm {
                 false,
                 cx,
             ),
+            link_color: field("#0645AD", &values.appearance.link_color, false, cx),
+            dark_link_color: field("#78AAFF", &values.appearance.dark.link_color, false, cx),
+            link_background: field(
+                &i18n.text("link_background_auto"),
+                &values.appearance.link_background,
+                false,
+                cx,
+            ),
+            dark_link_background: field(
+                &i18n.text("link_background_auto"),
+                &values.appearance.dark.link_background,
+                false,
+                cx,
+            ),
             url_tooltip_opacity: field(
                 "80",
                 &values.appearance.url_tooltip_opacity.to_string(),
@@ -335,6 +354,8 @@ impl SettingsForm {
             sub_log_background: value(&self.sub_log_background),
             sub_log_alternate: value(&self.sub_log_alternate),
             url_tooltip_color: value(&self.url_tooltip_color),
+            link_color: value(&self.link_color),
+            link_background: value(&self.link_background),
             url_tooltip_opacity: value(&self.url_tooltip_opacity)
                 .parse()
                 .ok()
@@ -363,6 +384,8 @@ impl SettingsForm {
                 sub_log_background: value(&self.dark_sub_log_background),
                 sub_log_alternate: value(&self.dark_sub_log_alternate),
                 url_tooltip_color: value(&self.dark_url_tooltip_color),
+                link_color: value(&self.dark_link_color),
+                link_background: value(&self.dark_link_background),
             },
             saved_colors: self.values.appearance.saved_colors.clone(),
         };
@@ -397,7 +420,7 @@ impl SettingsForm {
     }
 
     /// Every text field, so edits to any of them can trigger an autosave.
-    fn text_fields(&self) -> [&Entity<TextInput>; 38] {
+    fn text_fields(&self) -> [&Entity<TextInput>; 42] {
         [
             &self.custom_host,
             &self.port,
@@ -428,6 +451,10 @@ impl SettingsForm {
             &self.dark_sub_log_alternate,
             &self.url_tooltip_color,
             &self.dark_url_tooltip_color,
+            &self.link_color,
+            &self.dark_link_color,
+            &self.link_background,
+            &self.dark_link_background,
             &self.url_tooltip_opacity,
             &self.main_log_font,
             &self.sub_log_font,
@@ -2679,6 +2706,18 @@ impl SettingsWindow {
                 &self.i18n.text("combined_log_alternate"),
                 &self.settings.sub_log_alternate,
                 &self.settings.dark_sub_log_alternate,
+                cx,
+            ))
+            .child(self.color_pair(
+                &self.i18n.text("link_color"),
+                &self.settings.link_color,
+                &self.settings.dark_link_color,
+                cx,
+            ))
+            .child(self.color_pair(
+                &self.i18n.text("link_background"),
+                &self.settings.link_background,
+                &self.settings.dark_link_background,
                 cx,
             ))
             .child(self.color_pair(

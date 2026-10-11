@@ -3775,30 +3775,39 @@ fn styled_log_text(
                 color: if is_prefix {
                     Some(theme.nickname.into())
                 } else if is_url {
-                    Some(theme.link.into())
+                    Some(theme.panes.log_link.into())
                 } else {
                     is_highlight.then_some(theme.panes.highlight.into())
                 },
                 font_weight: is_highlight.then_some(FontWeight::BOLD),
                 underline: is_url.then_some(UnderlineStyle {
-                    color: Some(theme.link.into()),
+                    color: Some(theme.panes.log_link.into()),
                     thickness: px(1.),
                     wavy: false,
                 }),
                 background_color: if is_selected {
                     Some(theme.selected.into())
                 } else {
-                    is_chip.then(|| {
-                        let mut chip = theme.link;
-                        chip.a = 0.14;
-                        chip.into()
-                    })
+                    link_background(theme, is_url, is_chip).map(Into::into)
                 },
                 ..Default::default()
             },
         ))
     });
     StyledText::new(format!("{prefix}{text}")).with_highlights(highlights)
+}
+
+/// The background behind a URL in a log: the configured color for any URL,
+/// otherwise none, or a faint tint of the link color for a shortened one.
+fn link_background(theme: &Theme, is_url: bool, is_chip: bool) -> Option<Rgba> {
+    let tint = || Rgba {
+        a: 0.14,
+        ..theme.panes.log_link
+    };
+    match theme.panes.log_link_background {
+        Some(background) if is_url || is_chip => Some(background),
+        _ => is_chip.then(tint),
+    }
 }
 
 /// A preview below a message: the thumbnail, or a box of the full height

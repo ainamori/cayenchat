@@ -22,6 +22,11 @@ pub struct PaneColors {
     pub sub_alternate: Rgba,
     /// Bubble showing a shortened URL in full, with its opacity as alpha.
     pub url_tooltip: Rgba,
+    /// Text and underline of URLs in the channel logs only; `Theme::link`
+    /// stays for the rest of the UI.
+    pub log_link: Rgba,
+    /// Background behind URLs in the channel logs; `None` is automatic.
+    pub log_link_background: Option<Rgba>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -107,6 +112,8 @@ impl Theme {
                     color(&appearance.url_tooltip_color, 0xffffff),
                     appearance.url_tooltip_opacity,
                 ),
+                log_link: color(&appearance.link_color, 0x0645ad),
+                log_link_background: color_value(&appearance.link_background).map(rgb),
             },
         }
     }
@@ -146,6 +153,8 @@ impl Theme {
                     color(&colors.url_tooltip_color, 0x2a2d32),
                     appearance.url_tooltip_opacity,
                 ),
+                log_link: color(&colors.link_color, 0x78aaff),
+                log_link_background: color_value(&colors.link_background).map(rgb),
             },
         }
     }
