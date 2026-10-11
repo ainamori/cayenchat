@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Files only the user can read, replaced whole or not at all.
 
 use std::{

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Where the main window and its panes were last left.
 //!
 //! This is application UI state, kept in its own file beside the settings so

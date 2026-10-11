@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Versioned preferences. Secrets are not part of the preferences file; they
 //! live in the [`credentials`] store.
 
