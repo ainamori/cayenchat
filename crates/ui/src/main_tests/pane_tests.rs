@@ -3393,3 +3393,32 @@ fn typing_reuses_panes_and_new_messages_redraw_them(cx: &mut TestAppContext) {
     });
     assert!(rows >= 1);
 }
+
+#[gpui::test]
+fn the_window_lays_out_at_its_smallest_size_and_recovers(cx: &mut TestAppContext) {
+    use super::MIN_WINDOW_SIZE;
+    use gpui::px;
+
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let settings = crate::settings_with_channels("#a");
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    cx.run_until_parked();
+    cx.simulate_resize(gpui::size(px(MIN_WINDOW_SIZE.0), px(MIN_WINDOW_SIZE.1)));
+    cx.run_until_parked();
+    let column = chat
+        .read_with(cx, |chat, _| chat.right_column_bounds.get())
+        .expect("the column was laid out");
+    assert!(f32::from(column.size.width) >= 0. && f32::from(column.size.height) > 0.);
+    cx.simulate_resize(gpui::size(px(960.), px(600.)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("members-split").is_some());
+}

@@ -281,7 +281,8 @@ into a pane size within the owner's minimum and maximum, measured from where
 the button went down (GPUI starts a drag only after a small movement). The
 owner stores the size; the handle draws and measures nothing else. The chat
 window uses it for the boundary between the left column and the right column
-(members over channel tree; 160 px at least, and the left column keeps 360 px)
+(members over channel tree; 160 px at least, and the left column keeps 160 px; the window itself shrinks to 320×240 and
+panes clip below their comfortable sizes)
 and for the one between the member list and the channel tree (80 px at least
 each; an even split until first dragged). The boundary between the two logs
 keeps its own handle, which also moves it with the pointer within limits and

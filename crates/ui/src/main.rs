@@ -93,7 +93,9 @@ const LAYOUT_SAVE_DELAY: Duration = Duration::from_millis(500);
 /// width the left column keeps.
 const DEFAULT_RIGHT_WIDTH: f32 = 240.;
 const RIGHT_WIDTH_MIN: f32 = 160.;
-const LEFT_MIN_WIDTH: f32 = 360.;
+const LEFT_MIN_WIDTH: f32 = 160.;
+/// Smallest main window; panes shrink and clip below their comfortable sizes.
+const MIN_WINDOW_SIZE: (f32, f32) = (320., 240.);
 /// Least height of the member list or the channel tree.
 const RIGHT_PANE_MIN_HEIGHT: f32 = 80.;
 const LOG_SPLIT_LIMITS: (f32, f32) = (0.1, 0.9);
@@ -6309,7 +6311,7 @@ fn main() {
         .detach();
         // Where the window was left, when that is remembered and a connected
         // display still shows it; otherwise the usual place.
-        let min_size = size(px(720.), px(420.));
+        let min_size = size(px(MIN_WINDOW_SIZE.0), px(MIN_WINDOW_SIZE.1));
         let layout = if saved.restore_window_layout {
             cayenchat_storage::layout::load_layout()
         } else {
