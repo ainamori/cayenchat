@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Services accounts of the users we share a channel with (opt-in per
 //! server as "User accounts"): IRCv3 `extended-join`, `account-notify` and,
 //! for the users already present when we join, one WHOX query per channel.

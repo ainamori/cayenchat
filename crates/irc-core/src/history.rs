@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Channel history requested with IRCv3 `draft/chathistory` (opt-in per
 //! server, experimental).
 //!

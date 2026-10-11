@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Who is present in which joined channel, indexed both ways.
 //!
 //! The index lives in the connection's worker next to the published rosters

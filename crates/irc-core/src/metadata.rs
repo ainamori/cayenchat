@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! The subset of the experimental IRCv3 metadata draft (`draft/metadata-2`)
 //! that user avatars need: following other users' avatars, looking up users
 //! who join after us, and publishing or removing our own.

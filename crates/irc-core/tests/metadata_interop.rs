@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Interoperability check of the avatar metadata subset against a real,
 //! independent server (spec/development.md, "IRC metadata interoperability").
 //! Ignored by default; it needs a disposable local server, for example the

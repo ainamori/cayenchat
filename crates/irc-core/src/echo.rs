@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Server-confirmed sending (opt-in per server): IRCv3 `echo-message` and
 //! `labeled-response`.
 //!
