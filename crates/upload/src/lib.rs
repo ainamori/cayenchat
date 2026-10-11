@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! External image hosting for IRC.
 //!
 //! IRC has no attachments, so an image is uploaded to a hosting account the

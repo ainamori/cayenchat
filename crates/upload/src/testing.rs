@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! A scripted uploader for tests; it never touches the network.
 
 use std::sync::{
