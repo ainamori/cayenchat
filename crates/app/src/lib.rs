@@ -643,8 +643,8 @@ impl AppState {
         } else {
             group[target..=from].rotate_right(1);
         }
-        let network = self.conversations.iter().find(|c| c.id == id)?.network;
-        if !self.conversations.iter().find(|c| c.id == id)?.is_private() {
+        let network = self.conversation(id)?.network;
+        if !self.conversation(id)?.is_private() {
             let order = self.merged_channel_order(network);
             self.store_channel_order(network, order);
         }
@@ -904,7 +904,7 @@ impl AppState {
         create: bool,
     ) -> Option<ConversationId> {
         if let Some(id) = self.private_id(network, peer_key) {
-            if let Some(conversation) = self.conversations.iter_mut().find(|c| c.id == id)
+            if let Some(conversation) = self.conversation_mut(id)
                 && conversation.name != name
             {
                 conversation.name = name.to_owned();
@@ -949,7 +949,7 @@ impl AppState {
         if from_key != to_key && self.private_id(network, to_key).is_some() {
             return None;
         }
-        let conversation = self.conversations.iter_mut().find(|c| c.id == id)?;
+        let conversation = self.conversation_mut(id)?;
         conversation.kind = ConversationKind::Private {
             peer_key: to_key.to_owned(),
         };
@@ -1139,11 +1139,7 @@ impl AppState {
             // and a channel left on purpose has nothing to recover.
             self.older_history.remove(&id);
             self.resume_points.remove(&id);
-            if let Some(channel) = self
-                .conversations
-                .iter_mut()
-                .find(|channel| channel.id == id)
-            {
+            if let Some(channel) = self.conversation_mut(id) {
                 channel.members.clear();
             }
         }
@@ -1151,10 +1147,7 @@ impl AppState {
 
     pub fn set_members(&mut self, network: NetworkId, name: &str, members: Vec<String>) {
         if let Some(id) = self.channel_id(network, name)
-            && let Some(channel) = self
-                .conversations
-                .iter_mut()
-                .find(|channel| channel.id == id)
+            && let Some(channel) = self.conversation_mut(id)
         {
             channel.members = sorted_members(members);
         }
@@ -1164,10 +1157,7 @@ impl AppState {
     /// channels not in the tree are ignored.
     pub fn set_topic(&mut self, network: NetworkId, name: &str, topic: &str) {
         if let Some(id) = self.channel_id(network, name)
-            && let Some(channel) = self
-                .conversations
-                .iter_mut()
-                .find(|channel| channel.id == id)
+            && let Some(channel) = self.conversation_mut(id)
         {
             channel.topic = display::neutralize_bidi(topic).into_owned();
         }
@@ -1259,7 +1249,7 @@ impl AppState {
         notice: bool,
         meta: MessageMeta,
     ) -> bool {
-        let Some(conversation) = self.conversations.iter_mut().find(|c| c.id == id) else {
+        let Some(conversation) = self.conversation_mut(id) else {
             return false;
         };
         let Ok(index) = conversation
@@ -1296,7 +1286,7 @@ impl AppState {
 
     /// Marks our message `sequence` of conversation `id` as not delivered.
     pub fn fail_message(&mut self, id: ConversationId, sequence: u64) {
-        if let Some(conversation) = self.conversations.iter_mut().find(|c| c.id == id)
+        if let Some(conversation) = self.conversation_mut(id)
             && let Ok(index) = conversation
                 .messages
                 .binary_search_by_key(&sequence, |message| message.sequence)
@@ -1550,7 +1540,7 @@ impl AppState {
     /// [`AppState::insert_older_history`] or
     /// [`AppState::older_history_failed`].
     pub fn request_older_history(&mut self, id: ConversationId) -> Option<OlderHistoryRequest> {
-        let conversation = self.conversations.iter().find(|c| c.id == id)?;
+        let conversation = self.conversation(id)?;
         let state = self.older_history.get(&id).copied().unwrap_or_default();
         if !self.history_paging.contains(&conversation.network)
             || conversation.is_private()
@@ -1737,6 +1727,14 @@ impl AppState {
         &self.conversations
     }
 
+    pub fn conversation(&self, id: ConversationId) -> Option<&Conversation> {
+        self.conversations.iter().find(|c| c.id == id)
+    }
+
+    pub fn conversation_mut(&mut self, id: ConversationId) -> Option<&mut Conversation> {
+        self.conversations.iter_mut().find(|c| c.id == id)
+    }
+
     pub fn selection(&self) -> Selection {
         self.selected
     }
@@ -1745,7 +1743,7 @@ impl AppState {
         let Selection::Channel(id) = self.selected else {
             return None;
         };
-        self.conversations.iter().find(|channel| channel.id == id)
+        self.conversation(id)
     }
 
     /// The selected server, or the server of the selected channel; `None`
@@ -1754,9 +1752,7 @@ impl AppState {
         let id = match self.selected {
             Selection::Server(id) => id,
             Selection::Channel(id) => {
-                self.conversations
-                    .iter()
-                    .find(|channel| channel.id == id)
+                self.conversation(id)
                     .expect("selected channel exists")
                     .network
             }

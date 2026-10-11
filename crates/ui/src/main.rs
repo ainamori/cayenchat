@@ -1876,7 +1876,7 @@ impl ChatWindow {
         let Some(id) = self.state.channel_id(menu.network, &menu.channel) else {
             return Vec::new();
         };
-        let Some(conversation) = self.state.conversations().iter().find(|c| c.id == id) else {
+        let Some(conversation) = self.state.conversation(id) else {
             return Vec::new();
         };
         let chosen = self
@@ -2609,7 +2609,7 @@ impl ChatWindow {
     /// Asks the conversation's connection for one older page, if one may
     /// be asked for now.
     fn load_older_history(&mut self, id: ConversationId) {
-        let Some(conversation) = self.state.conversations().iter().find(|c| c.id == id) else {
+        let Some(conversation) = self.state.conversation(id) else {
             return;
         };
         let (network, channel) = (conversation.network, conversation.name.clone());
@@ -3297,8 +3297,7 @@ impl ChatWindow {
                 // Whoever left (or renamed) is no longer chosen, so a later
                 // user of that nickname is not.
                 if let Some(id) = self.state.channel_id(network, &channel)
-                    && let Some(conversation) =
-                        self.state.conversations().iter().find(|c| c.id == id)
+                    && let Some(conversation) = self.state.conversation(id)
                 {
                     self.member_selection
                         .retain_present(id, &conversation.members);
@@ -4059,8 +4058,7 @@ impl ChatWindow {
                     .into_any_element()
             }
             Some(TreeRow::Channel(id)) => {
-                let Some(conversation) = self.state.conversations().iter().find(|c| c.id == id)
-                else {
+                let Some(conversation) = self.state.conversation(id) else {
                     return div().into_any_element();
                 };
                 let unread = self.state.is_unread(id);
@@ -5726,7 +5724,7 @@ impl ChatWindow {
         let Some(&(id, index)) = self.sub_rows.get(row) else {
             return div().into_any_element();
         };
-        let Some(conversation) = self.state.conversations().iter().find(|c| c.id == id) else {
+        let Some(conversation) = self.state.conversation(id) else {
             return div().into_any_element();
         };
         let Some(message) = conversation.messages.get(index) else {
