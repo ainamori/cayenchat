@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Sending an image from an IRC draft.
 //!
 //! Paste and drop both hand an [`Attachment`] to [`AttachmentFlow::offer`].

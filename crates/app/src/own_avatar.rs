@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Our own avatar on one server, as far as the server has confirmed it.
 //!
 //! The URL the user edits is a draft kept in settings; nothing here reads or
