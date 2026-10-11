@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! The application's credential store as a GPUI global. Every window reads
 //! and writes secrets through it; nothing else opens a backend.
 //!

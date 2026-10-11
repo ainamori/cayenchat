@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 use crate::{ChatWindow, localization::Localizer};
 use cayenchat_irc_core::WhoisInfo;
 use cayenchat_model::{NetworkId, display, names::CaseMapping};

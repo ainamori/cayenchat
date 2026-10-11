@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 use super::{Navigate, shortcut_bindings};
 #[cfg(target_os = "macos")]
 use cayenchat_app::Command;

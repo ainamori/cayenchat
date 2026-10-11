@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Text from servers and other users made safe to show.
 
 use std::borrow::Cow;

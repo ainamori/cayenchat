@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Sent-draft history for the chat input: in memory only and bounded.
 
 /// Most recent sent drafts kept.

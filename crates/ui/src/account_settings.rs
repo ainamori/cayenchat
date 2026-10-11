@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Settings tabs for credential storage and IRC image upload accounts.
 
 use cayenchat_storage::{CredentialBackendKind, Secret, SecretKey, Settings, credentials};

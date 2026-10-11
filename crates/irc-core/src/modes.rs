@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Privilege changes for several members at once, split into `MODE` lines
 //! the server accepts.
 

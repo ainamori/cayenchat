@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! "Restore Defaults" on the settings tabs (#134). A tab with defaults has
 //! one reset that covers exactly the settings it shows; it is disabled while
 //! they all have their default values.

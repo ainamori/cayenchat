@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! ImgBB upload API v1 (<https://api.imgbb.com/>).
 //!
 //! `POST https://api.imgbb.com/1/upload` with `key` (the account's API key)

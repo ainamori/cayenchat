@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! CTCP answers (D029) through a real, independent server (spec/development.md,
 //! "CTCP answers"). Ignored by default; it needs a disposable local server,
 //! for example the pinned Ergo that `scripts/ergo-metadata-interop.sh`

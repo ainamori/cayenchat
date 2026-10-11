@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod account_settings;

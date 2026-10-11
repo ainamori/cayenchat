@@ -21,7 +21,7 @@ E2E outputs under `target/tmp/` in your current worktree.
 
 Builds, test suites and GUI checks often take longer than a shell tool's default command timeout (two minutes). Set the timeout explicitly to cover the expected duration, or use no timeout, instead of letting the command be cut off and retrying it.
 
-The core crates (`model`, `irc-core`, `storage`, `media`, `upload`, `app`) are MPL-2.0 and `ui` is GPL-3.0-only (D042). Never copy code from other projects into a core crate, and never make a core crate depend on `ui` or on GPL-only code. Give every new crate an explicit `license` in its `Cargo.toml`.
+The core crates (`model`, `irc-core`, `storage`, `media`, `upload`, `app`) are MPL-2.0 and `ui` is GPL-3.0-only (D042). Never copy code from other projects into a core crate, and never make a core crate depend on `ui` or on GPL-only code. Give every new crate an explicit `license` in its `Cargo.toml`. Start every new `.rs` file under `crates/` with its `// SPDX-License-Identifier:` line (`MPL-2.0` in core crates, `GPL-3.0-only` in `ui`) as line 1; `scripts/check-spdx.sh` checks it.
 
 ## Reviewing pull requests
 

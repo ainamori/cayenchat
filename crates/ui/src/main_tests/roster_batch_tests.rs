@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 use super::superseded_rosters;
 use cayenchat_irc_core::Event;
 use cayenchat_model::names::CaseMapping;

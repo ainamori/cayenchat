@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! The square selection shown before an avatar image is uploaded (IRCv3
 //! settings tab). The image is decoded off the UI thread with the preview
 //! limits (`media::avatar_edit`). The selection has a handle at each corner

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! IRCv3 message tags, read from the `irc` library's parsed messages.
 //!
 //! irc-proto 1.1.0 splits tags and unescapes values (`\:`, `\s`, `\\`, `\r`,

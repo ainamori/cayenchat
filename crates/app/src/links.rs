@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Web links in message text, found once when a message is added
 //! (`Message::links`) rather than on every draw.
 

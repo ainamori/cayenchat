@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! A narrow native-theme-gpui adapter for existing settings controls.
 //!
 //! Pin the last GPUI 0.2.2 connector (0.5.7). Use its mapped colors and raw

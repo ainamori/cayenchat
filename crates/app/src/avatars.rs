@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Which avatar belongs to which user, per network, and which messages may
 //! show it.
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Application-wide credential storage.
 //!
 //! Every secret CayenChat keeps (IRC server and SASL passwords, image uploader

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Deterministic image fixtures and a local HTTP server for tests. Nothing
 //! here contacts the network.
 

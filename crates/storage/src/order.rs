@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! The channel order the user chose in the channel tree.
 //!
 //! Like the window layout, this is UI state in its own file beside the

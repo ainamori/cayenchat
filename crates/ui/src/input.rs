@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Adapted from gpui 0.2.2 examples/input.rs, Copyright Zed Industries.
 // Licensed under Apache-2.0; see THIRD_PARTY_NOTICES.md and licenses/GPUI-APACHE-2.0.txt.
 // Changes: compact styling, scoped shortcuts, focus, single-line input and IME fixes.

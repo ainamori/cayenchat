@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 use super::newest_lines;
 use cayenchat_model::{Conversation, ConversationId, Message, NetworkId, TimeOfDay};
 

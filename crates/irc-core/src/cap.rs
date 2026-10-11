@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! IRCv3 capability negotiation, shared by SASL and opt-in extensions.
 //!
 //! One [`CapNegotiation`] exists per connection attempt, so a reconnect

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Headless timing baseline for typing, channel switching and event bursts.
 //!
 //! Ignored by default. Run it in release mode:

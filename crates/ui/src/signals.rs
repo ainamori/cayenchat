@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Ends the application cleanly on SIGTERM, SIGHUP and SIGINT (issue #285).
 //!
 //! Neither this application nor GPUI handles signals, so by default they end the

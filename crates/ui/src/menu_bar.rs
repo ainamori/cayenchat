@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Alt/F10/hover-revealed menus for platforms without GPUI native menu rendering.
 use gpui::{prelude::*, *};
 use std::time::Duration;

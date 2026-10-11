@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Which incoming messages deserve a desktop notification, independent of
 //! the chat protocol and of how the platform shows it.
 //!

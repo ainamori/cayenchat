@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Interoperability check of recent channel history (`draft/chathistory`)
 //! against a real, independent server (spec/development.md, "IRC
 //! interoperability with Ergo"). Ignored by default; it needs a disposable

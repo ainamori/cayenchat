@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 use super::{CompleteNickname, field_traversal, shortcut_bindings};
 use crate::input::TextInput;
 use cayenchat_storage::ChannelNumberModifier;

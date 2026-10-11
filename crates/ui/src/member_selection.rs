@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Which members of the selected channel are chosen in the member list.
 //!
 //! Members are kept by nickname (without the `@`/`+` role prefix, compared the

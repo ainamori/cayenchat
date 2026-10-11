@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Navigation shortcuts as named actions.
 //!
 //! Each action has an id, the command it runs and the keys it has by default

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Answers to common CTCP queries (D029).
 //!
 //! A PRIVMSG or NOTICE whose text starts with 0x01 is a CTCP message. ACTION

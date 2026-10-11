@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 use cayenchat_storage::Language;
 use std::{collections::HashMap, fs, path::PathBuf, sync::Arc};
 

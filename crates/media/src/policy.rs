@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Which links are previewed, and which hosts may be contacted.
 //!
 //! A link is a preview candidate only when it looks like a *direct* image

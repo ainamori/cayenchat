@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! The settings file as the settings window reads and writes it. Outside
 //! tests this is `cayenchat_storage`'s file. A test never touches the user's
 //! own file: unless it holds a `TestFile`, there is no file and saving does

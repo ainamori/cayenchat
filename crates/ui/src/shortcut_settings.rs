@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! The Shortcuts tab: the navigation shortcuts by action, with the keys each
 //! has now. A key is changed by pressing the new combination (#114); a change
 //! can be undone for one action or for all of them.

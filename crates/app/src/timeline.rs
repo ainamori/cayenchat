@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! What a protocol adapter supplies with each timeline item besides its
 //! content, and the bounded duplicate filter that lets history deliveries
 //! overlap without showing a message twice.

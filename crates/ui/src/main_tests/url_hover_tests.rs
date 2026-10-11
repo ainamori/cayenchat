@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 use super::ChatWindow;
 use cayenchat_irc_core::Event;
 use cayenchat_model::NetworkId;

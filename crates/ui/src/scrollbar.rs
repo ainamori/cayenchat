@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! A thin overlay scrollbar for vertically scrolling panes.
 //!
 //! GPUI scrolls with the wheel only and draws no bar. This paints a thumb at

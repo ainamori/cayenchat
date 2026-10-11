@@ -31,6 +31,15 @@ into a core crate relicenses it under MPL-2.0 (allowed by
 `CONTRIBUTING.md`). A new GPUI-free crate meant for other front ends is
 MPL-2.0 as well.
 
+Every `.rs` file under `crates/` (including `tests/` and `benches/`) starts
+with an SPDX identifier on line 1, before any `//!` module doc:
+`// SPDX-License-Identifier: MPL-2.0` in the core crates and
+`GPL-3.0-only` in `ui`. `crates/ui/src/input.rs`, adapted from GPUI, is
+`Apache-2.0` and keeps its provenance comment. `vendor/` keeps its upstream
+licenses and gets no identifier. `scripts/check-spdx.sh` enforces this in CI
+(the `changes` job, which runs for every pull request); a file moved between
+crates gets the identifier of its new crate.
+
 ## Responsibilities
 
 ### model

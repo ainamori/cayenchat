@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! HTTP pieces shared by providers: an agent with upload-appropriate limits,
 //! multipart encoding, and sanitized transport errors.
 

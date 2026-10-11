@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Application state and commands, independent of any rendering framework.
 pub mod attachments;
 pub mod avatars;

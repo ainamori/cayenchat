@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! The Application page: how the app itself behaves, apart from any server.
 
 use cayenchat_storage::{Language, LinuxDisplay};

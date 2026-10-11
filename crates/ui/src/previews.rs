@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Inline image previews in the main channel log.
 //!
 //! `cayenchat-media` decides which links are previewed, loads and decodes

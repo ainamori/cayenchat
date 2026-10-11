@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Tells replayed history apart from live messages, so history does not
 //! raise desktop notifications again.
 //!

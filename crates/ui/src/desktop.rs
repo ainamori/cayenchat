@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Desktop preferences that shape the client-side title bar.
 //!
 //! On Linux these come from the XDG desktop portal Settings interface, which

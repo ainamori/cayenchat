@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! IRC message text: formatting codes, CTCP ACTION and nickname mentions.
 
 use cayenchat_model::names;

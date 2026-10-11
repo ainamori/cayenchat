@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! IRC transport adapter. Third-party IRC types stay inside this crate.
 
 mod accounts;

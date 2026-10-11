@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Avatars exchanged between clients with KVIrc's CTCP AVATAR, for servers
 //! without IRCv3 metadata (experimental, opt-in per server).
 //!

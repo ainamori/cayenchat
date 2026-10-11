@@ -35,6 +35,9 @@ jobs:
       - name: Test job selection
         run: scripts/test-ci-jobs.sh
 
+      - name: Check SPDX license identifiers
+        run: scripts/check-spdx.sh
+
       - name: Test release checks
         run: scripts/test-release.sh
 

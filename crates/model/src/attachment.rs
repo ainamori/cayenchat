@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Attachments the user chose to send, independent of how a protocol
 //! transports them. IRC uploads them to an external host and sends a link;
 //! a protocol with native media (such as Matrix) would upload them itself.

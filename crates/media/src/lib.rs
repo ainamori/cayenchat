@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Inline media display: which media a message refers to, how it is fetched
 //! and decoded into a small thumbnail, and a bounded cache of the results.
 //! Independent of GPUI and of any chat protocol; the UI renders thumbnails.

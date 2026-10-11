@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Preparing our own avatar image before it is uploaded: the user picks a
 //! square of a photo, which is scaled down to a small image.
 //!
