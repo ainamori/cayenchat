@@ -27,6 +27,24 @@ pub const DUPLICATE_KEYS_PER_CONVERSATION: usize = 512;
 /// length is hashed as well.
 const FINGERPRINT_TEXT_BYTES: usize = 512;
 
+/// Whether a line of text was sent as a message or as a NOTICE.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Message,
+    Notice,
+}
+
+impl Kind {
+    /// The kind for a protocol event that carries a `notice` flag.
+    pub fn from_notice(notice: bool) -> Self {
+        if notice { Self::Notice } else { Self::Message }
+    }
+
+    pub fn is_notice(self) -> bool {
+        self == Self::Notice
+    }
+}
+
 /// A timeline item's metadata as its source reported it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MessageMeta {
@@ -58,13 +76,9 @@ impl MessageMeta {
         Self::default()
     }
 
-    pub fn replayed(replayed: bool) -> Self {
+    pub fn with_provenance(provenance: Provenance) -> Self {
         Self {
-            provenance: if replayed {
-                Provenance::Replayed
-            } else {
-                Provenance::Live
-            },
+            provenance,
             ..Self::default()
         }
     }

@@ -3374,8 +3374,14 @@ fn typing_reuses_panes_and_new_messages_redraw_them(cx: &mut TestAppContext) {
 
     chat.update(cx, |chat, cx| {
         let name = chat.state.conversations()[0].name.clone();
-        chat.state
-            .append_channel_message(NetworkId(1), &name, "bob", "hi", false, false);
+        chat.state.append_channel_message(
+            NetworkId(1),
+            &name,
+            "bob",
+            "hi",
+            cayenchat_app::Kind::Message,
+            cayenchat_model::Provenance::Live,
+        );
         cx.notify();
     });
     cx.run_until_parked();
