@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Small, UI-independent domain types. These are not IRC wire types.
 
 pub mod attachment;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Nicknames and channel names compared the way IRC servers compare them.
 //! The case mapping a server uses is advertised as `CASEMAPPING` in
 //! RPL_ISUPPORT; RFC 1459 applies until it says otherwise. Nicknames are
