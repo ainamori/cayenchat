@@ -363,6 +363,9 @@ pub struct Appearance {
     /// after version 15 without a version change; files without it read as
     /// the default.
     pub url_tooltip_color: String,
+    /// Link text color in that bubble. Added after version 15 without a
+    /// version change; files without it read as the default.
+    pub url_tooltip_link_color: String,
     /// How opaque that bubble is, in percent (`MIN_URL_TOOLTIP_OPACITY` to
     /// 100). Added after version 15 without a version change.
     pub url_tooltip_opacity: u8,
@@ -423,6 +426,7 @@ pub struct DarkColors {
     pub sub_log_background: String,
     pub sub_log_alternate: String,
     pub url_tooltip_color: String,
+    pub url_tooltip_link_color: String,
 }
 
 impl Default for DarkColors {
@@ -437,6 +441,7 @@ impl Default for DarkColors {
             sub_log_background: "#24272B".into(),
             sub_log_alternate: "#2C3036".into(),
             url_tooltip_color: "#2A2D32".into(),
+            url_tooltip_link_color: "#78AAFF".into(),
         }
     }
 }
@@ -453,6 +458,7 @@ impl Default for Appearance {
             sub_log_background: "#F9FAFB".into(),
             sub_log_alternate: "#F2F5FF".into(),
             url_tooltip_color: "#FFFFFF".into(),
+            url_tooltip_link_color: "#0645AD".into(),
             url_tooltip_opacity: DEFAULT_URL_TOOLTIP_OPACITY,
             alternate_rows: false,
             image_previews: false,
@@ -522,6 +528,8 @@ impl Appearance {
             ("Sub alternate", &self.sub_log_alternate),
             ("URL tooltip", &self.url_tooltip_color),
             ("Dark URL tooltip", &self.dark.url_tooltip_color),
+            ("URL tooltip link", &self.url_tooltip_link_color),
+            ("Dark URL tooltip link", &self.dark.url_tooltip_link_color),
             ("Dark member list", &self.dark.member_list_background),
             ("Dark main log", &self.dark.main_log_background),
             ("Dark main alternate", &self.dark.main_log_alternate),
@@ -2103,12 +2111,14 @@ mod tests {
         let appearance = old["appearance"].as_object_mut().unwrap();
         appearance.remove("url_tooltip_color");
         appearance.remove("url_tooltip_opacity");
-        appearance["dark"]
-            .as_object_mut()
-            .unwrap()
-            .remove("url_tooltip_color");
+        appearance.remove("url_tooltip_link_color");
+        let dark = appearance["dark"].as_object_mut().unwrap();
+        dark.remove("url_tooltip_color");
+        dark.remove("url_tooltip_link_color");
         let settings: Settings = serde_json::from_value(old).unwrap();
         assert_eq!(settings.appearance, Appearance::default());
+        assert_eq!(settings.appearance.url_tooltip_link_color, "#0645AD");
+        assert_eq!(settings.appearance.dark.url_tooltip_link_color, "#78AAFF");
         assert_eq!(settings.appearance.url_tooltip_opacity, 80);
 
         let mut appearance = Appearance {
@@ -2121,6 +2131,12 @@ mod tests {
         appearance.url_tooltip_opacity = 100;
         assert!(appearance.validate().is_ok());
         appearance.url_tooltip_color = "white".into();
+        assert!(appearance.validate().is_err());
+        appearance.url_tooltip_color = "#FFFFFF".into();
+        appearance.url_tooltip_link_color = "blue".into();
+        assert!(appearance.validate().is_err());
+        appearance.url_tooltip_link_color = "#0645AD".into();
+        appearance.dark.url_tooltip_link_color = "blue".into();
         assert!(appearance.validate().is_err());
     }
 

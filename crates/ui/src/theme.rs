@@ -22,6 +22,8 @@ pub struct PaneColors {
     pub sub_alternate: Rgba,
     /// Bubble showing a shortened URL in full, with its opacity as alpha.
     pub url_tooltip: Rgba,
+    /// Link text color in that bubble only.
+    pub url_tooltip_link: Rgba,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -107,6 +109,7 @@ impl Theme {
                     color(&appearance.url_tooltip_color, 0xffffff),
                     appearance.url_tooltip_opacity,
                 ),
+                url_tooltip_link: color(&appearance.url_tooltip_link_color, 0x0645ad),
             },
         }
     }
@@ -146,6 +149,7 @@ impl Theme {
                     color(&colors.url_tooltip_color, 0x2a2d32),
                     appearance.url_tooltip_opacity,
                 ),
+                url_tooltip_link: color(&colors.url_tooltip_link_color, 0x78aaff),
             },
         }
     }
@@ -210,5 +214,29 @@ mod tests {
 
         assert!(Theme::new(ThemeMode::Dark, WindowAppearance::Light, &appearance).dark);
         assert!(!Theme::new(ThemeMode::Light, WindowAppearance::Dark, &appearance).dark);
+    }
+
+    #[test]
+    fn url_tooltip_link_color_is_per_theme_and_leaves_the_log_link_alone() {
+        let defaults = Appearance::default();
+        let light = Theme::new(ThemeMode::Light, WindowAppearance::Light, &defaults);
+        let dark = Theme::new(ThemeMode::Dark, WindowAppearance::Dark, &defaults);
+        assert_eq!(light.panes.url_tooltip_link, rgb(0x0645ad));
+        assert_eq!(dark.panes.url_tooltip_link, rgb(0x78aaff));
+
+        let appearance = Appearance {
+            url_tooltip_link_color: "#FFEE00".into(),
+            dark: cayenchat_storage::DarkColors {
+                url_tooltip_link_color: "#102030".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let light = Theme::new(ThemeMode::Light, WindowAppearance::Light, &appearance);
+        let dark = Theme::new(ThemeMode::Dark, WindowAppearance::Dark, &appearance);
+        assert_eq!(light.panes.url_tooltip_link, rgb(0xffee00));
+        assert_eq!(dark.panes.url_tooltip_link, rgb(0x102030));
+        assert_eq!(light.link, rgb(0x0645ad));
+        assert_eq!(dark.link, rgb(0x78aaff));
     }
 }

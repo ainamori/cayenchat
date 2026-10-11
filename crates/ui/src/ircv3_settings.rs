@@ -860,8 +860,8 @@ impl Render for TextTooltip {
 /// to the pointer and is not part of the bubble.
 pub(crate) const URL_TOOLTIP_BRIDGE: (Pixels, Pixels) = (px(10.), px(18.));
 
-/// The bubble showing a shortened URL in full. It is drawn in the link color
-/// on the (translucent) appearance color, and a click on it opens the URL.
+/// The bubble showing a shortened URL in full. It is drawn in its own link
+/// color on the (translucent) appearance color, and a click on it opens the URL.
 pub(crate) struct UrlTooltip(pub(crate) SharedString);
 
 impl Render for UrlTooltip {
@@ -878,7 +878,7 @@ impl Render for UrlTooltip {
                 settings_theme::tooltip(self.0.clone(), cx)
                     .id("url-tooltip")
                     .bg(theme.panes.url_tooltip)
-                    .text_color(theme.link)
+                    .text_color(theme.panes.url_tooltip_link)
                     .cursor_pointer()
                     .on_mouse_down(MouseButton::Left, move |_, _, cx| cx.open_url(&url)),
             )
