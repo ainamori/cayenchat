@@ -75,7 +75,7 @@ mod tests {
     use super::*;
     use cayenchat_storage::layout::WindowRect;
 
-    const MIN: fn() -> Size<Pixels> = || size(px(720.), px(420.));
+    const MIN: fn() -> Size<Pixels> = || size(px(320.), px(240.));
 
     fn display(x: f32, y: f32, width: f32, height: f32) -> Bounds<Pixels> {
         Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
@@ -146,11 +146,14 @@ mod tests {
         let got = restored_bounds(&saved(0., 0., 3000., 2000., false), &screens, MIN());
         assert_eq!(windowed(got), (0., 0., 1280., 800.));
         let got = restored_bounds(&saved(100., 100., 200., 100., false), &screens, MIN());
-        assert_eq!(windowed(got), (100., 100., 720., 420.));
+        assert_eq!(windowed(got), (100., 100., 320., 240.));
+        // A small size the user chose is not enlarged.
+        let got = restored_bounds(&saved(100., 100., 400., 300., false), &screens, MIN());
+        assert_eq!(windowed(got), (100., 100., 400., 300.));
         // A display smaller than the minimum keeps the window's top left.
-        let tiny = [display(0., 0., 640., 400.)];
+        let tiny = [display(0., 0., 300., 200.)];
         let got = restored_bounds(&saved(10., 10., 960., 600., false), &tiny, MIN());
-        assert_eq!(windowed(got), (0., 0., 720., 420.));
+        assert_eq!(windowed(got), (0., 0., 320., 240.));
     }
 
     #[test]
