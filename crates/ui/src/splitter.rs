@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! A draggable boundary between two panes.
 //!
 //! The handle is a thin element that reports the size its pane would have

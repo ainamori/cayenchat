@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! A color picker: a saturation/brightness square, a hue bar and a `#RRGGBB`
 //! field that stay in step. The owner listens for [`ColorChanged`] and may set
 //! the color from outside; nothing here knows about settings.

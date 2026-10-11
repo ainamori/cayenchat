@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Virtualized log list state.
 //!
 //! Log panes render through GPUI's `list`, which lays out only the rows near

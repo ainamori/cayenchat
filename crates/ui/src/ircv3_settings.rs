@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Settings tab for opt-in IRCv3 features, chosen per server.
 //!
 //! This tab is the current home of IRCv3 preferences that need an explicit

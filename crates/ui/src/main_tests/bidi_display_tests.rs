@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 use super::{ChannelDragPreview, MemberPromptKind, diagnostic_text, member_prompt_title};
 use crate::localization::Localizer;
 use cayenchat_storage::Language;

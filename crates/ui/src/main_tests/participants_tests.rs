@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 use super::{conversation_participants, member_menu_choice_count};
 use cayenchat_model::{Conversation, ConversationId, ConversationKind, NetworkId};
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Light and dark color themes.
 //!
 //! The effective theme follows the saved preference: the system appearance

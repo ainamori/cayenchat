@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Default avatars drawn by the client for users who have none.
 //!
 //! A port of CayenChat's `defaultAvatar.js`: the first four UTF-16 code

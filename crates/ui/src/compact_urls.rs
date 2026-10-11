@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Compact display of long URLs in the channel log.
 //!
 //! Only the presentation changes: [`Compact`] builds the text to draw from a

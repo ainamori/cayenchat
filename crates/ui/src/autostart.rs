@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Starting CayenChat when the user logs in (#153).
 //!
 //! The operating system's registration is the only truth: nothing is stored

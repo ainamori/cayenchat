@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Standard keyboard movement for a focused list (channel tree, member list).
 //!
 //! These keys act only on the list that has focus, so they never reach the

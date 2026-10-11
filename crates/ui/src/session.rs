@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Connection state kept for each configured server.
 //!
 //! Every server profile in the settings has one session, whether or not it is

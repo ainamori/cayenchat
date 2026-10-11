@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 use super::{LogPosition, LogSelection, channel_activity_text};
 use cayenchat_irc_core::ChannelActivityKind;
 use cayenchat_model::ConversationId;

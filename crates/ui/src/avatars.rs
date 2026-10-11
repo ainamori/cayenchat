@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! User avatars beside main-log messages and in the member list.
 //!
 //! Which avatar a user or message has comes from `app::avatars` (protocol

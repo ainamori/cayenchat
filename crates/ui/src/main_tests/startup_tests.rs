@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 use super::{connection_config, forget_removed_profiles, startup_connections};
 use cayenchat_storage::{
     CredentialBackendKind, CredentialStore, Secret, SecretKey, Settings, credentials::MemoryBackend,

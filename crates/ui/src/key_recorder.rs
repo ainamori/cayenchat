@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Recording the next key combination the user presses.
 //!
 //! Used to assign a shortcut by pressing it (#114). While a recording is

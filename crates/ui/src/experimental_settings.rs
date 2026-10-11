@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Application-wide experimental diagnostics, independent of IRC wire traces.
 
 use gpui::{prelude::*, *};

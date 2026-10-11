@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! IRC image sharing through the configured external host. Clipboard
 //! images, dropped files and (for avatars) files picked in the system dialog
 //! enter one attachment flow (`cayenchat_app::attachments`), which asks for

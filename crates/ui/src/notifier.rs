@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Desktop notifications through the operating system.
 //!
 //! `notify-rust` calls `org.freedesktop.Notifications` over D-Bus (zbus) on

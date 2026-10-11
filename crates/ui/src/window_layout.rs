@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Reopening the main window where it was left.
 //!
 //! Only what GPUI cannot know lives here: whether a saved rectangle still

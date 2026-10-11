@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Minimal stderr logger so GPUI's own warnings and errors (renderer, display
 //! server, fonts) are visible. Without one, the `log` records are dropped and
 //! platform failures, especially on Linux, leave no trace.

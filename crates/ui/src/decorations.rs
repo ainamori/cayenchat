@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Client-side window frame for compositors without server decorations.
 //!
 //! GNOME's Wayland compositor does not implement `xdg-decoration`, so every

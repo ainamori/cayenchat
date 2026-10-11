@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! The settings window and the form it edits.
 
 use crate::{
