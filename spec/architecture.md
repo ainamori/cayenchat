@@ -1775,10 +1775,12 @@ Each item is its own task; the order is the suggested one.
 
    Every step reduces redraws as well: each one leaves fewer `cx.notify()`
    calls on unrelated state.
-2. **Split the `irc-core` worker loop.** `run_cancellable` is about 880 lines
-   and handles registration, CAP, ISUPPORT, history requests and shutdown
-   together. Split it by concern. This is easier after item 1, which settles
-   the events.
+2. **Split the `irc-core` worker loop.** The loop state is the `Worker`
+   struct, and each `select!` branch of `run_cancellable` is one `Worker`
+   method (`on_command`, `on_incoming`, `on_*_deadline`), so rustfmt covers
+   them. They still handle registration, CAP, ISUPPORT, history requests and
+   shutdown together. Split them by concern. This is easier after item 1,
+   which settles the events.
 3. **Keep presentation out of message text.** `Message::text` carries the
    `[NOTICE]` marker, server-log lines are formatted as `<sender> text` or
    `#channel <sender> text`, and IRC formatting codes are stored raw. Range
