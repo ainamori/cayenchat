@@ -31,3 +31,11 @@ icons derived from Feather (including `link` and `external-link`) are
 additionally under the MIT License. The upstream LICENSE, with both texts, is
 retained verbatim in `licenses/LUCIDE-ISC.txt`; the icons in use are listed in
 `assets/icons/ui/README.md`.
+
+## Dependency crates in distributed binaries
+
+The license texts and copyright notices of every Rust crate linked into a
+distributed binary, including the transitive ones above, are collected in
+`THIRD_PARTY_LICENSES.html`. The package workflow generates it with
+`cargo about` (configured by `about.toml` and `about.hbs`) and puts it next to
+this file in every package. It is not committed to the repository.

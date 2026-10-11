@@ -436,6 +436,17 @@ with `dpkg-deb -c` and by extracting `copyright` with `dpkg-deb -x`.
 The `Maintainer` field is `maintainer` in `crates/ui/Cargo.toml`; the Test
 Build inherits it.
 
+The notices of the dependency crates are one more file, `THIRD_PARTY_LICENSES.html`,
+installed beside the others. `package.yml` generates it in each job with
+`cargo about generate --locked --manifest-path crates/ui/Cargo.toml about.hbs`
+(cargo-about, installed at a pinned version like cargo-deb) and it is not
+committed (`.gitignore`). `about.toml` lists the platforms packaged and skips
+dev- and build-dependencies; its `accepted` list repeats `allow` in
+`deny.toml`, so change both together. A `cargo deb` run outside the workflow
+needs the file generated first. Verify with `dpkg-deb -c`, `unzip -l` and the
+bundle's `Contents/Resources/`, and check that `gpui`, `rustls`, `ring` and
+`tokio` appear in it.
+
 GPUI reports renderer, display-server and font failures through the `log` crate.
 The app installs a small stderr logger (`crates/ui/src/diagnostics.rs`) that
 prints warnings and errors by default; run with `RUST_LOG=info` (or `debug`) from
