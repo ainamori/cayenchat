@@ -6,7 +6,9 @@
 //! reorder or re-prefix the list. It belongs to one channel: asking about
 //! another channel starts empty.
 
-use cayenchat_irc_core::text::nickname_key;
+use std::borrow::Cow;
+
+use cayenchat_irc_core::text::{nickname_key, same_nickname};
 use cayenchat_model::ConversationId;
 
 /// What a click on a row asks for.
@@ -35,15 +37,90 @@ pub fn nickname(entry: &str) -> &str {
     entry.trim_start_matches(['~', '&', '@', '%', '+'])
 }
 
+/// The rows of the member list in display order.
+pub trait Roster {
+    fn entries(&self) -> impl Iterator<Item = &String>;
+}
+
+impl Roster for [String] {
+    fn entries(&self) -> impl Iterator<Item = &String> {
+        self.iter()
+    }
+}
+
+impl Roster for Vec<String> {
+    fn entries(&self) -> impl Iterator<Item = &String> {
+        self.iter()
+    }
+}
+
+/// What the member list shows: the roster with our own row moved to the top.
+/// The roster is borrowed as it is, so drawing never copies it; a row's
+/// index here is its position on screen.
+pub struct Participants<'a> {
+    rows: Cow<'a, [String]>,
+    /// Index in `rows` of the row shown first, when it is not row 0.
+    first: Option<usize>,
+}
+
+impl<'a> Participants<'a> {
+    /// `rows` as they are.
+    pub fn plain(rows: Cow<'a, [String]>) -> Self {
+        Self { rows, first: None }
+    }
+
+    /// `members` with our own entry (`own`, compared as IRC nicknames, role
+    /// prefix ignored) first and the others in their order. Unchanged when we
+    /// are not listed.
+    pub fn own_first(members: &'a [String], own: Option<&str>) -> Self {
+        let first = own.and_then(|own| {
+            members
+                .iter()
+                .position(|member| same_nickname(nickname(member), own))
+        });
+        Self {
+            rows: Cow::Borrowed(members),
+            first: first.filter(|&at| at != 0),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn get(&self, index: usize) -> Option<&String> {
+        let at = match self.first {
+            Some(first) if index == 0 => first,
+            Some(first) if index <= first => index - 1,
+            _ => index,
+        };
+        self.rows.get(at)
+    }
+}
+
+impl Roster for Participants<'_> {
+    fn entries(&self) -> impl Iterator<Item = &String> {
+        let first = self.first.and_then(|at| self.rows.get(at));
+        let skipped = self.first;
+        first.into_iter().chain(
+            self.rows
+                .iter()
+                .enumerate()
+                .filter(move |(at, _)| Some(*at) != skipped)
+                .map(|(_, row)| row),
+        )
+    }
+}
+
 impl MemberSelection {
     pub fn click(
         &mut self,
         conversation: ConversationId,
-        members: &[String],
+        members: &(impl Roster + ?Sized),
         index: usize,
         click: Click,
     ) {
-        let Some(entry) = members.get(index) else {
+        let Some(entry) = members.entries().nth(index) else {
             return;
         };
         if self.conversation != Some(conversation) {
@@ -70,13 +147,15 @@ impl MemberSelection {
                     .as_ref()
                     .and_then(|anchor| {
                         members
-                            .iter()
+                            .entries()
                             .position(|member| nickname_key(nickname(member)) == *anchor)
                     })
                     .unwrap_or(index);
                 let (low, high) = (from.min(index), from.max(index));
-                self.chosen = members[low..=high]
-                    .iter()
+                self.chosen = members
+                    .entries()
+                    .skip(low)
+                    .take(high - low + 1)
                     .map(|member| nickname_key(nickname(member)))
                     .collect();
                 // The anchor stays, so the range can be widened or narrowed.
@@ -85,13 +164,17 @@ impl MemberSelection {
     }
 
     /// The row of the member chosen last, where keyboard movement starts.
-    pub fn anchor_index(&self, conversation: ConversationId, members: &[String]) -> Option<usize> {
+    pub fn anchor_index(
+        &self,
+        conversation: ConversationId,
+        members: &(impl Roster + ?Sized),
+    ) -> Option<usize> {
         if self.conversation != Some(conversation) {
             return None;
         }
         let anchor = self.anchor.as_ref()?;
         members
-            .iter()
+            .entries()
             .position(|member| nickname_key(nickname(member)) == *anchor)
     }
 
@@ -132,12 +215,16 @@ impl MemberSelection {
 
     /// The chosen members of `conversation` that are still in `members`, as
     /// plain nicknames in list order.
-    pub fn nicknames(&self, conversation: ConversationId, members: &[String]) -> Vec<String> {
+    pub fn nicknames(
+        &self,
+        conversation: ConversationId,
+        members: &(impl Roster + ?Sized),
+    ) -> Vec<String> {
         if self.conversation != Some(conversation) {
             return Vec::new();
         }
         members
-            .iter()
+            .entries()
             .map(|member| nickname(member))
             .filter(|name| self.chosen.contains(&nickname_key(name)))
             .map(str::to_owned)
