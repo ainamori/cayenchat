@@ -465,6 +465,13 @@ fn i18n_error(language: Language, key: &str) -> String {
     Localizer::new(language).text(key)
 }
 
+/// A draft that failed to send and the warning shown for it.
+struct SendFailure {
+    selection: Selection,
+    text: String,
+    message: String,
+}
+
 struct ChatWindow {
     state: AppState,
     // Virtualized logs keep a separate scroll position per server or channel.
@@ -480,6 +487,9 @@ struct ChatWindow {
     // Editing and IME state belong to each server or channel.
     inputs: HashMap<Selection, Entity<TextInput>>,
     feedback: Option<String>,
+    /// The draft whose failed send put `feedback` on screen; editing that
+    /// draft makes the warning obsolete, unrelated feedback stays.
+    send_failure: Option<SendFailure>,
     /// What startup reported, such as where unreadable settings were kept.
     /// It is shown again when the settings cannot be opened for the same reason.
     startup_notice: Option<String>,
@@ -910,6 +920,7 @@ impl ChatWindow {
             inputs,
             startup_notice: feedback.clone(),
             feedback,
+            send_failure: None,
             sessions,
             next_network_id,
             server_menu: None,
@@ -971,6 +982,10 @@ impl ChatWindow {
             pane_renders: 0,
         };
         this.update_title(window);
+        let keys: Vec<Selection> = this.inputs.keys().copied().collect();
+        for key in keys {
+            this.watch_input(key, cx);
+        }
         // GPUI reports the macOS/Windows appearance and, on Linux, the XDG
         // desktop portal color scheme.
         cx.observe_window_appearance(window, |this, _, cx| {
@@ -1472,10 +1487,30 @@ impl ChatWindow {
             )
             .collect();
         for key in keys {
-            self.inputs
-                .entry(key)
-                .or_insert_with(|| cx.new(|cx| TextInput::new_live(&placeholder, cx)));
+            if let std::collections::hash_map::Entry::Vacant(slot) = self.inputs.entry(key) {
+                slot.insert(cx.new(|cx| TextInput::new_live(&placeholder, cx)));
+                self.watch_input(key, cx);
+            }
         }
+    }
+
+    /// Clears the warning of a failed send once its draft is edited.
+    fn watch_input(&mut self, key: Selection, cx: &mut Context<Self>) {
+        let input = self.inputs[&key].clone();
+        cx.observe(&input, move |this, input, cx| {
+            let Some(failure) = &this.send_failure else {
+                return;
+            };
+            if failure.selection != key || input.read(cx).text() == failure.text {
+                return;
+            }
+            if this.feedback.as_deref() == Some(failure.message.as_str()) {
+                this.feedback = None;
+            }
+            this.send_failure = None;
+            cx.notify();
+        })
+        .detach();
     }
 
     /// Drops UI state kept for conversations that no longer exist.
@@ -3619,13 +3654,21 @@ impl ChatWindow {
         } else {
             Err(self.i18n.text("not_connected"))
         };
+        self.send_failure = None;
         self.feedback = match result {
             Ok(()) => {
                 self.input_history.record(&text, private_peer.as_deref());
                 input.update(cx, |input, cx| input.clear_after_send(cx));
                 None
             }
-            Err(error) => Some(error),
+            Err(error) => {
+                self.send_failure = Some(SendFailure {
+                    selection,
+                    text,
+                    message: error.clone(),
+                });
+                Some(error)
+            }
         };
         cx.notify();
         window.refresh();
