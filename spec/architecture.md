@@ -1451,7 +1451,11 @@ They are found once, when a live channel or private message from someone else
 arrives (`ChatWindow::find_mentions`): `irc-core::text::mention_ranges` and
 `app::notifications::keyword_ranges` run on the text without formatting codes
 (for a `/me`, on the action only), and `irc-core::text::plain_ranges` maps
-the matches back to byte ranges of the received text. The ranges are kept in
+the matches back to byte ranges of the received text. A nickname match that
+overlaps a web link (`app::links::find`) is dropped, since it is part of the
+address; keywords are not filtered this way. The match is one forward sweep
+over the two ascending lists, so it is linear in matches plus links (a 16 KiB
+body full of links holding the nickname costs one extra link scan). The ranges are kept in
 `model::Message::highlights` (moved past the `[NOTICE]` marker or a server-log
 prefix by `MessageMeta::after_prefix`), and whether there are any decides
 the channel-tree highlight and the mention and keyword notifications. A
