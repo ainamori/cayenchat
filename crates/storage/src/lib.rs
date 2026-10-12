@@ -390,6 +390,11 @@ pub struct Appearance {
     /// and copies keep the full URL. Added after version 15 without a version
     /// change; files without it read as off.
     pub compact_urls: bool,
+    /// Draw HTML numeric character references (`&#x1F352;`, `&#127826;`) in
+    /// received text as the characters they name; the stored text is not
+    /// changed. Added after version 15 without a version change; files
+    /// without it read as off.
+    pub decode_char_refs: bool,
     /// Reiwa mode, a channel log layout: the avatar spans two lines, the
     /// first line holds the nickname and time and the second the message,
     /// instead of the default `time | avatar | nick: message` flow. Read
@@ -477,6 +482,7 @@ impl Default for Appearance {
             image_previews: false,
             user_avatars: false,
             compact_urls: false,
+            decode_char_refs: false,
             reiwa_mode: false,
             main_log_font: String::new(),
             sub_log_font: String::new(),
@@ -2162,6 +2168,25 @@ mod tests {
         let mut settings = load_from(&path).unwrap().unwrap();
         assert!(!settings.appearance.compact_urls);
         settings.appearance.compact_urls = true;
+        save_to(&path, &settings).unwrap();
+        assert_eq!(load_from(&path).unwrap(), Some(settings));
+    }
+
+    #[test]
+    fn decode_char_refs_default_off_for_old_settings_and_round_trip() {
+        assert!(!Settings::default().appearance.decode_char_refs);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let mut old = serde_json::to_value(Settings::default()).unwrap();
+        old["appearance"]
+            .as_object_mut()
+            .unwrap()
+            .remove("decode_char_refs");
+        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+
+        let mut settings = load_from(&path).unwrap().unwrap();
+        assert!(!settings.appearance.decode_char_refs);
+        settings.appearance.decode_char_refs = true;
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path).unwrap(), Some(settings));
     }
