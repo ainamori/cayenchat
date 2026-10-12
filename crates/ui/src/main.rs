@@ -1187,7 +1187,7 @@ impl ChatWindow {
     /// channel's members, or for a private conversation its two participants
     /// (us, then the peer). The peer stays listed after they quit, as long as
     /// the conversation exists.
-    fn participants(&self) -> Cow<'_, [String]> {
+    fn participants(&self) -> member_selection::Participants<'_> {
         selected_participants(&self.state, &self.sessions)
     }
 
@@ -5990,7 +5990,7 @@ impl ChatWindow {
         let avatars_shown = self.avatars.enabled();
         (start..end)
             .map(|index| {
-                let member = participants[index].clone();
+                let member = participants.get(index).cloned().unwrap_or_default();
                 let selected = self.member_selection.contains(conversation, &member);
                 let channel = channel.name.clone();
                 let nickname = member
@@ -6528,9 +6528,9 @@ mod startup_tests;
 fn selected_participants<'a>(
     state: &'a AppState,
     sessions: &HashMap<NetworkId, ServerSession>,
-) -> Cow<'a, [String]> {
+) -> member_selection::Participants<'a> {
     let Some(conversation) = state.selected_channel() else {
-        return Cow::Borrowed(&[]);
+        return member_selection::Participants::plain(Cow::Borrowed(&[]));
     };
     let own = sessions
         .get(&conversation.network)
@@ -6539,14 +6539,15 @@ fn selected_participants<'a>(
 }
 
 /// The rows of the right-hand list for `conversation`: a channel's members
-/// (borrowed, as this runs on every draw), or for a private conversation us
-/// followed by the peer, once when both are the same nickname.
+/// with our own row first (borrowed, as this runs on every draw), or for a
+/// private conversation us followed by the peer, once when both are the same
+/// nickname.
 fn conversation_participants<'a>(
     conversation: &'a cayenchat_model::Conversation,
     own_nickname: Option<&str>,
-) -> Cow<'a, [String]> {
+) -> member_selection::Participants<'a> {
     if !conversation.is_private() {
-        return Cow::Borrowed(&conversation.members);
+        return member_selection::Participants::own_first(&conversation.members, own_nickname);
     }
     let mut participants = Vec::with_capacity(2);
     if let Some(own) = own_nickname
@@ -6555,7 +6556,7 @@ fn conversation_participants<'a>(
         participants.push(own.to_owned());
     }
     participants.push(conversation.name.clone());
-    Cow::Owned(participants)
+    member_selection::Participants::plain(Cow::Owned(participants))
 }
 
 /// How many of the member menu's choices apply: a private conversation's
