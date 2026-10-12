@@ -465,6 +465,13 @@ fn i18n_error(language: Language, key: &str) -> String {
     Localizer::new(language).text(key)
 }
 
+/// A draft that failed to send and the warning shown for it.
+struct SendFailure {
+    selection: Selection,
+    text: String,
+    message: String,
+}
+
 struct ChatWindow {
     state: AppState,
     // Virtualized logs keep a separate scroll position per server or channel.
@@ -480,6 +487,9 @@ struct ChatWindow {
     // Editing and IME state belong to each server or channel.
     inputs: HashMap<Selection, Entity<TextInput>>,
     feedback: Option<String>,
+    /// The draft whose failed send put `feedback` on screen; editing that
+    /// draft makes the warning obsolete, unrelated feedback stays.
+    send_failure: Option<SendFailure>,
     /// What startup reported, such as where unreadable settings were kept.
     /// It is shown again when the settings cannot be opened for the same reason.
     startup_notice: Option<String>,
@@ -910,6 +920,7 @@ impl ChatWindow {
             inputs,
             startup_notice: feedback.clone(),
             feedback,
+            send_failure: None,
             sessions,
             next_network_id,
             server_menu: None,
@@ -971,6 +982,10 @@ impl ChatWindow {
             pane_renders: 0,
         };
         this.update_title(window);
+        let keys: Vec<Selection> = this.inputs.keys().copied().collect();
+        for key in keys {
+            this.watch_input(key, cx);
+        }
         // GPUI reports the macOS/Windows appearance and, on Linux, the XDG
         // desktop portal color scheme.
         cx.observe_window_appearance(window, |this, _, cx| {
@@ -1421,7 +1436,7 @@ impl ChatWindow {
                 && let Err(error) =
                     cayenchat_storage::order::save_orders_to(path, &self.channel_orders)
             {
-                self.feedback = Some(error);
+                self.set_feedback(Some(error));
             }
         }
         cx.notify();
@@ -1445,7 +1460,7 @@ impl ChatWindow {
             Ok(Some(settings)) => settings,
             Ok(None) => self.saved.clone(),
             Err(error) => {
-                self.feedback = Some(error);
+                self.set_feedback(Some(error));
                 cx.notify();
                 return;
             }
@@ -1461,7 +1476,7 @@ impl ChatWindow {
         match settings_file::save(&settings) {
             Ok(()) => self.apply_servers(settings, cx),
             Err(error) => {
-                self.feedback = Some(error);
+                self.set_feedback(Some(error));
                 cx.notify();
             }
         }
@@ -1486,10 +1501,37 @@ impl ChatWindow {
             )
             .collect();
         for key in keys {
-            self.inputs
-                .entry(key)
-                .or_insert_with(|| cx.new(|cx| TextInput::new_live(&placeholder, cx)));
+            if let std::collections::hash_map::Entry::Vacant(slot) = self.inputs.entry(key) {
+                slot.insert(cx.new(|cx| TextInput::new_live(&placeholder, cx)));
+                self.watch_input(key, cx);
+            }
         }
+    }
+
+    /// Replaces the warning. Whatever it said before, it no longer belongs to
+    /// a failed send, even when a later failure words it the same.
+    fn set_feedback(&mut self, feedback: Option<String>) {
+        self.send_failure = None;
+        self.feedback = feedback;
+    }
+
+    /// Clears the warning of a failed send once its draft is edited.
+    fn watch_input(&mut self, key: Selection, cx: &mut Context<Self>) {
+        let input = self.inputs[&key].clone();
+        cx.observe(&input, move |this, input, cx| {
+            let Some(failure) = &this.send_failure else {
+                return;
+            };
+            if failure.selection != key || input.read(cx).text() == failure.text {
+                return;
+            }
+            if this.feedback.as_deref() == Some(failure.message.as_str()) {
+                this.set_feedback(None);
+            }
+            this.send_failure = None;
+            cx.notify();
+        })
+        .detach();
     }
 
     /// Drops UI state kept for conversations that no longer exist.
@@ -1666,7 +1708,7 @@ impl ChatWindow {
                 if let Some(session) = self.sessions.get_mut(&network) {
                     session.irc = Some(connection);
                 }
-                self.feedback = None;
+                self.set_feedback(None);
                 self.spawn_event_pump(network, cx);
                 window.focus(&self.inputs[&self.state.selection()].focus_handle(cx));
                 Ok(())
@@ -1717,7 +1759,8 @@ impl ChatWindow {
         session.retry_pending = false;
         session.retry_token += 1;
         if let Some(connection) = &session.irc {
-            self.feedback = connection.disconnect().err();
+            let result = connection.disconnect();
+            self.set_feedback(result.err());
         } else if cancelled_retry {
             let message = self.i18n.text("event_retry_cancelled");
             self.state.append_server_message(network, message);
@@ -1759,7 +1802,7 @@ impl ChatWindow {
                     let _ = self.apply_connection(network, config, window, cx);
                 }
                 Err(error) => {
-                    self.feedback = Some(error);
+                    self.set_feedback(Some(error));
                     self.open_settings_for(Some(profile_id), window, cx);
                 }
             }
@@ -1791,7 +1834,7 @@ impl ChatWindow {
         self.state.set_status(network, ConnectionStatus::Connecting);
         self.state
             .append_server_message(network, self.i18n.text("event_reconnecting"));
-        self.feedback = None;
+        self.set_feedback(None);
         match Connection::connect(config) {
             Ok(connection) => {
                 connection.set_transcript(self.debug_enabled);
@@ -1889,7 +1932,7 @@ impl ChatWindow {
         self.state.append_server_message(network, message.clone());
         // Another server's disconnect is shown in its tree row and log only.
         if self.selected_network_id() == Some(network) {
-            self.feedback = Some(message);
+            self.set_feedback(Some(message));
         }
     }
 
@@ -1898,14 +1941,15 @@ impl ChatWindow {
             return;
         };
         if command == MemberCommand::Whois {
-            self.feedback = self.request_whois(menu.network, &menu.nickname, cx).err();
+            let result = self.request_whois(menu.network, &menu.nickname, cx);
+            self.set_feedback(result.err());
             cx.notify();
             return;
         }
-        self.feedback = self
+        let result = self
             .registered_connection(menu.network)
-            .and_then(|connection| connection.send_member_command(&menu.nickname, command))
-            .err();
+            .and_then(|connection| connection.send_member_command(&menu.nickname, command));
+        self.set_feedback(result.err());
         cx.notify();
     }
 
@@ -1943,13 +1987,14 @@ impl ChatWindow {
         };
         let group = self.menu_group_now(&menu);
         // Nobody left to act on: nothing is sent.
-        self.feedback = if group.is_empty() {
+        let feedback = if group.is_empty() {
             None
         } else {
             self.registered_connection(menu.network)
                 .and_then(|connection| connection.send_member_modes(&menu.channel, mode, &group))
                 .err()
         };
+        self.set_feedback(feedback);
         cx.notify();
     }
 
@@ -2013,7 +2058,7 @@ impl ChatWindow {
         let Some(menu) = self.channel_menu.take() else {
             return;
         };
-        self.feedback = if join {
+        let feedback = if join {
             self.join_channel(menu.network, &menu.channel, cx).err()
         } else {
             self.registered_connection(menu.network)
@@ -2022,6 +2067,7 @@ impl ChatWindow {
                 })
                 .err()
         };
+        self.set_feedback(feedback);
         cx.notify();
     }
 
@@ -2060,7 +2106,7 @@ impl ChatWindow {
             Ok(None) => self.saved.clone(),
             Err(error) => {
                 // Saving over a file that cannot be read could destroy it.
-                self.feedback = Some(error);
+                self.set_feedback(Some(error));
                 cx.notify();
                 return;
             }
@@ -2081,7 +2127,7 @@ impl ChatWindow {
             });
         }
         profile.set_auto_join_entries(&entries);
-        self.feedback = match settings_file::save(&settings) {
+        let feedback = match settings_file::save(&settings) {
             Ok(()) => {
                 if let Some(saved) = self.saved.servers.iter_mut().find(|p| p.id == profile_id) {
                     saved.channels = settings
@@ -2104,6 +2150,7 @@ impl ChatWindow {
             }
             Err(error) => Some(error),
         };
+        self.set_feedback(feedback);
         cx.notify();
     }
 
@@ -2170,7 +2217,8 @@ impl ChatWindow {
                 cx.activate(true);
             }
             Err(error) => {
-                self.feedback = Some(self.i18n.format("whois_open_failed", &[("error", &error)]))
+                let message = self.i18n.format("whois_open_failed", &[("error", &error)]);
+                self.set_feedback(Some(message));
             }
         }
     }
@@ -2259,7 +2307,7 @@ impl ChatWindow {
             input.update(cx, |input, cx| input.select_everything(cx));
         }
         let viewport = window.viewport_size();
-        self.feedback = None;
+        self.set_feedback(None);
         self.member_prompt = Some(MemberPrompt {
             position: Some(point(
                 position.x.min((viewport.width - px(300.)).max(px(0.))),
@@ -2422,7 +2470,7 @@ impl ChatWindow {
 
     fn cancel_member_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.member_prompt = None;
-        self.feedback = None;
+        self.set_feedback(None);
         window.focus(&self.inputs[&self.state.selection()].focus_handle(cx));
         cx.notify();
     }
@@ -2466,10 +2514,10 @@ impl ChatWindow {
         match result {
             Ok(()) => {
                 self.member_prompt = None;
-                self.feedback = None;
+                self.set_feedback(None);
                 window.focus(&self.inputs[&self.state.selection()].focus_handle(cx));
             }
-            Err(error) => self.feedback = Some(error),
+            Err(error) => self.set_feedback(Some(error)),
         }
         cx.notify();
     }
@@ -2530,10 +2578,11 @@ impl ChatWindow {
             Ok(value) => value.unwrap_or_default(),
             Err(error) => {
                 // The startup notice is this error plus where a copy was kept.
-                self.feedback = Some(match &self.startup_notice {
+                let message = match &self.startup_notice {
                     Some(notice) if notice.starts_with(&error) => notice.clone(),
                     _ => error,
-                });
+                };
+                self.set_feedback(Some(message));
                 cx.notify();
                 return;
             }
@@ -2565,10 +2614,10 @@ impl ChatWindow {
         ) {
             Ok(handle) => self.settings_window = Some(handle),
             Err(error) => {
-                self.feedback = Some(
-                    self.i18n
-                        .format("settings_open_failed", &[("error", &error.to_string())]),
-                )
+                let message = self
+                    .i18n
+                    .format("settings_open_failed", &[("error", &error.to_string())]);
+                self.set_feedback(Some(message))
             }
         }
         cx.notify();
@@ -2901,7 +2950,7 @@ impl ChatWindow {
         self.channel_menu = None;
         self.state.dispatch(command);
         self.log_selection = None;
-        self.feedback = None;
+        self.set_feedback(None);
         self.update_title(window);
         cx.notify();
         // Redraw the pane contents together with the native title change.
@@ -3422,8 +3471,8 @@ impl ChatWindow {
                     .get_mut(&network)
                     .is_some_and(|session| session.pending_whois.remove(&key.1));
                 if requested && !info.found() && !self.whois_windows.contains_key(&key) {
-                    self.feedback =
-                        Some(self.i18n.format_nickname("whois_not_found", &info.nickname));
+                    let message = self.i18n.format_nickname("whois_not_found", &info.nickname);
+                    self.set_feedback(Some(message));
                 }
                 if requested || self.whois_windows.contains_key(&key) {
                     self.whois_replies.push((network, info, requested));
@@ -3633,13 +3682,21 @@ impl ChatWindow {
         } else {
             Err(self.i18n.text("not_connected"))
         };
+        self.send_failure = None;
         self.feedback = match result {
             Ok(()) => {
                 self.input_history.record(&text, private_peer.as_deref());
                 input.update(cx, |input, cx| input.clear_after_send(cx));
                 None
             }
-            Err(error) => Some(error),
+            Err(error) => {
+                self.send_failure = Some(SendFailure {
+                    selection,
+                    text,
+                    message: error.clone(),
+                });
+                Some(error)
+            }
         };
         cx.notify();
         window.refresh();
@@ -6388,8 +6445,8 @@ fn main() {
                     let failed = match config {
                         Ok(config) => chat.apply_connection(network, config, window, cx).is_err(),
                         Err(error) => {
-                            chat.feedback =
-                                Some(chat.i18n.format("startup_invalid", &[("error", &error)]));
+                            let message = chat.i18n.format("startup_invalid", &[("error", &error)]);
+                            chat.set_feedback(Some(message));
                             cx.notify();
                             true
                         }
