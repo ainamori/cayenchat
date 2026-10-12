@@ -321,6 +321,7 @@ fn closed_worker_keeps_buffered_diagnostics_readable() {
         encoding: "UTF-8".into(),
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(0)),
+        relay_prefix: Arc::new(AtomicUsize::new(0)),
         closed: None,
         transcript: Arc::default(),
     };
@@ -344,6 +345,7 @@ fn member_modes_are_split_to_the_announced_limit_and_validated_first() {
         encoding: "UTF-8".into(),
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(2)),
+        relay_prefix: Arc::new(AtomicUsize::new(0)),
         closed: None,
         transcript: Arc::default(),
     };
@@ -383,6 +385,7 @@ fn member_modes_are_not_sent_in_part_when_the_queue_is_nearly_full() {
         encoding: "UTF-8".into(),
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(1)),
+        relay_prefix: Arc::new(AtomicUsize::new(0)),
         closed: None,
         transcript: Arc::default(),
     };
@@ -412,6 +415,7 @@ fn taken_events_can_be_awaited_until_the_worker_ends() {
         encoding: "UTF-8".into(),
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(0)),
+        relay_prefix: Arc::new(AtomicUsize::new(0)),
         closed: None,
         transcript: Arc::default(),
     };
@@ -2335,7 +2339,7 @@ fn a_label_does_not_count_against_the_512_byte_message_limit() {
     // bytes and CRLF 2, so 496 bytes of text fill the 512 bytes a
     // message may have, which is also what is sent without labels. The
     // `@label=...` tag has a limit of its own.
-    let text = "x".repeat(496);
+    let text = "x".repeat(400);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let expected = text.clone();
@@ -2381,7 +2385,7 @@ fn a_label_does_not_count_against_the_512_byte_message_limit() {
 
     // One byte more does not fit, with or without a label.
     assert!(
-        validate_wire(&format!("PRIVMSG #test {text}x\r\n"), "UTF-8").is_err(),
+        validate_wire(&format!("PRIVMSG #test {}\r\n", "x".repeat(497)), "UTF-8").is_err(),
         "the message part stays limited to 512 bytes"
     );
 }
@@ -2396,21 +2400,21 @@ fn tagged_messages_have_separate_limits_for_tags_and_message() {
     };
     // A text of one word is sent without the colon, so 496 bytes fill
     // the 512 bytes and 497 do not.
-    assert!(validate_tagged_wire(&tagged("c1", &"x".repeat(496)), "UTF-8").is_ok());
+    assert!(validate_tagged_wire(&tagged("c1", &"x".repeat(496)), "UTF-8", 0).is_ok());
     // The message part is limited as before, tags aside.
-    assert!(validate_tagged_wire(&tagged("c1", &"x".repeat(497)), "UTF-8").is_err());
+    assert!(validate_tagged_wire(&tagged("c1", &"x".repeat(497)), "UTF-8", 0).is_err());
     // The tags are limited on their own: 4094 bytes without `@` and the
     // space, so a value of 4094 - "label=".len() fits and one more does not.
     let fits = "l".repeat(4094 - "label=".len());
-    assert!(validate_tagged_wire(&tagged(&fits, "hi"), "UTF-8").is_ok());
+    assert!(validate_tagged_wire(&tagged(&fits, "hi"), "UTF-8", 0).is_ok());
     let too_long = "l".repeat(4094 - "label=".len() + 1);
     assert!(
-        validate_tagged_wire(&tagged(&too_long, "hi"), "UTF-8")
+        validate_tagged_wire(&tagged(&too_long, "hi"), "UTF-8", 0)
             .unwrap_err()
             .contains("tags")
     );
     // A character the encoding cannot hold is still refused.
-    assert!(validate_tagged_wire(&tagged("c1", "🙂"), "ISO-2022-JP").is_err());
+    assert!(validate_tagged_wire(&tagged("c1", "🙂"), "ISO-2022-JP", 0).is_err());
 }
 
 #[test]
@@ -4368,4 +4372,41 @@ fn metadata_without_batch_brings_batch_along_or_stays_off() {
         assert!(avatar_events(&events).is_empty());
     }
     server.join().unwrap();
+}
+
+#[test]
+fn messages_are_limited_by_the_line_the_recipient_gets() {
+    let message = |text: &str| Outgoing::Message {
+        target: "#test".into(),
+        text: text.into(),
+        display_text: text.into(),
+        notice: false,
+    };
+    // A one-word text goes without the colon: `PRIVMSG #test ` is 14 bytes and CRLF 2.
+    let prefix = relay::OwnMask::default().prefix_bytes("alice", "UTF-8");
+    let room = 512 - prefix - 16;
+    let exact = "x".repeat(room);
+    assert!(validate_outgoing_relayed(&message(&exact), "UTF-8", prefix).is_ok());
+    let error =
+        validate_outgoing_relayed(&message(&format!("{exact}x")), "UTF-8", prefix).unwrap_err();
+    assert!(error.contains("too long"), "{error}");
+    // Without the prefix only the command itself is limited.
+    assert!(validate_outgoing(&message(&format!("{exact}x")), "UTF-8").is_ok());
+    assert!(validate_outgoing(&message(&"x".repeat(496)), "UTF-8").is_ok());
+    assert!(validate_outgoing(&message(&"x".repeat(497)), "UTF-8").is_err());
+
+    // A known, shorter mask leaves more room.
+    let mut mask = relay::OwnMask::default();
+    mask.observe(&":alice!u@h.example JOIN #test".parse().unwrap(), "alice");
+    let known = mask.prefix_bytes("alice", "UTF-8");
+    assert!(known < prefix);
+    let longer = "x".repeat(512 - known - 16);
+    assert!(validate_outgoing_relayed(&message(&longer), "UTF-8", known).is_ok());
+    assert!(validate_outgoing_relayed(&message(&longer), "UTF-8", prefix).is_err());
+
+    // ISO-2022-JP counts the converted text: each kana takes 2 bytes plus
+    // the escape sequences, fewer than UTF-8's 3.
+    let kana = "あ".repeat(150);
+    assert!(validate_outgoing_relayed(&message(&kana), "ISO-2022-JP", prefix).is_ok());
+    assert!(validate_outgoing_relayed(&message(&kana), "UTF-8", prefix).is_err());
 }

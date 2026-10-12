@@ -10,6 +10,7 @@ mod metadata;
 mod modes;
 mod peer_avatar;
 mod presence;
+mod relay;
 mod replay;
 mod tags;
 pub mod text;
@@ -382,6 +383,22 @@ fn validate_wire(wire: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// [`validate_wire`] for a `PRIVMSG` or `NOTICE`: the line must also fit in
+/// 512 bytes once the server has put our `prefix_bytes` (`:nick!user@host `)
+/// in front of it, or the recipients get the end of it cut off.
+fn validate_relayed_wire(wire: &str, label: &str, prefix_bytes: usize) -> Result<(), String> {
+    validate_wire(wire, label)?;
+    let bytes = encode_strict(wire, label)?;
+    if bytes.len() + prefix_bytes > 512 {
+        return Err(format!(
+            "Message is too long: {} bytes of the 512-byte line remain for the command and text once the server adds your nick!user@host, but it needs {}.",
+            512usize.saturating_sub(prefix_bytes),
+            bytes.len()
+        ));
+    }
+    Ok(())
+}
+
 /// The tag section of a message a client sends may take 4094 bytes (IRCv3
 /// message-tags) without the leading `@` and the space after it, so 4096 as
 /// `tags::tag_bytes` counts them. It is separate from the 512 bytes of the
@@ -392,10 +409,14 @@ const MAX_CLIENT_TAG_BYTES: usize = 4096;
 /// usual 512-byte limit, its tags against their own limit, and the whole
 /// line for characters the encoding cannot hold. Tag values are UTF-8 (the
 /// worker requests tags only on UTF-8 connections).
-fn validate_tagged_wire(message: &IrcMessage, label: &str) -> Result<(), String> {
+fn validate_tagged_wire(
+    message: &IrcMessage,
+    label: &str,
+    prefix_bytes: usize,
+) -> Result<(), String> {
     let mut untagged = message.clone();
     untagged.tags = None;
-    validate_wire(&untagged.to_string(), label)?;
+    validate_relayed_wire(&untagged.to_string(), label, prefix_bytes)?;
     if let Some(tags) = &message.tags {
         if tags::tag_bytes(tags) > MAX_CLIENT_TAG_BYTES {
             return Err("Message tags exceed the 4094-byte limit.".into());
@@ -1049,7 +1070,18 @@ enum Outgoing {
     QuitWith(String),
 }
 
+#[cfg(test)]
 fn validate_outgoing(outgoing: &Outgoing, encoding: &str) -> Result<(), String> {
+    validate_outgoing_relayed(outgoing, encoding, 0)
+}
+
+/// [`validate_outgoing`] where a message to others must also fit behind the
+/// `prefix_bytes` the server adds (see [`validate_relayed_wire`]).
+fn validate_outgoing_relayed(
+    outgoing: &Outgoing,
+    encoding: &str,
+    prefix_bytes: usize,
+) -> Result<(), String> {
     let message = match outgoing {
         Outgoing::Message {
             target,
@@ -1085,7 +1117,11 @@ fn validate_outgoing(outgoing: &Outgoing, encoding: &str) -> Result<(), String> 
         Outgoing::Quit => return Ok(()),
         Outgoing::QuitWith(reason) => IrcMessage::from(IrcCommand::QUIT(Some(reason.clone()))),
     };
-    validate_wire(&message.to_string(), encoding)
+    if matches!(outgoing, Outgoing::Message { .. }) {
+        validate_relayed_wire(&message.to_string(), encoding, prefix_bytes)
+    } else {
+        validate_wire(&message.to_string(), encoding)
+    }
 }
 
 /// The selected conversation's target for /me and /msg without a target: a
@@ -1342,6 +1378,8 @@ pub struct Connection {
     part_message: Option<String>,
     /// The server's announced `MODES` limit; 0 until one is seen.
     modes_per_line: Arc<AtomicUsize>,
+    /// Bytes a server adds in front of our relayed lines (see [`relay`]).
+    relay_prefix: Arc<AtomicUsize>,
     /// Disconnects once the worker thread has ended.
     closed: Option<Mutex<std_mpsc::Receiver<()>>>,
     /// Whether IRC lines are recorded after registration.
@@ -1373,6 +1411,10 @@ impl Connection {
         };
         let modes_per_line = Arc::new(AtomicUsize::new(0));
         let worker_modes = modes_per_line.clone();
+        let relay_prefix = Arc::new(AtomicUsize::new(
+            relay::OwnMask::default().prefix_bytes(&config.nickname, &encoding),
+        ));
+        let worker_relay_prefix = relay_prefix.clone();
         let (alive, closed) = std_mpsc::channel::<()>();
         let transcript = Arc::new(AtomicBool::new(false));
         let worker_transcript = transcript.clone();
@@ -1393,6 +1435,7 @@ impl Connection {
                             worker_events,
                             worker_cancel,
                             worker_modes,
+                            worker_relay_prefix,
                             worker_transcript,
                         )),
                         Err(error) => {
@@ -1415,6 +1458,7 @@ impl Connection {
             encoding,
             part_message,
             modes_per_line,
+            relay_prefix,
             closed: Some(Mutex::new(closed)),
             transcript,
         })
@@ -1458,6 +1502,11 @@ impl Connection {
         self.events.as_ref().is_some_and(Events::is_closed)
     }
 
+    fn validate(&self, outgoing: &Outgoing) -> Result<(), String> {
+        let prefix = relay::published(&self.relay_prefix);
+        validate_outgoing_relayed(outgoing, &self.encoding, prefix)
+    }
+
     pub fn send_message(&self, channel: &str, text: &str, notice: bool) -> Result<(), String> {
         if !valid_channel(channel) {
             return Err("Select a channel before sending.".into());
@@ -1469,7 +1518,7 @@ impl Connection {
             display_text: text.to_owned(),
             notice,
         };
-        validate_outgoing(&outgoing, &self.encoding)?;
+        self.validate(&outgoing)?;
         self.commands
             .try_send(outgoing)
             .map_err(|error| format!("Could not queue IRC message: {error}"))
@@ -1491,7 +1540,7 @@ impl Connection {
             display_text: text.to_owned(),
             notice,
         };
-        validate_outgoing(&outgoing, &self.encoding)?;
+        self.validate(&outgoing)?;
         self.commands
             .try_send(outgoing)
             .map_err(|error| format!("Could not queue private message: {error}"))
@@ -1499,7 +1548,7 @@ impl Connection {
 
     pub fn send_member_command(&self, nickname: &str, action: MemberCommand) -> Result<(), String> {
         let outgoing = member_outgoing(nickname, action)?;
-        validate_outgoing(&outgoing, &self.encoding)?;
+        self.validate(&outgoing)?;
         self.commands
             .try_send(outgoing)
             .map_err(|error| format!("Could not queue member command: {error}"))
@@ -1531,7 +1580,7 @@ impl Connection {
                 // Sent as given: parsing "+vv" into modes and back would
                 // write it as "+v+v".
                 let outgoing = checked_command(IrcCommand::Raw("MODE".into(), args))?;
-                validate_outgoing(&outgoing, &self.encoding)?;
+                self.validate(&outgoing)?;
                 Ok(outgoing)
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -1551,7 +1600,7 @@ impl Connection {
     pub fn send_command(&self, line: &str, selected_channel: Option<&str>) -> Result<(), String> {
         let outgoing = parse_slash_command(line, selected_channel)?;
         let outgoing = with_default_part_reason(outgoing, self.part_message.as_deref());
-        validate_outgoing(&outgoing, &self.encoding)?;
+        self.validate(&outgoing)?;
         self.commands
             .try_send(outgoing)
             .map_err(|error| format!("Could not queue IRC command: {error}"))
@@ -1562,7 +1611,7 @@ impl Connection {
             return Err("Invalid nickname.".into());
         }
         let outgoing = checked_command(IrcCommand::NICK(nickname.to_owned()))?;
-        validate_outgoing(&outgoing, &self.encoding)?;
+        self.validate(&outgoing)?;
         self.commands
             .try_send(outgoing)
             .map_err(|error| format!("Could not queue nickname change: {error}"))
@@ -1582,7 +1631,7 @@ impl Connection {
             request,
             url: url.map(str::to_owned),
         };
-        validate_outgoing(&outgoing, &self.encoding)?;
+        self.validate(&outgoing)?;
         self.commands
             .try_send(outgoing)
             .map_err(|error| format!("Could not queue avatar request: {error}"))
@@ -1598,7 +1647,7 @@ impl Connection {
             peer_avatar::shareable(url, self.encoding.eq_ignore_ascii_case("UTF-8"))?;
         }
         let outgoing = Outgoing::ShareAvatar(url.map(str::to_owned));
-        validate_outgoing(&outgoing, &self.encoding)?;
+        self.validate(&outgoing)?;
         self.commands
             .try_send(outgoing)
             .map_err(|error| format!("Could not queue avatar sharing: {error}"))
@@ -1612,7 +1661,7 @@ impl Connection {
     pub fn set_real_name(&self, realname: &str) -> Result<(), String> {
         check_realname(realname)?;
         let outgoing = Outgoing::SetName(realname.to_owned());
-        validate_outgoing(&outgoing, &self.encoding)?;
+        self.validate(&outgoing)?;
         self.commands
             .try_send(outgoing)
             .map_err(|error| format!("Could not queue realname change: {error}"))
@@ -1640,7 +1689,7 @@ impl Connection {
             reference,
             limit,
         };
-        validate_outgoing(&outgoing, &self.encoding)?;
+        self.validate(&outgoing)?;
         self.commands
             .try_send(outgoing)
             .map_err(|error| format!("Could not queue history request: {error}"))
@@ -1693,6 +1742,7 @@ async fn run(
         EventSender::new(events),
         Arc::new(Notify::new()),
         Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
         Arc::new(AtomicBool::new(true)),
     )
     .await
@@ -1704,6 +1754,7 @@ async fn run_cancellable(
     events: EventSender,
     cancel: Arc<Notify>,
     modes_per_line: Arc<AtomicUsize>,
+    relay_prefix: Arc<AtomicUsize>,
     transcript: Arc<AtomicBool>,
 ) {
     let started = Instant::now();
@@ -1949,6 +2000,8 @@ async fn run_cancellable(
         targets_since,
         track_accounts: config.ircv3.accounts,
         modes_per_line,
+        relay_prefix,
+        own_mask: relay::OwnMask::default(),
         pending_setname: 0,
         peers,
         ctcp,
@@ -2055,6 +2108,8 @@ struct Worker {
     targets_since: Option<SystemTime>,
     track_accounts: bool,
     modes_per_line: Arc<AtomicUsize>,
+    relay_prefix: Arc<AtomicUsize>,
+    own_mask: relay::OwnMask,
     pending_setname: usize,
     peers: Option<peer_avatar::PeerAvatars>,
     ctcp: ctcp::CtcpReplies,
@@ -2213,6 +2268,15 @@ impl Worker {
         }
     }
 
+    /// Tells the connection handle how much the server adds in front of the
+    /// lines we send, for its length check.
+    fn publish_relay_prefix(&self) {
+        let bytes = self
+            .own_mask
+            .prefix_bytes(&self.current_nick, &self.wire_encoding);
+        relay::publish(&self.relay_prefix, bytes);
+    }
+
     async fn send_message(
         &mut self,
         target: String,
@@ -2246,7 +2310,8 @@ impl Worker {
         };
         let message = echo::with_label(message, label.flatten());
         let line = self.transcript.line(&message);
-        let result = validate_tagged_wire(&message, &self.wire_encoding)
+        let prefix = relay::published(&self.relay_prefix);
+        let result = validate_tagged_wire(&message, &self.wire_encoding, prefix)
             .and_then(|_| self.client.send(message).map_err(|error| error.to_string()));
         let event = match result {
             Ok(()) => {
@@ -2279,6 +2344,7 @@ impl Worker {
                 self.transcript.record(WireDirection::Sent, line).await;
                 if let Some(nickname) = retry_nick {
                     self.current_nick = nickname;
+                    self.publish_relay_prefix();
                     self.awaiting_nick = false;
                     self.refusal = None;
                     self.registration_deadline = tokio::time::Instant::now() + REGISTRATION_TIMEOUT;
@@ -2543,6 +2609,8 @@ impl Worker {
         self.history_enabled = self.negotiation.enabled(cap::CHATHISTORY);
         self.history.isupport(message);
         modes::observe(message, &self.modes_per_line);
+        self.own_mask.observe(message, &self.current_nick);
+        self.publish_relay_prefix();
         self.accounts.isupport(message);
         if let Some(announced) = advertised_casemapping(message)
             && announced != self.casemapping
@@ -2791,7 +2859,8 @@ impl Worker {
         {
             match &event {
                 Event::Registered { nickname } | Event::NickChanged { nickname } => {
-                    self.current_nick = nickname.clone()
+                    self.current_nick = nickname.clone();
+                    self.publish_relay_prefix();
                 }
                 // Someone speaking live may be asked about
                 // their avatar; nobody else is.

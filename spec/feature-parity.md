@@ -93,7 +93,7 @@ Server history is limited to channel history on opt-in IRCv3 servers (recent lin
 - PARTIAL — initial/switch focus, common OS editing shortcuts, undo/redo and
   platform-specific app bindings; user-customized macOS text bindings unsupported
   by GPUI 0.2.2, Windows/Linux runtime unverified
-- PARTIAL — CR/LF normalized to spaces; 512-byte encoded IRC-line limit
+- PARTIAL — CR/LF normalized to spaces; 512-byte encoded IRC-line limit, counted for messages as the line the recipient gets (with the sender's `:nick!user@host ` prefix); no automatic splitting of long messages
 
 ## Attachments
 
