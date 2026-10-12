@@ -228,6 +228,7 @@ fn connection_config(
     config.username = profile.username.clone();
     config.realname = profile.realname.clone();
     config.quit_message = profile.quit_message.clone();
+    config.part_message = profile.part_message.clone();
     config.port = profile.port;
     config.use_tls = profile.use_tls;
     config.verify_tls_certificates = profile.verify_tls_certificates;

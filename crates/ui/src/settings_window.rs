@@ -31,6 +31,7 @@ pub(crate) struct SettingsForm {
     username: Entity<TextInput>,
     realname: Entity<TextInput>,
     quit_message: Entity<TextInput>,
+    part_message: Entity<TextInput>,
     display_name: Entity<TextInput>,
     pub(crate) channels: Entity<TextInput>,
     /// Password fields start empty; typing replaces a saved value.
@@ -121,6 +122,12 @@ impl SettingsForm {
             quit_message: field(
                 &i18n.text("quit_message_placeholder"),
                 &profile.quit_message,
+                false,
+                cx,
+            ),
+            part_message: field(
+                &i18n.text("part_message_placeholder"),
+                &profile.part_message,
                 false,
                 cx,
             ),
@@ -352,6 +359,7 @@ impl SettingsForm {
                 profile.username = value(&self.username);
                 profile.realname = value(&self.realname);
                 profile.quit_message = value(&self.quit_message);
+                profile.part_message = value(&self.part_message);
                 profile.display_name = value(&self.display_name);
                 profile.channels = value(&self.channels);
                 profile.sasl_username = value(&self.sasl_username);
@@ -436,7 +444,7 @@ impl SettingsForm {
     }
 
     /// Every text field, so edits to any of them can trigger an autosave.
-    fn text_fields(&self) -> [&Entity<TextInput>; 44] {
+    fn text_fields(&self) -> [&Entity<TextInput>; 45] {
         [
             &self.custom_host,
             &self.port,
@@ -444,6 +452,7 @@ impl SettingsForm {
             &self.username,
             &self.realname,
             &self.quit_message,
+            &self.part_message,
             &self.display_name,
             &self.channels,
             &self.server_password,
@@ -624,6 +633,7 @@ impl SettingsForm {
             (&self.username, &profile.username),
             (&self.realname, &profile.realname),
             (&self.quit_message, &profile.quit_message),
+            (&self.part_message, &profile.part_message),
             (&self.display_name, &profile.display_name),
             (&self.channels, &profile.channels),
             (&self.sasl_username, &profile.sasl_username),
@@ -872,6 +882,7 @@ impl SettingsWindow {
             (&self.settings.username, "username_placeholder"),
             (&self.settings.realname, "realname_placeholder"),
             (&self.settings.quit_message, "quit_message_placeholder"),
+            (&self.settings.part_message, "part_message_placeholder"),
             (&self.settings.display_name, "display_name_placeholder"),
             (
                 &self.settings.server_password,
@@ -2210,6 +2221,10 @@ impl SettingsWindow {
             .child(settings_field(
                 &self.i18n.text("quit_message"),
                 self.settings.quit_message.clone(),
+            ))
+            .child(settings_field(
+                &self.i18n.text("part_message"),
+                self.settings.part_message.clone(),
             ))
             .child(
                 div()
