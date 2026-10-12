@@ -65,11 +65,18 @@ const TRACKING: &[&str] = &[
     "psc_unused",
 ];
 
-/// `text` with each long Amazon product link shortened.
+/// `text` with each long Amazon product link shortened. A message holding a
+/// CTCP delimiter (U+0001) is protocol text and is returned as written.
 pub fn shorten(text: &str) -> String {
+    if text.contains('\u{1}') {
+        return text.to_owned();
+    }
     let mut out = String::with_capacity(text.len());
     let mut cursor = 0;
     for (range, _) in links::find(text) {
+        if !ends_cleanly(&text[range.end..]) {
+            continue;
+        }
         if let Some(short) = shorten_link(&text[range.clone()]) {
             out.push_str(&text[cursor..range.start]);
             out.push_str(&short);
@@ -78,6 +85,17 @@ pub fn shorten(text: &str) -> String {
     }
     out.push_str(&text[cursor..]);
     out
+}
+
+/// Whether the link found just before `after` really ends there. The link
+/// finder also stops at quotes and brackets, which may sit inside the URL, so
+/// a link followed by one is not rewritten: the rest could carry a parameter
+/// that was never checked.
+fn ends_cleanly(after: &str) -> bool {
+    let rest = after.trim_start_matches(|ch| ".,;:!?}」』)".contains(ch));
+    rest.chars()
+        .next()
+        .is_none_or(|ch| ch.is_whitespace() || matches!(ch, '。' | '、'))
 }
 
 fn shorten_link(link: &str) -> Option<String> {
@@ -213,5 +231,25 @@ mod tests {
         for text in cases {
             assert_eq!(shorten(&text), text);
         }
+    }
+
+    #[test]
+    fn leaves_links_cut_at_a_quote_and_ctcp_text_alone() {
+        let padding = "a".repeat(60);
+        let quoted =
+            format!("https://www.amazon.com/dp/B012345678?keywords={padding}'&smid=SELLER");
+        assert_eq!(shorten(&quoted), quoted);
+        let bracketed = format!("<{}>", long("www.amazon.com", "/dp/B012345678"));
+        assert_eq!(shorten(&bracketed), bracketed);
+        let ctcp = format!(
+            "\u{1}PING {}\u{1}",
+            long("www.amazon.co.jp", "/dp/B012345678")
+        );
+        assert_eq!(shorten(&ctcp), ctcp);
+        let sentence = format!("see {}.", long("www.amazon.com", "/dp/B012345678"));
+        assert_eq!(
+            shorten(&sentence),
+            "see https://www.amazon.com/dp/B012345678."
+        );
     }
 }

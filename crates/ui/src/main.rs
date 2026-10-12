@@ -3658,7 +3658,7 @@ impl ChatWindow {
         }
         // The draft keeps what was typed; only the message that goes out is
         // shortened, and that is what the history records. Commands are sent
-        // as written.
+        // as written, and `shorten` leaves CTCP text alone.
         let sent = if self.shorten_amazon_urls && !text.starts_with('/') {
             cayenchat_app::amazon::shorten(&text)
         } else {
