@@ -369,6 +369,13 @@ pub struct Appearance {
     /// How opaque that bubble is, in percent (`MIN_URL_TOOLTIP_OPACITY` to
     /// 100). Added after version 15 without a version change.
     pub url_tooltip_opacity: u8,
+    /// Text and underline of URLs in the channel logs. Added after version 15
+    /// without a version change; files without it read as the default.
+    pub link_color: String,
+    /// Background behind URLs in the channel logs. Empty means automatic: none
+    /// for plain URLs, a faint tint of the link color for shortened ones.
+    /// Added after version 15 without a version change.
+    pub link_background: String,
     pub alternate_rows: bool,
     /// Inline thumbnails of direct image links in the main channel log
     /// (version 14). Off by default, also for settings saved before it existed.
@@ -426,6 +433,8 @@ pub struct DarkColors {
     pub sub_log_background: String,
     pub sub_log_alternate: String,
     pub url_tooltip_color: String,
+    pub link_color: String,
+    pub link_background: String,
     pub url_tooltip_link_color: String,
 }
 
@@ -441,6 +450,8 @@ impl Default for DarkColors {
             sub_log_background: "#24272B".into(),
             sub_log_alternate: "#2C3036".into(),
             url_tooltip_color: "#2A2D32".into(),
+            link_color: "#78AAFF".into(),
+            link_background: String::new(),
             url_tooltip_link_color: "#78AAFF".into(),
         }
     }
@@ -460,6 +471,8 @@ impl Default for Appearance {
             url_tooltip_color: "#FFFFFF".into(),
             url_tooltip_link_color: "#0645AD".into(),
             url_tooltip_opacity: DEFAULT_URL_TOOLTIP_OPACITY,
+            link_color: "#0645AD".into(),
+            link_background: String::new(),
             alternate_rows: false,
             image_previews: false,
             user_avatars: false,
@@ -528,6 +541,8 @@ impl Appearance {
             ("Sub alternate", &self.sub_log_alternate),
             ("URL tooltip", &self.url_tooltip_color),
             ("Dark URL tooltip", &self.dark.url_tooltip_color),
+            ("Link", &self.link_color),
+            ("Dark link", &self.dark.link_color),
             ("URL tooltip link", &self.url_tooltip_link_color),
             ("Dark URL tooltip link", &self.dark.url_tooltip_link_color),
             ("Dark member list", &self.dark.member_list_background),
@@ -541,6 +556,14 @@ impl Appearance {
         ] {
             if color_value(value).is_none() {
                 return Err(format!("{label} color must be #RRGGBB."));
+            }
+        }
+        for (label, value) in [
+            ("Link background", &self.link_background),
+            ("Dark link background", &self.dark.link_background),
+        ] {
+            if !value.is_empty() && color_value(value).is_none() {
+                return Err(format!("{label} color must be #RRGGBB or empty."));
             }
         }
         if !(MIN_URL_TOOLTIP_OPACITY..=100).contains(&self.url_tooltip_opacity) {
@@ -2137,6 +2160,46 @@ mod tests {
         assert!(appearance.validate().is_err());
         appearance.url_tooltip_link_color = "#0645AD".into();
         appearance.dark.url_tooltip_link_color = "blue".into();
+        assert!(appearance.validate().is_err());
+    }
+
+    #[test]
+    fn link_colors_default_for_old_settings_round_trip_and_are_validated() {
+        let mut old = serde_json::to_value(Settings::default()).unwrap();
+        let appearance = old["appearance"].as_object_mut().unwrap();
+        appearance.remove("link_color");
+        appearance.remove("link_background");
+        let dark = appearance["dark"].as_object_mut().unwrap();
+        dark.remove("link_color");
+        dark.remove("link_background");
+        let settings: Settings = serde_json::from_value(old).unwrap();
+        assert_eq!(settings.appearance, Appearance::default());
+        assert_eq!(settings.appearance.link_color, "#0645AD");
+        assert_eq!(settings.appearance.dark.link_color, "#78AAFF");
+        assert!(settings.appearance.link_background.is_empty());
+        assert!(settings.appearance.dark.link_background.is_empty());
+
+        let mut appearance = Appearance {
+            link_background: "#FFEEAA".into(),
+            dark: DarkColors {
+                link_background: "#112233".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&appearance).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Appearance>(&json).unwrap(),
+            appearance
+        );
+        assert!(appearance.validate().is_ok());
+        appearance.link_background = "yellow".into();
+        assert!(appearance.validate().is_err());
+        appearance.link_background.clear();
+        appearance.dark.link_background = "#12".into();
+        assert!(appearance.validate().is_err());
+        appearance.dark.link_background.clear();
+        appearance.link_color = String::new();
         assert!(appearance.validate().is_err());
     }
 

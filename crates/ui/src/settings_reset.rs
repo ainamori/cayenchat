@@ -169,6 +169,10 @@ impl SettingsWindow {
             (&form.dark_sub_log_alternate, &dark.sub_log_alternate),
             (&form.url_tooltip_color, &appearance.url_tooltip_color),
             (&form.dark_url_tooltip_color, &dark.url_tooltip_color),
+            (&form.link_color, &appearance.link_color),
+            (&form.dark_link_color, &dark.link_color),
+            (&form.link_background, &appearance.link_background),
+            (&form.dark_link_background, &dark.link_background),
             (
                 &form.url_tooltip_link_color,
                 &appearance.url_tooltip_link_color,
