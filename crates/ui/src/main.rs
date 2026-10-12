@@ -1209,6 +1209,20 @@ impl ChatWindow {
             let mut ranges = own
                 .map(|own| mention_ranges(plain, own))
                 .unwrap_or_default();
+            // A nickname inside a link is part of the address, not a mention.
+            if !ranges.is_empty() {
+                let links = cayenchat_app::links::find(plain);
+                // Both lists ascend, so one forward sweep suffices.
+                let mut next = 0;
+                ranges.retain(|range| {
+                    while next < links.len() && links[next].0.end <= range.start {
+                        next += 1;
+                    }
+                    links
+                        .get(next)
+                        .is_none_or(|(link, _)| range.end <= link.start)
+                });
+            }
             mentioned = !ranges.is_empty();
             let matches = notifications::keyword_ranges(plain, keywords);
             keyword = !matches.is_empty();

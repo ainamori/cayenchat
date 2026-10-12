@@ -961,6 +961,30 @@ Headless UI test, `perf_baseline` (medians in µs; parent / branch, runs 1–3):
 - Limits: one container, Xvfb, not a visible window; the test bypasses the IRC
   worker; no real window shaping; real servers were not used.
 
+## Own nickname inside links (2026-10-12, issue #314)
+
+`find_mentions` drops nickname matches that overlap a link, so a line that
+matches the own nickname also parses its links, then compares the two sorted
+range lists in one forward sweep. Lines without a nickname match do no extra
+work. `perf_baseline_nick_links` adds the missing load: the own nickname
+`perfclient` in every line shape (a mention plus a link containing it; a link
+only; 750 links containing it, about 15 KiB; an ordinary line), 128 lines per
+event batch.
+
+Optimized `perf_baseline_nick_links`, `event_batch_256` median, three runs
+each, on origin/master 2ba2c6e with the same test file versus this branch:
+
+| | median (µs) |
+| --- | --- |
+| master | 10,729 / 10,758 / 10,695 |
+| branch | 12,792 / 12,805 / 13,872 |
+
+About 2 ms more per 128-line batch (roughly 16 µs a line on average), almost
+all in the 15 KiB, 750-link lines (a quarter of the lines); the ordinary
+`perf_baseline` bodies do not contain the nickname and are unaffected.
+Accepted: bounded by the 16 KiB line limit and linear in the line length.
+Limits: headless test platform, one container, no IRC worker.
+
 ## Resource limit candidates (proposal)
 
 These are not agreed. Each needs a decision before it is implemented. The

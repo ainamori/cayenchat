@@ -2737,6 +2737,68 @@ fn action_verbs_and_senders_are_not_keywords_and_old_lines_stay(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn a_nickname_inside_a_link_is_not_a_mention(cx: &mut TestAppContext) {
+    use cayenchat_irc_core::Event;
+
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(crate::settings_with_channels("#a"), None, window, cx)
+    });
+    chat.update(cx, |chat, cx| {
+        chat.handle_events(
+            NetworkId(1),
+            vec![
+                Event::Registered {
+                    nickname: "alice".into(),
+                },
+                Event::Joined {
+                    channel: "#a".into(),
+                },
+            ],
+            Worker::Running,
+            cx,
+        );
+        let found = |text: &str| {
+            let found = chat.find_mentions(NetworkId(1), "bob", text, false);
+            let shown: Vec<_> = found
+                .ranges
+                .iter()
+                .map(|r| text[r.clone()].to_owned())
+                .collect();
+            (found.mentioned, shown)
+        };
+        assert_eq!(
+            found("https://example.org/users/alice/profile"),
+            (false, vec![])
+        );
+        assert_eq!(
+            found("see \u{3}04https://example.org/?u=alice\u{3}"),
+            (false, vec![])
+        );
+        assert_eq!(
+            found("alice: これ見て https://example.org/users/alice/"),
+            (true, vec!["alice".to_owned()])
+        );
+        assert_eq!(
+            found("https://example.org/alice alice"),
+            (true, vec!["alice".to_owned()])
+        );
+        // Many links, each holding the nickname, still leave only the outside one.
+        let many = format!("{}alice", "https://x/alice ".repeat(1000));
+        let (mentioned, shown) = found(&many);
+        assert!(mentioned);
+        assert_eq!(shown, vec!["alice".to_owned()]);
+    });
+}
+
+#[gpui::test]
 fn highlights_and_private_messages_notify_unless_visible(cx: &mut TestAppContext) {
     use cayenchat_irc_core::Event;
 
