@@ -77,12 +77,20 @@ fn image_link(index: usize) -> String {
 
 /// One incoming line as the worker reports it: its wire diagnostic, then the
 /// translated message.
-fn incoming(sequence: usize, images: bool, long_urls: bool) -> [Event; 2] {
+fn incoming(sequence: usize, images: bool, long_urls: bool, nick_links: bool) -> [Event; 2] {
     let channel = channel(sequence % CHANNELS);
     let sender = format!("user{:03}", sequence % MEMBERS);
     // Lines go round-robin over the channels; count within the channel.
     let line = sequence / CHANNELS;
-    let text = if images && line.is_multiple_of(IMAGE_EVERY) {
+    let text = if nick_links {
+        match sequence % 4 {
+            0 => format!("perfclient: see {line} https://example.invalid/users/perfclient/"),
+            1 => format!("https://example.invalid/perfclient?user=perfclient&n={line}"),
+            // As many links with the nickname as a 16 KiB line holds.
+            2 => "https://x/perfclient ".repeat(750),
+            _ => TEXTS[sequence % TEXTS.len()].to_owned(),
+        }
+    } else if images && line.is_multiple_of(IMAGE_EVERY) {
         let link = (line / IMAGE_EVERY + sequence % CHANNELS * 7) % IMAGE_LINKS;
         format!("see {}", image_link(link))
     } else if long_urls && sequence.is_multiple_of(2) {
@@ -152,31 +160,38 @@ impl Timings {
 #[gpui::test]
 #[ignore = "performance baseline; run with --release -- --ignored --nocapture"]
 fn perf_baseline(cx: &mut TestAppContext) {
-    run(cx, 1, false, false, false);
+    run(cx, 1, false, false, false, false);
 }
 
 #[gpui::test]
 #[ignore = "performance baseline; run with --release -- --ignored --nocapture"]
 fn perf_baseline_4_servers(cx: &mut TestAppContext) {
-    run(cx, 4, false, false, false);
+    run(cx, 4, false, false, false, false);
 }
 
 #[gpui::test]
 #[ignore = "performance baseline; run with --release -- --ignored --nocapture"]
 fn perf_baseline_previews(cx: &mut TestAppContext) {
-    run(cx, 1, true, false, false);
+    run(cx, 1, true, false, false, false);
 }
 
 #[gpui::test]
 #[ignore = "performance baseline; run with --release -- --ignored --nocapture"]
 fn perf_baseline_avatars(cx: &mut TestAppContext) {
-    run(cx, 1, false, true, false);
+    run(cx, 1, false, true, false, false);
 }
 
 #[gpui::test]
 #[ignore = "performance baseline; run with --release -- --ignored --nocapture"]
 fn perf_baseline_short_urls(cx: &mut TestAppContext) {
-    run(cx, 1, false, false, true);
+    run(cx, 1, false, false, true, false);
+}
+
+/// Lines that contain the own nickname inside and outside links.
+#[gpui::test]
+#[ignore = "performance baseline; run with --release -- --ignored --nocapture"]
+fn perf_baseline_nick_links(cx: &mut TestAppContext) {
+    run(cx, 1, false, false, false, true);
 }
 
 /// Serves one 800×400 PNG for every link and counts requests.
@@ -223,7 +238,14 @@ fn settings(servers: usize) -> cayenchat_storage::Settings {
     settings
 }
 
-fn run(cx: &mut TestAppContext, servers: usize, images: bool, avatars: bool, short_urls: bool) {
+fn run(
+    cx: &mut TestAppContext,
+    servers: usize,
+    images: bool,
+    avatars: bool,
+    short_urls: bool,
+    nick_links: bool,
+) {
     let networks: Vec<NetworkId> = (1..=servers as u32).map(NetworkId).collect();
     cx.update(|cx| {
         crate::apply_shortcuts(crate::ShortcutPrefs::default(), cx);
@@ -276,7 +298,7 @@ fn run(cx: &mut TestAppContext, servers: usize, images: bool, avatars: bool, sho
     let history: Vec<Event> = (0..HISTORY * CHANNELS)
         .flat_map(|_| {
             sequence += 1;
-            incoming(sequence, images, short_urls)
+            incoming(sequence, images, short_urls, nick_links)
         })
         .collect();
     for network in &networks {
@@ -385,7 +407,7 @@ fn run(cx: &mut TestAppContext, servers: usize, images: bool, avatars: bool, sho
         let batch: Vec<Event> = (0..EVENT_BATCH / 2)
             .flat_map(|_| {
                 sequence += 1;
-                incoming(sequence, images, short_urls)
+                incoming(sequence, images, short_urls, nick_links)
             })
             .collect();
         let network = networks[index % networks.len()];
