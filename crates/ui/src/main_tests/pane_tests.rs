@@ -3529,3 +3529,32 @@ fn editing_a_draft_clears_only_its_own_send_failure(cx: &mut TestAppContext) {
         Some("settings failed")
     );
 }
+
+#[gpui::test]
+fn same_worded_warning_from_another_source_survives_draft_edits(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let settings = crate::settings_with_channels("#a");
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    let input = chat.read_with(cx, |chat, _| chat.inputs[&chat.state.selection()].clone());
+    input.update(cx, |input, cx| input.set_text("first", cx));
+    chat.update_in(cx, |chat, window, cx| chat.send_draft(false, window, cx));
+    let failure = chat
+        .read_with(cx, |chat, _| chat.feedback.clone())
+        .expect("the send failed");
+    // Another action reports the very same words.
+    chat.update(cx, |chat, _| chat.set_feedback(Some(failure.clone())));
+    input.update(cx, |input, cx| input.set_text("first!", cx));
+    assert_eq!(
+        chat.read_with(cx, |chat, _| chat.feedback.clone()),
+        Some(failure)
+    );
+}
