@@ -1281,6 +1281,14 @@ elsewhere in the window, or the window becoming inactive), because a choice can
 be acted on all at once and must not linger unseen (#294). The log's text
 selection and the channel tree's active row are unchanged.
 
+In a channel the member list shows our own row first (#318), matched by the
+network's current nickname under RFC 1459 case mapping with the role prefix
+ignored and the prefix kept in the row. The others keep the `sorted_members`
+order and the roster itself is not reordered: `member_selection::Participants`
+borrows it and maps display index to roster index, so drawing copies nothing
+and rows, clicks, ranges and keyboard movement share one order. When we are not
+listed, nothing is added.
+
 Typing while the main log, the member list or the channel tree has focus (after
 a click that started a selection)
 moves focus to the draft and types the character there (#289), so input is never
