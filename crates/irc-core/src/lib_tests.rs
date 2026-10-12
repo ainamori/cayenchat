@@ -972,6 +972,45 @@ fn safe_channel_join_names_messages_and_part_round_trip() {
 }
 
 #[test]
+fn rejoining_after_a_kick_lists_each_member_once() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut lines = BufReader::new(socket.try_clone().unwrap()).lines();
+        while !lines.next().unwrap().unwrap().starts_with("USER ") {}
+        socket
+            .write_all(b":server 001 alice :Welcome\r\n:server 376 alice :End of MOTD\r\n")
+            .unwrap();
+        assert_eq!(lines.next().unwrap().unwrap(), "JOIN #test");
+        socket.write_all(b":alice!u@h JOIN #test\r\n:server 353 alice = #test :@alice bob\r\n:server 366 alice #test :End of NAMES\r\n:bob!u@h KICK #test alice :bye\r\n:alice!u@h JOIN #test\r\n:server 353 alice = #test :alice @bob\r\n:server 366 alice #test :End of NAMES\r\n").unwrap();
+    });
+    let mut config =
+        ConnectionConfig::tls("127.0.0.1".into(), "alice".into(), vec!["#test".into()]);
+    config.port = port;
+    config.use_tls = false;
+    let mut connection = Connection::connect(config).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut rosters = Vec::new();
+    while Instant::now() < deadline && rosters.len() < 4 {
+        match connection.try_recv() {
+            Some(Event::Names { users, .. }) => rosters.push(users),
+            Some(_) => {}
+            None => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    // Each JOIN also publishes a snapshot; the last one follows the final NAMES.
+    assert_eq!(rosters.len(), 4, "{rosters:?}");
+    let mut last = rosters[3].clone();
+    last.sort();
+    assert_eq!(last, ["@bob", "alice"], "{rosters:?}");
+    server.join().unwrap();
+}
+
+#[test]
 fn local_server_registration_join_receive_and_send() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();

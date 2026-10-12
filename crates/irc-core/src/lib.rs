@@ -24,7 +24,7 @@ pub use modes::MemberMode;
 pub use peer_avatar::shareable as shareable_avatar;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt,
     ops::ControlFlow,
     sync::{
@@ -3218,6 +3218,13 @@ fn names_snapshot(client: &Client, roster: &mut RosterTracker, channel: &str) ->
             format!("{prefix}{}", user.get_nickname())
         })
         .collect();
+    // The library keeps a channel's list after a KICK and appends the next
+    // NAMES reply to it, so a rejoin lists everyone twice. Keep the last
+    // entry per nickname: it comes from the newest reply.
+    let mut seen = HashSet::new();
+    users.reverse();
+    users.retain(|user| seen.insert(display_nickname(user).to_lowercase()));
+    users.reverse();
     let has_renamed_roles = roster
         .renamed_roles
         .keys()
