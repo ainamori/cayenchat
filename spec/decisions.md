@@ -1182,6 +1182,30 @@ point's reference is IRC's concern and is not a generic sync token.
 Private-message recovery, persistence and echo-message reconciliation are
 future work. Details in `architecture.md` (Channel history).
 
+## D043 — Decoding HTML numeric character references for display (#320)
+
+**Status:** Accepted
+
+- Startup & Behavior option `appearance.decode_char_refs` (off by default):
+  `&#x1F352;` and `&#127826;` in received text are drawn as the characters.
+  Display only: the stored text, search, sending and the wire are unchanged.
+  Named references (`&amp;`) and tags are never interpreted.
+- Only well-formed references (`;` terminated, at most 8 digits) naming a
+  valid scalar value are decoded. Controls, line and paragraph separators,
+  bidirectional controls, BOM, noncharacters, surrogates and out of range
+  values stay as written, as do references inside URLs. At most 64 runs per
+  message are decoded. Adjacent references form one run.
+- It reuses the presentation mapping of compact URLs (`compact_urls.rs`):
+  one drawn text with spans mapping drawn and original byte positions, so
+  links, highlights and selections keep working on original offsets.
+- A run has a neutral (not link-colored, not underlined) background and a
+  hover bubble with the original text and one "copy original" button. There
+  is no button for the converted characters; selecting and copying copies the
+  characters shown. Short URL bubbles and these bubbles share the hover
+  machinery; they never overlap because references inside URLs are not decoded.
+- The channel log and the combined log both draw it (the combined log is
+  text-only, without the bubble). Notifications and search use the original.
+
 ## D042 — MPL-2.0 core, GPL-3.0 user interface (#275)
 
 **Status:** Accepted
