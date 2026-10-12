@@ -88,28 +88,23 @@ pub fn shorten(text: &str) -> String {
 }
 
 /// Whether the link found just before `after` really ends there. The link
-/// finder also stops at quotes and brackets, which may sit inside the URL, so
-/// a link followed by one is not rewritten: the rest could carry a parameter
-/// that was never checked.
+/// finder also stops at quotes, brackets and CJK punctuation, which may sit
+/// inside the URL, so the rest of the whitespace-delimited word must be only
+/// closing punctuation. Anything else could be a parameter that was never
+/// checked, and the whole link is left as written.
 fn ends_cleanly(after: &str) -> bool {
-    let rest = after.trim_start_matches(|ch| ".,;:!?}」』)".contains(ch));
-    let mut chars = rest.chars();
-    match chars.next() {
-        None => true,
-        Some(ch) if ch.is_whitespace() => true,
-        // A full stop of the sentence, unless more URL text follows it.
-        Some('。' | '、') => chars.next().is_none_or(|next| !next.is_ascii_graphic()),
-        Some(_) => false,
-    }
+    after
+        .split(char::is_whitespace)
+        .next()
+        .is_some_and(|rest| rest.chars().all(|ch| ".,;:!?)}」』。、".contains(ch)))
 }
 
-/// Whether the link found just after `before` really starts there, and is not
-/// inside another URL or a value such as `?q=https://...`.
+/// Whether the link found just after `before` really starts its
+/// whitespace-delimited word, optionally behind one opening bracket, and is
+/// not inside another URL or a value such as `?q=https://...`.
 fn starts_cleanly(before: &str) -> bool {
-    before
-        .chars()
-        .next_back()
-        .is_none_or(|ch| ch.is_whitespace() || "(「『".contains(ch))
+    let word = before.rsplit(char::is_whitespace).next().unwrap_or("");
+    matches!(word, "" | "(" | "「" | "『")
 }
 
 fn shorten_link(link: &str) -> Option<String> {
@@ -192,11 +187,11 @@ mod tests {
     #[test]
     fn keeps_surrounding_text_and_other_links() {
         let url = long("www.amazon.co.jp", "/x/dp/B012345678");
-        let text = format!("これ {url}。と https://example.com/a も ({url}) end");
+        let text = format!("これ {url}。 https://example.com/a も ({url}) end");
         let short = "https://www.amazon.co.jp/dp/B012345678";
         assert_eq!(
             shorten(&text),
-            format!("これ {short}。と https://example.com/a も ({short}) end")
+            format!("これ {short}。 https://example.com/a も ({short}) end")
         );
         assert_eq!(shorten("no links 日本語"), "no links 日本語");
     }
@@ -268,6 +263,13 @@ mod tests {
         let outer =
             format!("https://example.com/search?q='https://www.amazon.com/dp/B012345678{query}");
         assert_eq!(shorten(&outer), outer);
+        for tail in ["。商品&smid=SELLER", "、商品&smid=SELLER", "。と"] {
+            let text = format!("https://www.amazon.com/dp/B012345678{query}{tail}");
+            assert_eq!(shorten(&text), text);
+        }
+        let nested =
+            format!("https://example.com/search?q='(https://www.amazon.com/dp/B012345678{query}");
+        assert_eq!(shorten(&nested), nested);
         let sentence = format!("see {}.", long("www.amazon.com", "/dp/B012345678"));
         assert_eq!(
             shorten(&sentence),

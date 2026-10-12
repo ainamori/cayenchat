@@ -3688,3 +3688,62 @@ fn a_failed_send_keeps_the_original_long_link_in_the_draft(cx: &mut TestAppConte
         LONG_AMAZON
     );
 }
+
+/// Sends each draft in turn and returns the `PRIVMSG #a` texts the server
+/// received, in order.
+fn wire_texts(drafts: &[String], shorten: bool, cx: &mut TestAppContext) -> Vec<String> {
+    use std::io::{BufRead, BufReader};
+
+    let (chat, cx, listener) = connected_chat(shorten, cx);
+    let input = chat.read_with(cx, |chat, _| chat.inputs[&chat.state.selection()].clone());
+    for draft in drafts {
+        input.update(cx, |input, cx| input.set_text(draft, cx));
+        chat.update_in(cx, |chat, window, cx| chat.send_draft(false, window, cx));
+    }
+    let (socket, _) = listener.accept().unwrap();
+    socket
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let mut reader = BufReader::new(socket);
+    let mut texts = Vec::new();
+    while texts.len() < drafts.len() {
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .unwrap_or_else(|e| panic!("{e}: got {texts:?}"));
+        if let Some(text) = line
+            .trim_end_matches(['\r', '\n'])
+            .strip_prefix("PRIVMSG #a ")
+        {
+            // A text without spaces goes out without the trailing-parameter colon.
+            let text = text.strip_prefix(':').unwrap_or(text);
+            texts.push(text.to_owned());
+        }
+    }
+    texts
+}
+
+#[gpui::test]
+fn the_server_receives_the_shortened_link_and_untouched_ambiguous_text(cx: &mut TestAppContext) {
+    let query = "?keywords=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let asin = "https://www.amazon.com/dp/B012345678";
+    let untouched = [
+        format!("{asin}{query}'&smid=SELLER"),
+        format!("{asin}{query}。&smid=SELLER"),
+        format!("{asin}{query}。商品&smid=SELLER"),
+        format!("https://example.com/search?q='{asin}{query}"),
+        format!("https://example.com/search?q='({asin}{query}"),
+        format!("\u{1}PING {asin}{query}\u{1}"),
+    ];
+    let mut drafts = vec![format!("これ {LONG_AMAZON} です")];
+    drafts.extend(untouched.iter().cloned());
+    let mut expected = vec![format!("これ {SHORT_AMAZON} です")];
+    expected.extend(untouched.iter().cloned());
+    assert_eq!(wire_texts(&drafts, true, cx), expected);
+}
+
+#[gpui::test]
+fn the_server_receives_the_long_link_when_the_option_is_off(cx: &mut TestAppContext) {
+    let drafts = vec![format!("これ {LONG_AMAZON} です")];
+    assert_eq!(wire_texts(&drafts, false, cx), drafts);
+}
