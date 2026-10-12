@@ -3558,3 +3558,133 @@ fn same_worded_warning_from_another_source_survives_draft_edits(cx: &mut TestApp
         Some(failure)
     );
 }
+
+/// A chat window whose first channel is joined on a connection that never
+/// registers with a real server: sends are accepted and queued.
+fn connected_chat(
+    shorten: bool,
+    cx: &mut TestAppContext,
+) -> (
+    gpui::Entity<ChatWindow>,
+    &mut gpui::VisualTestContext,
+    std::net::TcpListener,
+) {
+    use cayenchat_irc_core::{Connection, ConnectionConfig, Event};
+
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let mut settings = crate::settings_with_channels("#a");
+    settings.shorten_amazon_urls = shorten;
+    let (chat, cx) =
+        cx.add_window_view(|window, cx| ChatWindow::with_settings(settings, None, window, cx));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut config = ConnectionConfig::tls("127.0.0.1".into(), "alice".into(), Vec::new());
+    config.port = listener.local_addr().unwrap().port();
+    config.use_tls = false;
+    let connection = Connection::connect(config).unwrap();
+    chat.update(cx, |chat, cx| {
+        chat.sessions.get_mut(&NetworkId(1)).unwrap().irc = Some(connection);
+        chat.handle_events(
+            NetworkId(1),
+            vec![
+                Event::Registered {
+                    nickname: "alice".into(),
+                },
+                Event::Joined {
+                    channel: "#a".into(),
+                },
+            ],
+            Worker::Running,
+            cx,
+        );
+        let a = chat.state.channel_id(NetworkId(1), "#a").unwrap();
+        chat.state
+            .dispatch(cayenchat_app::Command::SelectChannel(a));
+    });
+    (chat, cx, listener)
+}
+
+const LONG_AMAZON: &str = "https://www.amazon.co.jp/SomeProduct/dp/B012345678/ref=sr_1_1?keywords=example&qid=1234567890123&sr=8-1";
+const SHORT_AMAZON: &str = "https://www.amazon.co.jp/dp/B012345678";
+
+#[gpui::test]
+fn a_send_shortens_amazon_links_but_the_draft_keeps_them_until_it_succeeds(
+    cx: &mut TestAppContext,
+) {
+    let (chat, cx, _listener) = connected_chat(true, cx);
+    let input = chat.read_with(cx, |chat, _| chat.inputs[&chat.state.selection()].clone());
+    let scope = chat.read_with(cx, |chat, _| match chat.state.selection() {
+        Selection::Channel(id) => u64::from(id.0),
+        _ => unreachable!(),
+    });
+    let draft = format!("これ {LONG_AMAZON} です");
+    input.update(cx, |input, cx| input.set_text(&draft, cx));
+    // Nothing is rewritten while typing.
+    assert_eq!(
+        input.read_with(cx, |input, _| input.text().to_owned()),
+        draft
+    );
+    chat.update_in(cx, |chat, window, cx| chat.send_draft(false, window, cx));
+    assert_eq!(chat.read_with(cx, |chat, _| chat.feedback.clone()), None);
+    assert_eq!(input.read_with(cx, |input, _| input.text().to_owned()), "");
+    let recalled = chat.update(cx, |chat, _| chat.input_history.previous(scope, ""));
+    assert_eq!(recalled, Some(format!("これ {SHORT_AMAZON} です")));
+}
+
+#[gpui::test]
+fn amazon_links_are_sent_as_written_when_the_option_is_off_or_for_commands(
+    cx: &mut TestAppContext,
+) {
+    let (chat, cx, _listener) = connected_chat(false, cx);
+    let input = chat.read_with(cx, |chat, _| chat.inputs[&chat.state.selection()].clone());
+    let scope = chat.read_with(cx, |chat, _| match chat.state.selection() {
+        Selection::Channel(id) => u64::from(id.0),
+        _ => unreachable!(),
+    });
+    input.update(cx, |input, cx| input.set_text(LONG_AMAZON, cx));
+    chat.update_in(cx, |chat, window, cx| chat.send_draft(false, window, cx));
+    assert_eq!(
+        chat.update(cx, |chat, _| chat.input_history.previous(scope, "")),
+        Some(LONG_AMAZON.to_owned())
+    );
+
+    // On, a slash command is still sent untouched.
+    chat.update(cx, |chat, _| chat.shorten_amazon_urls = true);
+    let command = format!("/me looks at {LONG_AMAZON}");
+    input.update(cx, |input, cx| input.set_text(&command, cx));
+    chat.update_in(cx, |chat, window, cx| chat.send_draft(false, window, cx));
+    assert_eq!(
+        chat.update(cx, |chat, _| chat.input_history.previous(scope, "")),
+        Some(command)
+    );
+}
+
+#[gpui::test]
+fn a_failed_send_keeps_the_original_long_link_in_the_draft(cx: &mut TestAppContext) {
+    let (chat, cx, _listener) = connected_chat(true, cx);
+    let input = chat.read_with(cx, |chat, _| chat.inputs[&chat.state.selection()].clone());
+    // Not joined any more, so the send is refused.
+    chat.update(cx, |chat, cx| {
+        chat.handle_events(
+            NetworkId(1),
+            vec![cayenchat_irc_core::Event::Parted {
+                channel: "#a".into(),
+            }],
+            Worker::Running,
+            cx,
+        );
+    });
+    input.update(cx, |input, cx| input.set_text(LONG_AMAZON, cx));
+    chat.update_in(cx, |chat, window, cx| chat.send_draft(false, window, cx));
+    assert!(chat.read_with(cx, |chat, _| chat.feedback.is_some()));
+    assert_eq!(
+        input.read_with(cx, |input, _| input.text().to_owned()),
+        LONG_AMAZON
+    );
+}

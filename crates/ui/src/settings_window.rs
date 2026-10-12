@@ -1265,9 +1265,11 @@ impl SettingsWindow {
         let menu_bar_changed = previous.menu_bar_auto_hide != saved.menu_bar_auto_hide;
         let menu_bar_always = !saved.menu_bar_auto_hide;
         let provider = saved.image_upload.provider.clone();
+        let shorten_amazon_urls = saved.shorten_amazon_urls;
         let rules = notification_rules(&saved.notifications);
         let _ = self.owner.update(cx, |owner, window, cx| {
             owner.image_provider = provider;
+            owner.shorten_amazon_urls = shorten_amazon_urls;
             owner.notification_rules = rules;
             if shortcuts_changed {
                 apply_shortcuts(shortcuts, cx);

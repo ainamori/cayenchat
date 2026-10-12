@@ -569,6 +569,8 @@ struct ChatWindow {
     attachments: AttachmentFlow,
     /// Configured image hosting provider ID (IRC external uploads).
     image_provider: Option<String>,
+    /// Shorten long Amazon product links in the text a send puts on the wire.
+    shorten_amazon_urls: bool,
     /// Replaces the configured uploader; tests use a fake one.
     uploader_override: Option<Arc<dyn cayenchat_upload::ExternalUploader>>,
     notifier: Notifier,
@@ -955,6 +957,7 @@ impl ChatWindow {
             appearance: saved.appearance.clone(),
             theme_mode: saved.theme,
             image_provider: saved.image_upload.provider.clone(),
+            shorten_amazon_urls: saved.shorten_amazon_urls,
             notification_rules: notification_rules(&saved.notifications),
             previews: previews::Previews::new(saved.appearance.image_previews),
             avatars: avatars::Avatars::new(saved.appearance.user_avatars),
@@ -3653,6 +3656,14 @@ impl ChatWindow {
         if text.trim().is_empty() {
             return;
         }
+        // The draft keeps what was typed; only the message that goes out is
+        // shortened, and that is what the history records. Commands are sent
+        // as written.
+        let sent = if self.shorten_amazon_urls && !text.starts_with('/') {
+            cayenchat_app::amazon::shorten(&text)
+        } else {
+            text.clone()
+        };
         let selected = self.state.selected_channel();
         let private_peer = selected
             .filter(|channel| channel.is_private())
@@ -3672,9 +3683,9 @@ impl ChatWindow {
                 if !self.state.is_active_channel(channel.id) {
                     Err(self.i18n.text("wait_join"))
                 } else if channel.is_private() {
-                    connection.send_private_message(&channel.name, &text, notice)
+                    connection.send_private_message(&channel.name, &sent, notice)
                 } else {
-                    connection.send_message(&channel.name, &text, notice)
+                    connection.send_message(&channel.name, &sent, notice)
                 }
             } else {
                 Err(self.i18n.text("select_channel"))
@@ -3685,7 +3696,7 @@ impl ChatWindow {
         self.send_failure = None;
         self.feedback = match result {
             Ok(()) => {
-                self.input_history.record(&text, private_peer.as_deref());
+                self.input_history.record(&sent, private_peer.as_deref());
                 input.update(cx, |input, cx| input.clear_after_send(cx));
                 None
             }
