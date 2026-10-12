@@ -126,6 +126,7 @@
   "combined_log": "Combined log",
   "combined_log_alternate": "Combined log alternate",
   "url_tooltip_color": "Full URL bubble",
+  "url_tooltip_link_color": "Full URL bubble link text",
   "url_tooltip_opacity": "Full URL bubble opacity (%)",
   "url_tooltip_opacity_invalid": "The full URL bubble opacity must be a number from 20 to 100.",
   "theme": "Theme",
