@@ -3056,6 +3056,11 @@ impl ChatWindow {
                 Event::Registered { .. } => {
                     self.nick_prompts.retain(|prompt| prompt.network != network);
                 }
+                Event::OutgoingRejected {
+                    channel,
+                    draft,
+                    error,
+                } => self.restore_rejected_draft(network, channel, draft, error, cx),
                 _ => {}
             }
             self.handle_event(network, event);
@@ -3432,6 +3437,8 @@ impl ChatWindow {
             }
             Event::Topic { channel, topic } => self.state.set_topic(network, &channel, &topic),
             Event::ServerLine(line) => self.state.append_server_message(network, line),
+            // Put back by `handle_events`, which has the window context.
+            Event::OutgoingRejected { .. } => {}
             Event::UserAccount {
                 nickname,
                 account,
@@ -3708,6 +3715,36 @@ impl ChatWindow {
         };
         cx.notify();
         window.refresh();
+    }
+
+    /// Puts back the draft of a message the connection refused after it had
+    /// accepted it, unless something new has been typed since (the draft is
+    /// then still in the input history). The warning is shown either way.
+    fn restore_rejected_draft(
+        &mut self,
+        network: NetworkId,
+        channel: &str,
+        draft: &str,
+        error: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_failure = None;
+        self.feedback = Some(error.to_owned());
+        let Some(id) = self.state.channel_id(network, channel) else {
+            return;
+        };
+        let selection = Selection::Channel(id);
+        let Some(input) = self.inputs.get(&selection).cloned() else {
+            return;
+        };
+        if input.read(cx).text().is_empty() {
+            input.update(cx, |input, cx| input.set_text(draft, cx));
+            self.send_failure = Some(SendFailure {
+                selection,
+                text: draft.to_owned(),
+                message: error.to_owned(),
+            });
+        }
     }
 
     /// Replaces the draft with an older (`older`) or newer sent draft.

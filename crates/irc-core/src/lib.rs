@@ -389,11 +389,18 @@ fn validate_wire(wire: &str, label: &str) -> Result<(), String> {
 fn validate_relayed_wire(wire: &str, label: &str, prefix_bytes: usize) -> Result<(), String> {
     validate_wire(wire, label)?;
     let bytes = encode_strict(wire, label)?;
-    if bytes.len() + prefix_bytes > 512 {
+    // A text of one word goes out without the `:` that marks the last
+    // parameter, but the server writes it when relaying.
+    let relayed_colon = wire
+        .trim_end_matches(['\r', '\n'])
+        .splitn(3, ' ')
+        .nth(2)
+        .is_some_and(|text| !text.starts_with(':'));
+    let needed = bytes.len() + usize::from(relayed_colon);
+    if needed + prefix_bytes > 512 {
         return Err(format!(
-            "Message is too long: {} bytes of the 512-byte line remain for the command and text once the server adds your nick!user@host, but it needs {}.",
+            "Message is too long: {} bytes of the 512-byte line remain for the command and text once the server adds your nick!user@host, but it needs {needed}.",
             512usize.saturating_sub(prefix_bytes),
-            bytes.len()
         ));
     }
     Ok(())
@@ -611,6 +618,15 @@ pub enum Event {
         channel: String,
         text: String,
         notice: bool,
+    },
+    /// A plain message the connection had queued was refused before it was
+    /// sent (it no longer fits once the server adds our changed host). The
+    /// `draft` is what the user typed; the UI puts it back unless a new one
+    /// was started.
+    OutgoingRejected {
+        channel: String,
+        draft: String,
+        error: String,
     },
     /// The server rejected the registration nickname (432/433). The link
     /// stays open until the UI supplies another one with
@@ -1044,6 +1060,9 @@ enum Outgoing {
         target: String,
         text: String,
         display_text: String,
+        /// What the user typed when it is a plain message, for handing back
+        /// if the worker refuses it ([`Event::OutgoingRejected`]).
+        draft: Option<String>,
         notice: bool,
     },
     Raw(IrcMessage),
@@ -1236,6 +1255,7 @@ fn parse_slash_command(line: &str, selected: Option<&str>) -> Result<Outgoing, S
                 target: target.into(),
                 text,
                 display_text: format!("* {action}"),
+                draft: None,
                 notice: false,
             })
         }
@@ -1262,6 +1282,7 @@ fn parse_slash_command(line: &str, selected: Option<&str>) -> Result<Outgoing, S
                 target: target.into(),
                 text: text.into(),
                 display_text: text.into(),
+                draft: None,
                 notice: verb == "NOTICE",
             })
         }
@@ -1516,6 +1537,7 @@ impl Connection {
             target: channel.to_owned(),
             text: text.to_owned(),
             display_text: text.to_owned(),
+            draft: Some(text.to_owned()),
             notice,
         };
         self.validate(&outgoing)?;
@@ -1538,6 +1560,7 @@ impl Connection {
             target: nickname.to_owned(),
             text: text.to_owned(),
             display_text: text.to_owned(),
+            draft: Some(text.to_owned()),
             notice,
         };
         self.validate(&outgoing)?;
@@ -2241,8 +2264,12 @@ impl Worker {
                 target,
                 text,
                 display_text,
+                draft,
                 notice,
-            } => self.send_message(target, text, display_text, notice).await,
+            } => {
+                self.send_message(target, text, display_text, draft, notice)
+                    .await
+            }
             Outgoing::Raw(message) => self.send_raw(message).await,
             Outgoing::OwnAvatar { request, url } => self.set_own_avatar(request, url).await,
             Outgoing::ShareAvatar(url) => {
@@ -2270,6 +2297,12 @@ impl Worker {
 
     /// Tells the connection handle how much the server adds in front of the
     /// lines we send, for its length check.
+    fn observe_own_mask(&mut self, message: &IrcMessage) {
+        if self.own_mask.observe(message, &self.current_nick) {
+            self.publish_relay_prefix();
+        }
+    }
+
     fn publish_relay_prefix(&self) {
         let bytes = self
             .own_mask
@@ -2282,6 +2315,7 @@ impl Worker {
         target: String,
         text: String,
         display_text: String,
+        draft: Option<String>,
         notice: bool,
     ) -> Flow {
         // With echo-message the local line is confirmed by
@@ -2325,7 +2359,16 @@ impl Worker {
             }
             Err(error) => {
                 self.echoes.untrack(local_id);
-                Event::ServerLine(format!("Send failed: {error}"))
+                match draft {
+                    // The connection handle accepted it, but the prefix grew
+                    // while it was queued: the user gets the draft back.
+                    Some(draft) => Event::OutgoingRejected {
+                        channel: target,
+                        draft,
+                        error,
+                    },
+                    None => Event::ServerLine(format!("Send failed: {error}")),
+                }
             }
         };
         self.emit(event).await
@@ -2519,9 +2562,12 @@ impl Worker {
         let history_started = self.negotiate(&message).await?;
         self.track_registration(&message, history_started).await?;
         let replayed = self.replay.replayed(&message);
-        if self.consume_own_replies(&message).await?
-            || self.consume_avatar_and_ctcp(&message, replayed).await?
-        {
+        let history = self.consume_own_replies(&message).await?;
+        // A line replayed from history shows our mask of the past.
+        if !history && !self.replay.in_history_batch(&message) {
+            self.observe_own_mask(&message);
+        }
+        if history || self.consume_avatar_and_ctcp(&message, replayed).await? {
             return ControlFlow::Continue(());
         }
         self.deliver(message, replayed).await
@@ -2609,8 +2655,6 @@ impl Worker {
         self.history_enabled = self.negotiation.enabled(cap::CHATHISTORY);
         self.history.isupport(message);
         modes::observe(message, &self.modes_per_line);
-        self.own_mask.observe(message, &self.current_nick);
-        self.publish_relay_prefix();
         self.accounts.isupport(message);
         if let Some(announced) = advertised_casemapping(message)
             && announced != self.casemapping

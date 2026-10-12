@@ -539,13 +539,19 @@ legacy-encoding connection disconnects if the server advertises `UTF8ONLY`.
 A `PRIVMSG` or `NOTICE` must also fit in 512 bytes once the server has put
 `:nick!user@host ` in front of it, or the recipients would get the end cut off
 (issue #330): the check counts the converted command plus CRLF plus that prefix,
-and a longer message is rejected before queueing like any over-long line, so the
-draft stays. `irc-core::relay` tracks our `user` and `host` from any line with
-our own prefix (JOIN, echo), the 001 text, `CHGHOST` and `396`, and the worker
-publishes the prefix size (with the current nickname, all counted in the
-connection encoding) to the connection handle. Until the host is known the
-estimate is 10 bytes of username and 63 of host. Splitting longer text into
-several lines and `draft/multiline` are not done.
+plus the `:` the server writes before a text of one word (which the client
+leaves out), and a longer message is rejected before queueing like any
+over-long line, so the draft stays. `irc-core::relay` tracks our `user` and
+`host` from any live line with our own prefix (JOIN, echo), the 001 text,
+`CHGHOST` and `396`; lines replayed from history (`chathistory`,
+`znc.in/playback`) show an older mask and are ignored. The worker publishes the
+prefix size (with the current nickname, all counted in the connection
+encoding) to the connection handle when it changes. Until the host is known the
+estimate is 10 bytes of username and 63 of host. If the host grows while a
+plain message is queued, the worker checks again and refuses it with
+`Event::OutgoingRejected`; the UI puts the draft back into the conversation's
+input unless something new was typed (the draft is in the input history then).
+Splitting longer text into several lines and `draft/multiline` are not done.
 Connection-stage diagnostics and directional, decoded IRC lines flow as owned
 events from `irc-core` to the UI. The transcript includes message bodies, masks
 known credential commands, and retains the latest 1,000 entries in memory for

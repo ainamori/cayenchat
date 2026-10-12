@@ -36,53 +36,53 @@ impl OwnMask {
     /// changed.
     pub fn observe(&mut self, message: &Message, current_nick: &str) -> bool {
         let own = message.source_nickname() == Some(current_nick);
-        let before = (self.user.clone(), self.host.clone());
         match &message.command {
-            Command::CHGHOST(user, host) if own => {
-                self.set_mask(user, host);
-            }
+            Command::CHGHOST(user, host) if own => self.set_mask(user, host),
             Command::Response(Response::RPL_WELCOME, args) => {
                 let mask = args
                     .last()
                     .and_then(|text| text.split_whitespace().next_back())
                     .and_then(|word| word.split_once('!'))
                     .filter(|(nick, _)| args.first().map(String::as_str) == Some(*nick));
-                if let Some((_, user_host)) = mask
-                    && let Some((user, host)) = user_host.split_once('@')
-                {
-                    self.set_mask(user, host);
+                match mask.and_then(|(_, user_host)| user_host.split_once('@')) {
+                    Some((user, host)) => self.set_mask(user, host),
+                    None => false,
                 }
             }
             Command::Response(Response::RPL_HOSTHIDDEN, args) => {
-                if args.first().map(String::as_str) == Some(current_nick)
-                    && let Some(host) = args.get(1)
-                {
-                    self.set_host(host);
+                match (args.first(), args.get(1)) {
+                    (Some(nick), Some(host)) if nick == current_nick => self.set_host(host),
+                    _ => false,
                 }
             }
-            _ => {
-                if let Some(Prefix::Nickname(nick, user, host)) = &message.prefix
-                    && nick == current_nick
-                {
-                    self.set_mask(user, host);
+            _ => match &message.prefix {
+                Some(Prefix::Nickname(nick, user, host)) if nick == current_nick => {
+                    self.set_mask(user, host)
                 }
-            }
+                _ => false,
+            },
         }
-        before != (self.user.clone(), self.host.clone())
     }
 
-    /// Takes both parts or neither.
-    fn set_mask(&mut self, user: &str, host: &str) {
-        if plausible(user) && plausible(host) {
+    /// Takes both parts or neither. Returns whether anything changed.
+    fn set_mask(&mut self, user: &str, host: &str) -> bool {
+        if !(plausible(user) && plausible(host)) {
+            return false;
+        }
+        let changed = self.user.as_deref() != Some(user) || self.host.as_deref() != Some(host);
+        if changed {
             self.user = Some(user.to_owned());
             self.host = Some(host.to_owned());
         }
+        changed
     }
 
-    fn set_host(&mut self, host: &str) {
-        if plausible(host) {
-            self.host = Some(host.to_owned());
+    fn set_host(&mut self, host: &str) -> bool {
+        if !plausible(host) || self.host.as_deref() == Some(host) {
+            return false;
         }
+        self.host = Some(host.to_owned());
+        true
     }
 
     /// Bytes the server adds in front of a line we send: `:`, our
