@@ -2790,6 +2790,11 @@ fn a_nickname_inside_a_link_is_not_a_mention(cx: &mut TestAppContext) {
             found("https://example.org/alice alice"),
             (true, vec!["alice".to_owned()])
         );
+        // Many links, each holding the nickname, still leave only the outside one.
+        let many = format!("{}alice", "https://x/alice ".repeat(1000));
+        let (mentioned, shown) = found(&many);
+        assert!(mentioned);
+        assert_eq!(shown, vec!["alice".to_owned()]);
     });
 }
 
