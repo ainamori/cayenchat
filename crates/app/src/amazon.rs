@@ -74,7 +74,7 @@ pub fn shorten(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut cursor = 0;
     for (range, _) in links::find(text) {
-        if !ends_cleanly(&text[range.end..]) {
+        if !starts_cleanly(&text[..range.start]) || !ends_cleanly(&text[range.end..]) {
             continue;
         }
         if let Some(short) = shorten_link(&text[range.clone()]) {
@@ -93,9 +93,23 @@ pub fn shorten(text: &str) -> String {
 /// that was never checked.
 fn ends_cleanly(after: &str) -> bool {
     let rest = after.trim_start_matches(|ch| ".,;:!?}」』)".contains(ch));
-    rest.chars()
-        .next()
-        .is_none_or(|ch| ch.is_whitespace() || matches!(ch, '。' | '、'))
+    let mut chars = rest.chars();
+    match chars.next() {
+        None => true,
+        Some(ch) if ch.is_whitespace() => true,
+        // A full stop of the sentence, unless more URL text follows it.
+        Some('。' | '、') => chars.next().is_none_or(|next| !next.is_ascii_graphic()),
+        Some(_) => false,
+    }
+}
+
+/// Whether the link found just after `before` really starts there, and is not
+/// inside another URL or a value such as `?q=https://...`.
+fn starts_cleanly(before: &str) -> bool {
+    before
+        .chars()
+        .next_back()
+        .is_none_or(|ch| ch.is_whitespace() || "(「『".contains(ch))
 }
 
 fn shorten_link(link: &str) -> Option<String> {
@@ -246,6 +260,14 @@ mod tests {
             long("www.amazon.co.jp", "/dp/B012345678")
         );
         assert_eq!(shorten(&ctcp), ctcp);
+        let query = "?keywords=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        for stop in ['。', '、'] {
+            let text = format!("https://www.amazon.com/dp/B012345678{query}{stop}&smid=SELLER");
+            assert_eq!(shorten(&text), text);
+        }
+        let outer =
+            format!("https://example.com/search?q='https://www.amazon.com/dp/B012345678{query}");
+        assert_eq!(shorten(&outer), outer);
         let sentence = format!("see {}.", long("www.amazon.com", "/dp/B012345678"));
         assert_eq!(
             shorten(&sentence),
