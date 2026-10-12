@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Compact display of long URLs in the channel log.
+//! Presentation-only rewriting of a log message: long URLs shortened and
+//! HTML numeric character references drawn as their characters.
 //!
 //! Only the presentation changes: [`Compact`] builds the text to draw from a
 //! message's text and maps byte positions between the two, so selection,
-//! copying, searching and saving keep working on the original text.
+//! searching and saving keep working on the original text. Copying a
+//! selection uses the drawn characters of decoded references
+//! ([`Compact::copy_text`]).
 
 use std::ops::Range;
 
@@ -14,10 +17,12 @@ const LIMIT: usize = 28;
 /// Marks a shortened URL as a link, drawn before its label.
 const ICON: &str = "↗ ";
 
-/// A URL the log shows in place of its text.
+/// Text the log shows in place of the original.
 struct Span {
     original: Range<usize>,
     shown: Range<usize>,
+    /// Characters of decoded character references, as opposed to a short URL.
+    decoded: bool,
 }
 
 /// A message's text as drawn, with the URLs found in it.
@@ -46,28 +51,74 @@ fn label(url: &str) -> Option<String> {
 
 impl Compact {
     /// Draws the URLs of `text` (original byte ranges) in short form when
-    /// `enabled`.
-    pub(crate) fn new(text: &str, urls: &[(Range<usize>, String)], enabled: bool) -> Self {
+    /// `shorten`, and its numeric character references as characters when
+    /// `decode`. References inside URLs are never decoded.
+    pub(crate) fn new(
+        text: &str,
+        urls: &[(Range<usize>, String)],
+        shorten: bool,
+        decode: bool,
+    ) -> Self {
+        let mut replacements: Vec<(Range<usize>, String, bool)> = Vec::new();
+        if shorten {
+            replacements.extend(urls.iter().filter_map(|(range, _)| {
+                Some((range.clone(), label(&text[range.clone()])?, false))
+            }));
+        }
+        if decode {
+            replacements.extend(
+                crate::char_refs::find(text, urls)
+                    .into_iter()
+                    .map(|(range, shown)| (range, shown, true)),
+            );
+            replacements.sort_by_key(|(range, ..)| range.start);
+        }
         let mut shown = String::new();
         let mut spans = Vec::new();
         let mut cursor = 0;
-        if enabled {
-            for (range, _) in urls {
-                let Some(label) = label(&text[range.clone()]) else {
-                    continue;
-                };
-                shown.push_str(&text[cursor..range.start]);
-                let start = shown.len();
-                shown.push_str(&label);
-                spans.push(Span {
-                    original: range.clone(),
-                    shown: start..shown.len(),
-                });
-                cursor = range.end;
-            }
+        for (range, label, decoded) in replacements {
+            shown.push_str(&text[cursor..range.start]);
+            let start = shown.len();
+            shown.push_str(&label);
+            spans.push(Span {
+                original: range.clone(),
+                shown: start..shown.len(),
+                decoded,
+            });
+            cursor = range.end;
         }
         shown.push_str(&text[cursor..]);
         Self { text: shown, spans }
+    }
+
+    /// The text to copy for the original byte range `range`: what is drawn,
+    /// except that short URLs keep their full text.
+    pub(crate) fn copy_text(&self, text: &str, range: Range<usize>) -> String {
+        let mut copied = String::new();
+        let mut cursor = range.start;
+        for span in self.spans.iter().filter(|span| span.decoded) {
+            if span.original.end <= cursor || span.original.start >= range.end {
+                continue;
+            }
+            // Selections snap to the ends of a replacement.
+            copied.push_str(&text[cursor..span.original.start.max(cursor)]);
+            copied.push_str(&self.text[span.shown.clone()]);
+            cursor = span.original.end;
+        }
+        copied.push_str(&text[cursor.min(range.end)..range.end]);
+        copied
+    }
+
+    /// The decoded character references: where their characters are drawn
+    /// and the text as received.
+    pub(crate) fn decoded<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> impl Iterator<Item = (Range<usize>, &'a str)> + 'a {
+        self.spans
+            .iter()
+            .filter(|span| span.decoded)
+            .map(|span| (span.shown.clone(), &text[span.original.clone()]))
     }
 
     pub(crate) fn text(&self) -> &str {
@@ -134,11 +185,14 @@ impl Compact {
         &'a self,
         urls: &'a [(Range<usize>, String)],
     ) -> impl Iterator<Item = (Range<usize>, &'a str)> + 'a {
-        self.spans.iter().filter_map(|span| {
-            urls.iter()
-                .find(|(range, _)| *range == span.original)
-                .map(|(_, url)| (span.shown.clone(), url.as_str()))
-        })
+        self.spans
+            .iter()
+            .filter(|span| !span.decoded)
+            .filter_map(|span| {
+                urls.iter()
+                    .find(|(range, _)| *range == span.original)
+                    .map(|(_, url)| (span.shown.clone(), url.as_str()))
+            })
     }
 }
 
@@ -151,7 +205,7 @@ mod tests {
     }
 
     fn compact(text: &str) -> Compact {
-        Compact::new(text, &urls(text), true)
+        Compact::new(text, &urls(text), true, false)
     }
 
     #[test]
@@ -196,7 +250,7 @@ mod tests {
     #[test]
     fn disabled_draws_the_text_unchanged() {
         let text = "https://github.com/koshian/cayenchat/issues/151";
-        let compact = Compact::new(text, &urls(text), false);
+        let compact = Compact::new(text, &urls(text), false, false);
         assert_eq!(compact.text(), text);
     }
 
@@ -226,7 +280,7 @@ mod tests {
     fn the_full_url_is_kept_for_a_shortened_one() {
         let text = "https://github.com/koshian/cayenchat/issues/151?tab=a";
         let found = urls(text);
-        let compact = Compact::new(text, &found, true);
+        let compact = Compact::new(text, &found, true, false);
         let shortened: Vec<_> = compact.shortened(&found).collect();
         assert_eq!(shortened.len(), 1);
         assert_eq!(shortened[0].1, found[0].1);
@@ -237,7 +291,7 @@ mod tests {
     fn the_highlight_and_tooltip_cover_the_drawn_label() {
         let text = "see https://github.com/koshian/cayenchat/issues/151?tab=a ok";
         let found = urls(text);
-        let compact = Compact::new(text, &found, true);
+        let compact = Compact::new(text, &found, true, false);
         // Rendering looks the URLs up by their original ranges.
         let shortened: Vec<_> = compact.shortened(&found).collect();
         assert_eq!(shortened.len(), 1);
@@ -248,5 +302,77 @@ mod tests {
         // Drawn ranges never match original ranges, so they must not be used.
         let drawn = compact.shown_urls(&found);
         assert_eq!(compact.shortened(&drawn).count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod decoded_tests {
+    use super::*;
+
+    fn decoded(text: &str) -> Compact {
+        Compact::new(text, &cayenchat_app::links::find(text), false, true)
+    }
+
+    #[test]
+    fn references_are_drawn_as_characters() {
+        let text = "&#x1F352;&#x1F352;&#127826; 大当たり";
+        let compact = decoded(text);
+        assert_eq!(compact.text(), "🍒🍒🍒 大当たり");
+        let runs: Vec<_> = compact.decoded(text).collect();
+        assert_eq!(runs, [(0..12, "&#x1F352;&#x1F352;&#127826;")]);
+    }
+
+    #[test]
+    fn disabled_leaves_references_as_written() {
+        let text = "&#x1F352; hi";
+        let compact = Compact::new(text, &[], true, false);
+        assert_eq!(compact.text(), text);
+        assert_eq!(compact.decoded(text).count(), 0);
+    }
+
+    #[test]
+    fn positions_map_around_a_reference() {
+        let text = "a &#x1F352; b";
+        let compact = decoded(text);
+        assert_eq!(compact.text(), "a 🍒 b");
+        assert_eq!(compact.original(2), 2);
+        assert_eq!(compact.original(6), 11);
+        assert_eq!(compact.original(8), 13);
+        // A selection touching the character covers all of it.
+        assert_eq!(compact.shown_range(3..5), 2..6);
+        assert_eq!(compact.shown_range(11..13), 6..8);
+    }
+
+    #[test]
+    fn copying_uses_the_drawn_characters() {
+        let text = "x &#x1F352;&#127826; y";
+        let compact = decoded(text);
+        assert_eq!(compact.copy_text(text, 0..text.len()), "x 🍒🍒 y");
+        assert_eq!(compact.copy_text(text, 2..20), "🍒🍒");
+        assert_eq!(compact.copy_text(text, 0..2), "x ");
+        assert_eq!(decoded("plain").copy_text("plain", 1..4), "lai");
+    }
+
+    #[test]
+    fn urls_and_references_compose() {
+        let text = "&#65; https://github.com/koshian/cayenchat/issues/151?x=&#66 &#67;";
+        let found = cayenchat_app::links::find(text);
+        let compact = Compact::new(text, &found, true, true);
+        assert_eq!(compact.text(), "A ↗ github.com/koshian/cayencha… C");
+        assert_eq!(compact.shortened(&found).count(), 1);
+        assert_eq!(compact.decoded(text).count(), 2);
+        let copied = compact.copy_text(text, 0..text.len());
+        assert_eq!(
+            copied,
+            "A https://github.com/koshian/cayenchat/issues/151?x=&#66 C"
+        );
+    }
+
+    #[test]
+    fn urls_with_references_are_not_altered() {
+        let text = "https://example.com/?a=&#65;";
+        let found = cayenchat_app::links::find(text);
+        let compact = Compact::new(text, &found, false, true);
+        assert_eq!(compact.text(), text);
     }
 }

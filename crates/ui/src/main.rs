@@ -6,6 +6,7 @@ mod application_settings;
 mod autostart;
 mod avatar_editor;
 mod avatars;
+mod char_refs;
 mod color_picker;
 mod compact_urls;
 mod decorations;
@@ -228,6 +229,7 @@ fn connection_config(
     config.username = profile.username.clone();
     config.realname = profile.realname.clone();
     config.quit_message = profile.quit_message.clone();
+    config.part_message = profile.part_message.clone();
     config.port = profile.port;
     config.use_tls = profile.use_tls;
     config.verify_tls_certificates = profile.verify_tls_certificates;
@@ -569,8 +571,6 @@ struct ChatWindow {
     attachments: AttachmentFlow,
     /// Configured image hosting provider ID (IRC external uploads).
     image_provider: Option<String>,
-    /// Shorten long Amazon product links in the text a send puts on the wire.
-    shorten_amazon_urls: bool,
     /// Replaces the configured uploader; tests use a fake one.
     uploader_override: Option<Arc<dyn cayenchat_upload::ExternalUploader>>,
     notifier: Notifier,
@@ -866,6 +866,7 @@ impl ChatWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.set_global(input::ShortenPastedAmazon(saved.shorten_amazon_urls));
         let i18n = Localizer::new(saved.language);
         // Every configured server is a network in the tree, connected or not.
         let mut sessions = HashMap::new();
@@ -957,7 +958,6 @@ impl ChatWindow {
             appearance: saved.appearance.clone(),
             theme_mode: saved.theme,
             image_provider: saved.image_upload.provider.clone(),
-            shorten_amazon_urls: saved.shorten_amazon_urls,
             notification_rules: notification_rules(&saved.notifications),
             previews: previews::Previews::new(saved.appearance.image_previews),
             avatars: avatars::Avatars::new(saved.appearance.user_avatars),
@@ -1187,7 +1187,7 @@ impl ChatWindow {
     /// channel's members, or for a private conversation its two participants
     /// (us, then the peer). The peer stays listed after they quit, as long as
     /// the conversation exists.
-    fn participants(&self) -> Cow<'_, [String]> {
+    fn participants(&self) -> member_selection::Participants<'_> {
         selected_participants(&self.state, &self.sessions)
     }
 
@@ -2775,11 +2775,17 @@ impl ChatWindow {
         if start == end {
             return;
         }
+        let decode = self.appearance.decode_char_refs;
         let pieces: Vec<_> = (start.row..=end.row)
             .filter_map(|row| {
                 channel.messages.get(row).map(|message| {
                     let range = selection.range(row, message.text.len()).unwrap_or(0..0);
-                    message.text[range].to_owned()
+                    if !decode {
+                        return message.text[range].to_owned();
+                    }
+                    // Decoded references are copied as the characters shown.
+                    compact_urls::Compact::new(&message.text, message.links.as_slice(), false, true)
+                        .copy_text(&message.text, range)
                 })
             })
             .collect();
@@ -3656,14 +3662,6 @@ impl ChatWindow {
         if text.trim().is_empty() {
             return;
         }
-        // The draft keeps what was typed; only the message that goes out is
-        // shortened, and that is what the history records. Commands are sent
-        // as written, and `shorten` leaves CTCP text alone.
-        let sent = if self.shorten_amazon_urls && !text.starts_with('/') {
-            cayenchat_app::amazon::shorten(&text)
-        } else {
-            text.clone()
-        };
         let selected = self.state.selected_channel();
         let private_peer = selected
             .filter(|channel| channel.is_private())
@@ -3683,9 +3681,9 @@ impl ChatWindow {
                 if !self.state.is_active_channel(channel.id) {
                     Err(self.i18n.text("wait_join"))
                 } else if channel.is_private() {
-                    connection.send_private_message(&channel.name, &sent, notice)
+                    connection.send_private_message(&channel.name, &text, notice)
                 } else {
-                    connection.send_message(&channel.name, &sent, notice)
+                    connection.send_message(&channel.name, &text, notice)
                 }
             } else {
                 Err(self.i18n.text("select_channel"))
@@ -3696,7 +3694,7 @@ impl ChatWindow {
         self.send_failure = None;
         self.feedback = match result {
             Ok(()) => {
-                self.input_history.record(&sent, private_peer.as_deref());
+                self.input_history.record(&text, private_peer.as_deref());
                 input.update(cx, |input, cx| input.clear_after_send(cx));
                 None
             }
@@ -3812,11 +3810,13 @@ fn default_time_font() -> &'static str {
 /// `prefix` (the sender and colon in the flowing layout) is drawn in the
 /// nickname color before `text`; every other range, and `selected`, is a
 /// byte offset into `text`.
+#[allow(clippy::too_many_arguments)] // Each is one independent set of ranges.
 fn styled_log_text(
     prefix: &str,
     text: &str,
     urls: &[(std::ops::Range<usize>, String)],
     chips: &[std::ops::Range<usize>],
+    decoded: &[std::ops::Range<usize>],
     highlights: &[std::ops::Range<usize>],
     selected: Option<std::ops::Range<usize>>,
     theme: &Theme,
@@ -3825,10 +3825,11 @@ fn styled_log_text(
     let moved = |range: &std::ops::Range<usize>| range.start + shift..range.end + shift;
     let urls: Vec<_> = urls.iter().map(|(range, _)| moved(range)).collect();
     let chips: Vec<_> = chips.iter().map(moved).collect();
+    let decoded: Vec<_> = decoded.iter().map(moved).collect();
     let highlights: Vec<_> = highlights.iter().map(moved).collect();
     let selected = selected.as_ref().map(moved);
     let mut boundaries = vec![0, shift, shift + text.len()];
-    for range in urls.iter().chain(&highlights).chain(&chips) {
+    for range in urls.iter().chain(&highlights).chain(&chips).chain(&decoded) {
         boundaries.extend([range.start, range.end]);
     }
     if let Some(range) = &selected {
@@ -3851,7 +3852,10 @@ fn styled_log_text(
         let is_highlight = highlights
             .iter()
             .any(|word| word.start <= range.start && range.end <= word.end);
-        (is_prefix || is_url || is_chip || is_selected || is_highlight).then_some((
+        let is_decoded = decoded
+            .iter()
+            .any(|span| span.start <= range.start && range.end <= span.end);
+        (is_prefix || is_url || is_chip || is_decoded || is_selected || is_highlight).then_some((
             range,
             HighlightStyle {
                 color: if is_prefix {
@@ -3869,6 +3873,15 @@ fn styled_log_text(
                 }),
                 background_color: if is_selected {
                     Some(theme.selected.into())
+                } else if is_decoded {
+                    // Neutral, so it is not mistaken for a link.
+                    Some(
+                        Rgba {
+                            a: 0.22,
+                            ..theme.text_secondary
+                        }
+                        .into(),
+                    )
                 } else {
                     link_background(theme, is_url, is_chip).map(Into::into)
                 },
@@ -5373,6 +5386,7 @@ struct LogStyle {
     time_font: SharedString,
     alternate_rows: bool,
     compact_urls: bool,
+    decode_char_refs: bool,
     reiwa_mode: bool,
 }
 
@@ -5393,6 +5407,7 @@ impl LogStyle {
             },
             alternate_rows: appearance.alternate_rows,
             compact_urls: appearance.compact_urls,
+            decode_char_refs: appearance.decode_char_refs,
             reiwa_mode: appearance.reiwa_mode,
         }
     }
@@ -5626,13 +5641,19 @@ impl ChatWindow {
             &message.text,
             urls,
             style.compact_urls,
+            style.decode_char_refs,
         ));
         let full_urls: Vec<_> = compact
             .shortened(urls)
             .map(|(range, url)| (range, SharedString::from(url.to_owned())))
             .collect();
+        let originals: Vec<_> = compact
+            .decoded(&message.text)
+            .map(|(range, original)| (range, SharedString::from(original.to_owned())))
+            .collect();
         let urls = compact.shown_urls(urls);
         let chips: Vec<_> = full_urls.iter().map(|(range, _)| range.clone()).collect();
+        let decoded: Vec<_> = originals.iter().map(|(range, _)| range.clone()).collect();
         let selected_range = self
             .log_selection
             .filter(|selection| selection.channel == selected_channel)
@@ -5659,6 +5680,7 @@ impl ChatWindow {
             compact.text(),
             &urls,
             &chips,
+            &decoded,
             &highlights,
             selected_range,
             &style.theme,
@@ -5671,26 +5693,47 @@ impl ChatWindow {
         let (down_compact, move_compact) = (compact.clone(), compact.clone());
         let over_url = self.url_hover == Some((selected_channel, index));
         let text_len = compact.text().len();
-        let styled = if full_urls.is_empty() {
+        // Only rows with decoded references pay for the bubble's texts.
+        let labels = (!originals.is_empty()).then(|| {
+            (
+                self.i18n.text("char_ref_origin"),
+                self.i18n.text("copy_original_text"),
+            )
+        });
+        let styled = if full_urls.is_empty() && originals.is_empty() {
             styled.into_any_element()
         } else {
             // The full URL of a shortened one shows on hover; clicking it
-            // opens the URL.
+            // opens the URL. A decoded character reference shows its
+            // original text, which a button copies.
             InteractiveText::new(("message-urls", index), styled)
                 .hoverable_tooltip(
                     {
                         let full_urls = full_urls.clone();
+                        let originals = originals.clone();
                         move |byte| {
                             let byte = byte.checked_sub(prefix_len)?;
-                            let (range, _) =
-                                full_urls.iter().find(|(range, _)| range.contains(&byte))?;
+                            let (range, _) = full_urls
+                                .iter()
+                                .chain(&originals)
+                                .find(|(range, _)| range.contains(&byte))?;
                             Some(range.start + prefix_len..range.end + prefix_len)
                         }
                     },
                     move |range, _, cx| {
+                        let start = range.start - prefix_len;
+                        if let Some((_, original)) =
+                            originals.iter().find(|(range, _)| range.start == start)
+                        {
+                            let (title, copy) = labels.clone().unwrap_or_default();
+                            let original = original.clone();
+                            return cx
+                                .new(|_| ircv3_settings::CharRefTooltip::new(original, title, copy))
+                                .into();
+                        }
                         let url = full_urls
                             .iter()
-                            .find(|(url, _)| url.start + prefix_len == range.start)
+                            .find(|(url, _)| url.start == start)
                             .map(|(_, url)| url.clone())
                             .unwrap_or_default();
                         cx.new(|_| ircv3_settings::UrlTooltip(url)).into()
@@ -5915,16 +5958,18 @@ impl ChatWindow {
                 display::neutralize_bidi(&message.sender)
             )
         };
-        // Long URLs are shortened as in the channel log, but stay plain text.
+        // Long URLs and character references are drawn as in the channel
+        // log, but stay plain text.
         let compact = compact_urls::Compact::new(
             &message.text,
-            if style.compact_urls {
-                message.links.as_slice()
-            } else {
-                &[]
-            },
+            message.links.as_slice(),
             style.compact_urls,
+            style.decode_char_refs,
         );
+        let decoded: Vec<_> = compact
+            .decoded(&message.text)
+            .map(|(range, _)| range)
+            .collect();
         let highlights: Vec<_> = message
             .highlights
             .as_slice()
@@ -5936,6 +5981,7 @@ impl ChatWindow {
             compact.text(),
             &[],
             &[],
+            &decoded,
             &highlights,
             None,
             &style.theme,
@@ -5990,7 +6036,7 @@ impl ChatWindow {
         let avatars_shown = self.avatars.enabled();
         (start..end)
             .map(|index| {
-                let member = participants[index].clone();
+                let member = participants.get(index).cloned().unwrap_or_default();
                 let selected = self.member_selection.contains(conversation, &member);
                 let channel = channel.name.clone();
                 let nickname = member
@@ -6528,9 +6574,9 @@ mod startup_tests;
 fn selected_participants<'a>(
     state: &'a AppState,
     sessions: &HashMap<NetworkId, ServerSession>,
-) -> Cow<'a, [String]> {
+) -> member_selection::Participants<'a> {
     let Some(conversation) = state.selected_channel() else {
-        return Cow::Borrowed(&[]);
+        return member_selection::Participants::plain(Cow::Borrowed(&[]));
     };
     let own = sessions
         .get(&conversation.network)
@@ -6539,14 +6585,15 @@ fn selected_participants<'a>(
 }
 
 /// The rows of the right-hand list for `conversation`: a channel's members
-/// (borrowed, as this runs on every draw), or for a private conversation us
-/// followed by the peer, once when both are the same nickname.
+/// with our own row first (borrowed, as this runs on every draw), or for a
+/// private conversation us followed by the peer, once when both are the same
+/// nickname.
 fn conversation_participants<'a>(
     conversation: &'a cayenchat_model::Conversation,
     own_nickname: Option<&str>,
-) -> Cow<'a, [String]> {
+) -> member_selection::Participants<'a> {
     if !conversation.is_private() {
-        return Cow::Borrowed(&conversation.members);
+        return member_selection::Participants::own_first(&conversation.members, own_nickname);
     }
     let mut participants = Vec::with_capacity(2);
     if let Some(own) = own_nickname
@@ -6555,7 +6602,7 @@ fn conversation_participants<'a>(
         participants.push(own.to_owned());
     }
     participants.push(conversation.name.clone());
-    Cow::Owned(participants)
+    member_selection::Participants::plain(Cow::Owned(participants))
 }
 
 /// How many of the member menu's choices apply: a private conversation's

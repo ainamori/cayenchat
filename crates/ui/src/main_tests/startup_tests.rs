@@ -143,6 +143,24 @@ fn each_server_sends_its_own_quit_message() {
 }
 
 #[test]
+fn each_server_sends_its_own_part_message() {
+    let mut settings = Settings::default();
+    settings.add_server(cayenchat_storage::PRESETS[0].host);
+    let profile = settings.selected_profile_mut().unwrap();
+    profile.nickname = "alice".into();
+    profile.username = "ident".into();
+    let language = settings.language;
+    let config =
+        connection_config(settings.selected_profile().unwrap(), language, None, None).unwrap();
+    assert_eq!(config.part_message, "");
+    settings.selected_profile_mut().unwrap().part_message = "またね".into();
+    let config =
+        connection_config(settings.selected_profile().unwrap(), language, None, None).unwrap();
+    assert_eq!(config.part_message, "またね");
+    assert_eq!(config.quit_message, "");
+}
+
+#[test]
 fn nickname_and_username_stay_independent_without_credentials() {
     let mut settings = Settings::default();
     settings.add_server(cayenchat_storage::PRESETS[0].host);

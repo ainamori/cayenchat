@@ -319,6 +319,7 @@ fn closed_worker_keeps_buffered_diagnostics_readable() {
         quit: Arc::default(),
         events: Some(Events(events)),
         encoding: "UTF-8".into(),
+        part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(0)),
         closed: None,
         transcript: Arc::default(),
@@ -341,6 +342,7 @@ fn member_modes_are_split_to_the_announced_limit_and_validated_first() {
         quit: Arc::default(),
         events: Some(Events(events)),
         encoding: "UTF-8".into(),
+        part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(2)),
         closed: None,
         transcript: Arc::default(),
@@ -379,6 +381,7 @@ fn member_modes_are_not_sent_in_part_when_the_queue_is_nearly_full() {
         quit: Arc::default(),
         events: Some(Events(events)),
         encoding: "UTF-8".into(),
+        part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(1)),
         closed: None,
         transcript: Arc::default(),
@@ -407,6 +410,7 @@ fn taken_events_can_be_awaited_until_the_worker_ends() {
         quit: Arc::default(),
         events: Some(Events(events)),
         encoding: "UTF-8".into(),
+        part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(0)),
         closed: None,
         transcript: Arc::default(),
@@ -964,6 +968,45 @@ fn safe_channel_join_names_messages_and_part_round_trip() {
         joined && names && message && notice && parted,
         "safe channel lifecycle incomplete"
     );
+    server.join().unwrap();
+}
+
+#[test]
+fn rejoining_after_a_kick_lists_each_member_once() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut lines = BufReader::new(socket.try_clone().unwrap()).lines();
+        while !lines.next().unwrap().unwrap().starts_with("USER ") {}
+        socket
+            .write_all(b":server 001 alice :Welcome\r\n:server 376 alice :End of MOTD\r\n")
+            .unwrap();
+        assert_eq!(lines.next().unwrap().unwrap(), "JOIN #test");
+        socket.write_all(b":alice!u@h JOIN #test\r\n:server 353 alice = #test :@alice bob\r\n:server 366 alice #test :End of NAMES\r\n:bob!u@h KICK #test alice :bye\r\n:alice!u@h JOIN #test\r\n:server 353 alice = #test :alice @bob\r\n:server 366 alice #test :End of NAMES\r\n").unwrap();
+    });
+    let mut config =
+        ConnectionConfig::tls("127.0.0.1".into(), "alice".into(), vec!["#test".into()]);
+    config.port = port;
+    config.use_tls = false;
+    let mut connection = Connection::connect(config).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut rosters = Vec::new();
+    while Instant::now() < deadline && rosters.len() < 4 {
+        match connection.try_recv() {
+            Some(Event::Names { users, .. }) => rosters.push(users),
+            Some(_) => {}
+            None => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    // Each JOIN also publishes a snapshot; the last one follows the final NAMES.
+    assert_eq!(rosters.len(), 4, "{rosters:?}");
+    let mut last = rosters[3].clone();
+    last.sort();
+    assert_eq!(last, ["@bob", "alice"], "{rosters:?}");
     server.join().unwrap();
 }
 
@@ -1587,6 +1630,55 @@ fn the_quit_message_follows_the_connection_encoding() {
     assert!(want.contains(&0x1b), "ISO-2022-JP uses escape sequences");
     want.truncate(want.len() - 2);
     assert_eq!(line, want);
+}
+
+#[test]
+fn the_part_message_is_validated_independently_of_quit() {
+    let mut config = ConnectionConfig::tls("irc.example.org".into(), "alice".into(), vec![]);
+    config.validate().unwrap();
+    assert_eq!(config.wire_part_message(), None);
+    config.part_message = "   ".into();
+    assert_eq!(config.wire_part_message(), None);
+    config.part_message = " またね ".into();
+    assert_eq!(config.wire_part_message().as_deref(), Some("またね"));
+    config.validate().unwrap();
+    config.encoding = "iso-8859-1".into();
+    assert!(config.validate().is_err());
+    config.encoding = "UTF-8".into();
+    config.part_message = "two\nlines".into();
+    assert!(config.validate().is_err());
+    config.part_message = "a\0b".into();
+    assert!(config.validate().is_err());
+    config.part_message = "x".repeat(600);
+    assert!(config.validate().is_err());
+    // A bad PART message does not touch QUIT, and the reverse.
+    config.part_message = String::new();
+    config.quit_message = "Bye".into();
+    config.validate().unwrap();
+    assert_eq!(config.wire_quit_message(), "Bye");
+}
+
+#[test]
+fn the_default_part_reason_applies_only_without_an_explicit_one() {
+    let wire = |line: &str, default: Option<&str>| {
+        let outgoing = parse_slash_command(line, Some("#example")).unwrap();
+        match with_default_part_reason(outgoing, default) {
+            Outgoing::Raw(message) => message.to_string().trim_end().to_owned(),
+            other => panic!("expected raw command: {other:?}"),
+        }
+    };
+    assert_eq!(wire("/part", Some("またね")), "PART #example またね");
+    assert_eq!(
+        wire("/part #example", Some("またね")),
+        "PART #example またね"
+    );
+    assert_eq!(wire("/part #example :", Some("bye")), "PART #example bye");
+    assert_eq!(
+        wire("/part #example :休憩", Some("またね")),
+        "PART #example 休憩"
+    );
+    assert_eq!(wire("/part #example", None), "PART #example");
+    assert_eq!(wire("/topic hello", Some("またね")), "TOPIC #example hello");
 }
 
 #[test]

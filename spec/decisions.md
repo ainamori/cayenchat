@@ -1182,6 +1182,30 @@ point's reference is IRC's concern and is not a generic sync token.
 Private-message recovery, persistence and echo-message reconciliation are
 future work. Details in `architecture.md` (Channel history).
 
+## D043 — Decoding HTML numeric character references for display (#320)
+
+**Status:** Accepted
+
+- Startup & Behavior option `appearance.decode_char_refs` (off by default):
+  `&#x1F352;` and `&#127826;` in received text are drawn as the characters.
+  Display only: the stored text, search, sending and the wire are unchanged.
+  Named references (`&amp;`) and tags are never interpreted.
+- Only well-formed references (`;` terminated, at most 8 digits) naming a
+  valid scalar value are decoded. Controls, line and paragraph separators,
+  bidirectional controls, BOM, noncharacters, surrogates and out of range
+  values stay as written, as do references inside URLs. At most 64 runs per
+  message are decoded. Adjacent references form one run.
+- It reuses the presentation mapping of compact URLs (`compact_urls.rs`):
+  one drawn text with spans mapping drawn and original byte positions, so
+  links, highlights and selections keep working on original offsets.
+- A run has a neutral (not link-colored, not underlined) background and a
+  hover bubble with the original text and one "copy original" button. There
+  is no button for the converted characters; selecting and copying copies the
+  characters shown. Short URL bubbles and these bubbles share the hover
+  machinery; they never overlap because references inside URLs are not decoded.
+- The channel log and the combined log both draw it (the combined log is
+  text-only, without the bubble). Notifications and search use the original.
+
 ## D042 — MPL-2.0 core, GPL-3.0 user interface (#275)
 
 **Status:** Accepted
@@ -1280,6 +1304,14 @@ The chosen members are dropped when the member list loses focus (a click
 elsewhere in the window, or the window becoming inactive), because a choice can
 be acted on all at once and must not linger unseen (#294). The log's text
 selection and the channel tree's active row are unchanged.
+
+In a channel the member list shows our own row first (#318), matched by the
+network's current nickname under RFC 1459 case mapping with the role prefix
+ignored and the prefix kept in the row. The others keep the `sorted_members`
+order and the roster itself is not reordered: `member_selection::Participants`
+borrows it and maps display index to roster index, so drawing copies nothing
+and rows, clicks, ranges and keyboard movement share one order. When we are not
+listed, nothing is added.
 
 Typing while the main log, the member list or the channel tree has focus (after
 a click that started a selection)

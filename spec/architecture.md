@@ -610,6 +610,13 @@ reason; blank means "Leaving CayenChat". It is validated with the connection
 connection starts, so an edit applies from the next connection. Lost connections
 send no QUIT.
 
+Each server profile also has an optional PART message (`part_message`, issue #319;
+added without a version change), independent of the QUIT message. Blank means no
+reason. `Connection::send_command` gives it to any `PART` that names no reason, so
+the channel menu and a bare `/part` or `/part #channel` agree; an explicit reason
+always wins. It is validated with the connection (no line breaks or NUL, within the
+encoding) and the final line length is checked when a `PART` is sent.
+
 Quitting from the close button, the menu, `/quit` or an OS session end (Windows
 sign-out, shutdown, restart or an installer's Restart Manager close; issue #284)
 all reach `quit_connections`, which waits at most `QUIT_WAIT` (2 seconds, shared

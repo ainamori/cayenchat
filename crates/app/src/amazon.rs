@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Shortening of long Amazon product links in an outgoing message (#315).
+//! Shortening of a pasted long Amazon product link (#315).
 //!
-//! Only a link whose meaning can be kept is rewritten, to
-//! `https://<same host>/dp/<ASIN>`; everything else, including the text around
-//! a link, is left exactly as written. No network access is involved.
-
-use crate::links;
+//! Only pasted text that is exactly one link whose meaning can be kept is
+//! rewritten, to `https://<same host>/dp/<ASIN>`. No network access is involved.
 
 /// Links shorter than this many characters are left alone.
 pub const MIN_LENGTH: usize = 100;
@@ -65,46 +62,15 @@ const TRACKING: &[&str] = &[
     "psc_unused",
 ];
 
-/// `text` with each long Amazon product link shortened. A message holding a
-/// CTCP delimiter (U+0001) is protocol text and is returned as written.
-pub fn shorten(text: &str) -> String {
-    if text.contains('\u{1}') {
-        return text.to_owned();
+/// The short form of pasted text that is, apart from surrounding whitespace
+/// (full-width spaces included), exactly one long Amazon product link.
+/// `None` for anything else, including text that mixes a link with words.
+pub fn shorten_pasted(text: &str) -> Option<String> {
+    let link = text.trim();
+    if link.contains(char::is_whitespace) {
+        return None;
     }
-    let mut out = String::with_capacity(text.len());
-    let mut cursor = 0;
-    for (range, _) in links::find(text) {
-        if !starts_cleanly(&text[..range.start]) || !ends_cleanly(&text[range.end..]) {
-            continue;
-        }
-        if let Some(short) = shorten_link(&text[range.clone()]) {
-            out.push_str(&text[cursor..range.start]);
-            out.push_str(&short);
-            cursor = range.end;
-        }
-    }
-    out.push_str(&text[cursor..]);
-    out
-}
-
-/// Whether the link found just before `after` really ends there. The link
-/// finder also stops at quotes, brackets and CJK punctuation, which may sit
-/// inside the URL, so the rest of the whitespace-delimited word must be only
-/// closing punctuation. Anything else could be a parameter that was never
-/// checked, and the whole link is left as written.
-fn ends_cleanly(after: &str) -> bool {
-    after
-        .split(char::is_whitespace)
-        .next()
-        .is_some_and(|rest| rest.chars().all(|ch| ".,;:!?)}」』。、".contains(ch)))
-}
-
-/// Whether the link found just after `before` really starts its
-/// whitespace-delimited word, optionally behind one opening bracket, and is
-/// not inside another URL or a value such as `?q=https://...`.
-fn starts_cleanly(before: &str) -> bool {
-    let word = before.rsplit(char::is_whitespace).next().unwrap_or("");
-    matches!(word, "" | "(" | "「" | "『")
+    shorten_link(link)
 }
 
 fn shorten_link(link: &str) -> Option<String> {
@@ -164,6 +130,11 @@ mod tests {
 
     const ASIN: &str = "B012345678";
 
+    /// What pasting `text` inserts: the short form, or the text as it was.
+    fn shorten(text: &str) -> String {
+        shorten_pasted(text).unwrap_or_else(|| text.to_owned())
+    }
+
     fn long(host: &str, path: &str) -> String {
         format!(
             "https://{host}{path}?keywords=example&qid=1234567890123&sr=8-1&crid=ABCDEFGHIJKLM&sprefix=abc"
@@ -185,14 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_surrounding_text_and_other_links() {
-        let url = long("www.amazon.co.jp", "/x/dp/B012345678");
-        let text = format!("これ {url}。 https://example.com/a も ({url}) end");
-        let short = "https://www.amazon.co.jp/dp/B012345678";
-        assert_eq!(
-            shorten(&text),
-            format!("これ {short}。 https://example.com/a も ({short}) end")
-        );
+    fn leaves_plain_text_alone() {
         assert_eq!(shorten("no links 日本語"), "no links 日本語");
     }
 
@@ -243,37 +207,34 @@ mod tests {
     }
 
     #[test]
-    fn leaves_links_cut_at_a_quote_and_ctcp_text_alone() {
-        let padding = "a".repeat(60);
-        let quoted =
-            format!("https://www.amazon.com/dp/B012345678?keywords={padding}'&smid=SELLER");
-        assert_eq!(shorten(&quoted), quoted);
-        let bracketed = format!("<{}>", long("www.amazon.com", "/dp/B012345678"));
-        assert_eq!(shorten(&bracketed), bracketed);
-        let ctcp = format!(
-            "\u{1}PING {}\u{1}",
-            long("www.amazon.co.jp", "/dp/B012345678")
-        );
-        assert_eq!(shorten(&ctcp), ctcp);
-        let query = "?keywords=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        for stop in ['。', '、'] {
-            let text = format!("https://www.amazon.com/dp/B012345678{query}{stop}&smid=SELLER");
+    fn leaves_pasted_text_that_is_not_just_one_link_alone() {
+        let url = long("www.amazon.com", "/dp/B012345678");
+        for text in [
+            format!("see {url}"),
+            format!("{url} please"),
+            format!("{url} {url}"),
+            format!("{url}\n{url}"),
+            format!("<{url}>"),
+            format!("\u{1}PING {url}\u{1}"),
+            format!("https://example.com/search?q='{url}"),
+            String::new(),
+            "   ".to_owned(),
+        ] {
             assert_eq!(shorten(&text), text);
         }
-        let outer =
-            format!("https://example.com/search?q='https://www.amazon.com/dp/B012345678{query}");
-        assert_eq!(shorten(&outer), outer);
-        for tail in ["。商品&smid=SELLER", "、商品&smid=SELLER", "。と"] {
-            let text = format!("https://www.amazon.com/dp/B012345678{query}{tail}");
-            assert_eq!(shorten(&text), text);
+    }
+
+    #[test]
+    fn ignores_whitespace_around_the_pasted_link() {
+        let url = long("www.amazon.co.jp", "/x/dp/B012345678");
+        let short = "https://www.amazon.co.jp/dp/B012345678";
+        for text in [
+            format!(" {url}"),
+            format!("{url}\n"),
+            format!("\t{url} "),
+            format!("\u{3000}{url}\u{3000}"),
+        ] {
+            assert_eq!(shorten(&text), short);
         }
-        let nested =
-            format!("https://example.com/search?q='(https://www.amazon.com/dp/B012345678{query}");
-        assert_eq!(shorten(&nested), nested);
-        let sentence = format!("see {}.", long("www.amazon.com", "/dp/B012345678"));
-        assert_eq!(
-            shorten(&sentence),
-            "see https://www.amazon.com/dp/B012345678."
-        );
     }
 }

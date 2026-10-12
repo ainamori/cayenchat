@@ -885,6 +885,70 @@ impl Render for UrlTooltip {
     }
 }
 
+/// The bubble over decoded character references: where they came from, the
+/// text as received, and the only copy button (the original; the characters
+/// shown are copied by selecting them).
+pub(crate) struct CharRefTooltip {
+    original: SharedString,
+    title: SharedString,
+    copy_label: SharedString,
+}
+
+impl CharRefTooltip {
+    pub(crate) fn new(original: SharedString, title: String, copy_label: String) -> Self {
+        Self {
+            original,
+            title: title.into(),
+            copy_label: copy_label.into(),
+        }
+    }
+}
+
+impl Render for CharRefTooltip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = crate::theme::current(cx);
+        let original = self.original.clone();
+        // Same bridge as the URL bubble: only the visible bubble is clickable.
+        div()
+            .pl(URL_TOOLTIP_BRIDGE.0)
+            .pt(URL_TOOLTIP_BRIDGE.1)
+            .child(
+                settings_theme::tooltip(SharedString::default(), cx)
+                    .id("char-ref-tooltip")
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.))
+                            .child(self.title.clone())
+                            .child(
+                                div()
+                                    .debug_selector(|| "char-ref-original".into())
+                                    .child(self.original.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id("char-ref-copy")
+                                    .debug_selector(|| "char-ref-copy".into())
+                                    .px(px(6.))
+                                    .py(px(1.))
+                                    .rounded(px(3.))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(theme.hover))
+                                    .child(self.copy_label.clone())
+                                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            original.to_string(),
+                                        ));
+                                    }),
+                            ),
+                    ),
+            )
+    }
+}
+
 /// What the IRCv3 tab shows about our own avatar on one server.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct OwnAvatarStatus {

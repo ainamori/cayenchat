@@ -390,6 +390,11 @@ pub struct Appearance {
     /// and copies keep the full URL. Added after version 15 without a version
     /// change; files without it read as off.
     pub compact_urls: bool,
+    /// Draw HTML numeric character references (`&#x1F352;`, `&#127826;`) in
+    /// received text as the characters they name; the stored text is not
+    /// changed. Added after version 15 without a version change; files
+    /// without it read as off.
+    pub decode_char_refs: bool,
     /// Reiwa mode, a channel log layout: the avatar spans two lines, the
     /// first line holds the nickname and time and the second the message,
     /// instead of the default `time | avatar | nick: message` flow. Read
@@ -477,6 +482,7 @@ impl Default for Appearance {
             image_previews: false,
             user_avatars: false,
             compact_urls: false,
+            decode_char_refs: false,
             reiwa_mode: false,
             main_log_font: String::new(),
             sub_log_font: String::new(),
@@ -615,6 +621,11 @@ pub struct ServerProfile {
     /// default. Added without a version change; files without it read as empty.
     #[serde(default)]
     pub quit_message: String,
+    /// `PART` reason for a `PART` that names none; empty means no reason.
+    /// Independent of `quit_message`. Added without a version change; files
+    /// without it read as empty.
+    #[serde(default)]
+    pub part_message: String,
     /// Short name shown for this server in the combined log; empty means the
     /// first word of the host. Added without a version change; files without
     /// it read as empty.
@@ -675,6 +686,7 @@ impl ServerProfile {
             username: String::new(),
             realname: String::new(),
             quit_message: String::new(),
+            part_message: String::new(),
             display_name: String::new(),
             channels: String::new(),
             sasl_enabled: false,
@@ -1525,6 +1537,38 @@ mod tests {
     }
 
     #[test]
+    fn part_message_is_per_profile_and_absent_in_older_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let original = serde_json::json!({
+            "version": 15,
+            "selected_server": "custom-1",
+            "servers": [{
+                "id": "custom-1", "custom": true, "host": "irc.example.net",
+                "port": 6697, "use_tls": true, "encoding": "utf8",
+                "nickname": "alice", "username": "ident"
+            }],
+            "credential_backend": "system"
+        });
+        fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+        let mut settings = load_from(&path).unwrap().unwrap();
+        assert_eq!(settings.selected_profile().unwrap().part_message, "");
+
+        let profile = settings.selected_profile_mut().unwrap();
+        profile.part_message = "またね".into();
+        profile.quit_message = "Bye".into();
+        settings.add_server("irc.example.org");
+        save_to(&path, &settings).unwrap();
+        let reloaded = load_from(&path).unwrap().unwrap();
+        let messages: Vec<_> = reloaded
+            .servers
+            .iter()
+            .map(|server| (server.part_message.as_str(), server.quit_message.as_str()))
+            .collect();
+        assert_eq!(messages, [("またね", "Bye"), ("", "")]);
+    }
+
+    #[test]
     fn display_name_is_per_profile_and_absent_in_older_files() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("settings.json");
@@ -2129,6 +2173,25 @@ mod tests {
         let mut settings = load_from(&path).unwrap().unwrap();
         assert!(!settings.appearance.compact_urls);
         settings.appearance.compact_urls = true;
+        save_to(&path, &settings).unwrap();
+        assert_eq!(load_from(&path).unwrap(), Some(settings));
+    }
+
+    #[test]
+    fn decode_char_refs_default_off_for_old_settings_and_round_trip() {
+        assert!(!Settings::default().appearance.decode_char_refs);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let mut old = serde_json::to_value(Settings::default()).unwrap();
+        old["appearance"]
+            .as_object_mut()
+            .unwrap()
+            .remove("decode_char_refs");
+        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+
+        let mut settings = load_from(&path).unwrap().unwrap();
+        assert!(!settings.appearance.decode_char_refs);
+        settings.appearance.decode_char_refs = true;
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path).unwrap(), Some(settings));
     }
