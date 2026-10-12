@@ -31,6 +31,7 @@ impl SettingsWindow {
                     && current.appearance.user_avatars == defaults.appearance.user_avatars
                     && current.appearance.reiwa_mode == defaults.appearance.reiwa_mode
                     && current.appearance.compact_urls == defaults.appearance.compact_urls
+                    && current.appearance.decode_char_refs == defaults.appearance.decode_char_refs
             }
             SettingsTab::Appearance => {
                 // The switches that live on the Application page are not
@@ -41,6 +42,7 @@ impl SettingsWindow {
                     user_avatars: current.appearance.user_avatars,
                     reiwa_mode: current.appearance.reiwa_mode,
                     compact_urls: current.appearance.compact_urls,
+                    decode_char_refs: current.appearance.decode_char_refs,
                     ..defaults.appearance
                 };
                 current.appearance == appearance && current.theme == defaults.theme
@@ -89,6 +91,7 @@ impl SettingsWindow {
                 appearance.user_avatars = defaults.appearance.user_avatars;
                 appearance.reiwa_mode = defaults.appearance.reiwa_mode;
                 appearance.compact_urls = defaults.appearance.compact_urls;
+                appearance.decode_char_refs = defaults.appearance.decode_char_refs;
             }
             SettingsTab::Appearance => {
                 let current = &mut self.settings.values.appearance;
@@ -98,6 +101,7 @@ impl SettingsWindow {
                     user_avatars: current.user_avatars,
                     reiwa_mode: current.reiwa_mode,
                     compact_urls: current.compact_urls,
+                    decode_char_refs: current.decode_char_refs,
                     ..defaults.appearance
                 };
                 self.show_appearance(&appearance, cx);

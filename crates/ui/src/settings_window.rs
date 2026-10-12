@@ -390,6 +390,7 @@ impl SettingsForm {
             image_previews: self.values.appearance.image_previews,
             user_avatars: self.values.appearance.user_avatars,
             compact_urls: self.values.appearance.compact_urls,
+            decode_char_refs: self.values.appearance.decode_char_refs,
             reiwa_mode: self.values.appearance.reiwa_mode,
             main_log_font: value(&self.main_log_font),
             sub_log_font: value(&self.sub_log_font),
