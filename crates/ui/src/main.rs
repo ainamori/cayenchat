@@ -1194,6 +1194,15 @@ impl ChatWindow {
             let mut ranges = own
                 .map(|own| mention_ranges(plain, own))
                 .unwrap_or_default();
+            // A nickname inside a link is part of the address, not a mention.
+            if !ranges.is_empty() {
+                let links = cayenchat_app::links::find(plain);
+                ranges.retain(|range| {
+                    !links
+                        .iter()
+                        .any(|(link, _)| range.start < link.end && link.start < range.end)
+                });
+            }
             mentioned = !ranges.is_empty();
             let matches = notifications::keyword_ranges(plain, keywords);
             keyword = !matches.is_empty();
