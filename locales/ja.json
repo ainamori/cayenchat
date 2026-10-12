@@ -255,6 +255,8 @@
   "realname_placeholder": "CayenChat",
   "quit_message": "終了メッセージ (QUIT)",
   "quit_message_placeholder": "Leaving CayenChat",
+  "part_message": "退出メッセージ (PART)",
+  "part_message_placeholder": "理由なし",
   "display_name": "表示名",
   "display_name_placeholder": "全体ログに表示する別名",
   "event_realname_changed": "本名を {realname} に変更しました。",

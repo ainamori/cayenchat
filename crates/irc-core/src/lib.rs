@@ -130,6 +130,9 @@ pub struct ConnectionConfig {
     /// The `QUIT` reason sent on a normal disconnect; empty means the
     /// built-in default.
     pub quit_message: String,
+    /// The `PART` reason for a `PART` without an explicit one; empty means
+    /// no reason. Independent of `quit_message`.
+    pub part_message: String,
     pub channels: Vec<String>,
     pub use_tls: bool,
     pub verify_tls_certificates: bool,
@@ -166,6 +169,7 @@ impl fmt::Debug for ConnectionConfig {
             .field("username", &self.username)
             .field("realname", &self.realname)
             .field("quit_message", &self.quit_message)
+            .field("part_message", &self.part_message)
             .field("channels", &self.channels)
             .field("use_tls", &self.use_tls)
             .field("verify_tls_certificates", &self.verify_tls_certificates)
@@ -194,6 +198,7 @@ impl ConnectionConfig {
             username: nickname.clone(),
             realname: String::new(),
             quit_message: String::new(),
+            part_message: String::new(),
             nickname,
             channels,
             use_tls: true,
@@ -229,6 +234,12 @@ impl ConnectionConfig {
         } else {
             configured.to_owned()
         }
+    }
+
+    /// The default `PART` reason: the trimmed configured message, if any.
+    fn wire_part_message(&self) -> Option<String> {
+        let configured = self.part_message.trim();
+        (!configured.is_empty()).then(|| configured.to_owned())
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -269,6 +280,18 @@ impl ConnectionConfig {
             &format!("QUIT :{}\r\n", self.wire_quit_message()),
             &self.encoding,
         )?;
+        if self
+            .part_message
+            .chars()
+            .any(|ch| matches!(ch, '\r' | '\n' | '\0'))
+        {
+            return Err("Part message must not contain line breaks.".into());
+        }
+        if let Some(reason) = self.wire_part_message() {
+            // The channel is not known yet; the final length is checked when a
+            // PART is sent.
+            validate_wire(&format!("PART #x :{reason}\r\n"), &self.encoding)?;
+        }
         for channel in &self.channels {
             if !valid_channel(channel) {
                 return Err(format!("Invalid channel name: {channel}"));
@@ -1103,6 +1126,17 @@ fn checked_raw(wire: &str) -> Result<Outgoing, String> {
     Ok(Outgoing::Raw(message))
 }
 
+/// Gives a `PART` without a reason the connection's default one; an
+/// explicit reason is kept.
+fn with_default_part_reason(mut outgoing: Outgoing, default: Option<&str>) -> Outgoing {
+    if let (Outgoing::Raw(message), Some(default)) = (&mut outgoing, default)
+        && let IrcCommand::PART(_, reason @ None) = &mut message.command
+    {
+        *reason = Some(default.to_owned());
+    }
+    outgoing
+}
+
 fn checked_command(command: IrcCommand) -> Result<Outgoing, String> {
     let message = IrcMessage::from(command);
     let wire = message.to_string();
@@ -1304,6 +1338,8 @@ pub struct Connection {
     /// `None` after [`Connection::take_events`].
     events: Option<Events>,
     encoding: String,
+    /// Reason for a `PART` that names none.
+    part_message: Option<String>,
     /// The server's announced `MODES` limit; 0 until one is seen.
     modes_per_line: Arc<AtomicUsize>,
     /// Disconnects once the worker thread has ended.
@@ -1325,6 +1361,7 @@ impl Connection {
             ensure_tls_crypto_provider()?;
         }
         let encoding = config.encoding.clone();
+        let part_message = config.wire_part_message();
         let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (event_tx, events) = mpsc::channel(EVENT_CAPACITY);
         let cancel = Arc::new(Notify::new());
@@ -1376,6 +1413,7 @@ impl Connection {
             quit,
             events: Some(Events(events)),
             encoding,
+            part_message,
             modes_per_line,
             closed: Some(Mutex::new(closed)),
             transcript,
@@ -1512,6 +1550,7 @@ impl Connection {
 
     pub fn send_command(&self, line: &str, selected_channel: Option<&str>) -> Result<(), String> {
         let outgoing = parse_slash_command(line, selected_channel)?;
+        let outgoing = with_default_part_reason(outgoing, self.part_message.as_deref());
         validate_outgoing(&outgoing, &self.encoding)?;
         self.commands
             .try_send(outgoing)
