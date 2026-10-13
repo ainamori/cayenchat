@@ -883,6 +883,10 @@ impl ChatWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        #[cfg(target_os = "windows")]
+        if let Err(error) = set_main_window_always_on_top(window, saved.always_on_top) {
+            log::warn!("Could not set the chat window's always-on-top state: {error}");
+        }
         cx.set_global(input::ShortenPastedAmazon(saved.shorten_amazon_urls));
         let i18n = Localizer::new(saved.language);
         // Every configured server is a network in the tree, connected or not.
@@ -3994,6 +3998,34 @@ fn notification_rules(settings: &Notifications) -> NotificationRules {
         private_messages: settings.private_messages,
         sound: settings.sound,
     }
+}
+
+/// Applies the Windows-only preference to the main chat window.
+/// Uses the native handle without changing vendored GPUI.
+#[cfg(target_os = "windows")]
+fn set_main_window_always_on_top(window: &Window, enabled: bool) -> Result<(), String> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+        SetWindowPos,
+    };
+
+    // GPUI has an inherent window_handle() method (its own view handle), so
+    // explicitly call the raw-window-handle trait for the native HWND.
+    let handle = HasWindowHandle::window_handle(window).map_err(|error| error.to_string())?;
+    let RawWindowHandle::Win32(native) = handle.as_raw() else {
+        return Err("The main window does not have a Win32 handle".into());
+    };
+    let hwnd = native.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+    let order = if enabled { HWND_TOPMOST } else { HWND_NOTOPMOST };
+    let flags = SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER;
+    if unsafe { SetWindowPos(hwnd, order, 0, 0, 0, 0, flags) } == 0 {
+        return Err(format!(
+            "Could not change the chat window's Z-order: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
 }
 
 fn default_time_font() -> &'static str {

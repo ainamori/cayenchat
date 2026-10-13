@@ -1278,6 +1278,8 @@ impl SettingsWindow {
             previous.appearance != saved.appearance || previous.theme != saved.theme;
         let language_changed = previous.language != saved.language;
         let layout_changed = previous.restore_window_layout != saved.restore_window_layout;
+        #[cfg(target_os = "windows")]
+        let topmost_changed = previous.always_on_top != saved.always_on_top;
         let restore_layout = saved.restore_window_layout;
         let shortcuts = ShortcutPrefs::from(&saved);
         let shortcuts_changed = ShortcutPrefs::from(previous) != shortcuts;
@@ -1291,6 +1293,12 @@ impl SettingsWindow {
             owner.apply_conversation_log(&saved.conversation_log);
             cx.set_global(crate::input::ShortenPastedAmazon(shorten_amazon_urls));
             owner.notification_rules = rules;
+            #[cfg(target_os = "windows")]
+            if topmost_changed {
+                if let Err(error) = crate::set_main_window_always_on_top(window, saved.always_on_top) {
+                    owner.set_feedback(Some(error));
+                }
+            }
             if shortcuts_changed {
                 apply_shortcuts(shortcuts, cx);
             }
