@@ -333,6 +333,22 @@ impl SettingsForm {
         }
     }
 
+    /// Writes the shown server's host, port and display name back to the
+    /// values, so tabs that list servers show what was typed before saving.
+    /// Nothing else is read, and an unusable port is left as it was.
+    pub(crate) fn sync_shown_server(&mut self, cx: &App) {
+        let value = |field: &Entity<TextInput>| field.read(cx).text().trim().to_owned();
+        let port = self.port.read(cx).text().trim().parse().ok();
+        let (host, display_name) = (value(&self.custom_host), value(&self.display_name));
+        if let Some(profile) = self.values.selected_profile_mut() {
+            profile.host = host;
+            profile.display_name = display_name;
+            if let Some(port) = port.filter(|port| *port != 0) {
+                profile.port = port;
+            }
+        }
+    }
+
     pub(crate) fn snapshot(&self, cx: &App) -> Result<Settings, String> {
         self.snapshot_with(cx, true)
     }
@@ -3084,6 +3100,8 @@ impl SettingsWindow {
             let offset = self.pane_scroll.offset();
             self.pane_scroll.set_offset(point(offset.x, px(0.)));
         }
+        // Server names on other tabs follow the connection tab's fields.
+        self.settings.sync_shown_server(cx);
         // The system may have changed the registration since it was read.
         self.refresh_autostart(cx);
         self.tab = tab;
@@ -3447,6 +3465,24 @@ mod server_settings_tests {
         let preset = settings.selected_profile().unwrap();
         assert!(preset.nickname.is_empty() && preset.channels.is_empty());
         assert_eq!(preset.ircv3, Ircv3Preferences::default());
+    }
+
+    #[gpui::test]
+    fn typed_host_and_display_name_reach_the_values_before_saving(cx: &mut TestAppContext) {
+        let store = memory_store();
+        let mut form = form(Settings::default(), &store, cx);
+        switch(&mut form, &store, cx, |settings| {
+            settings.add_server(cayenchat_storage::PRESETS[0].host);
+        });
+        type_into(&form.custom_host, "tiarra.example", cx);
+        type_into(&form.display_name, "Tiarra", cx);
+        type_into(&form.port, "bad", cx);
+        cx.read(|cx| form.sync_shown_server(cx));
+        let profile = form.values.selected_profile().unwrap();
+        assert_eq!(profile.host, "tiarra.example");
+        assert_eq!(profile.display_name, "Tiarra");
+        // An unfinished port keeps the earlier one.
+        assert_eq!(profile.port, 6667);
     }
 
     #[gpui::test]

@@ -148,10 +148,7 @@ impl SettingsWindow {
                 .border_1()
                 .border_color(theme.border)
                 .cursor_pointer()
-                .child(format!(
-                    "{}  ▾",
-                    server_label(&profile.host, profile.port, &self.i18n)
-                ))
+                .child(format!("{}  ▾", server_label(&profile, &self.i18n)))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.settings.ircv3_server_list_open = !this.settings.ircv3_server_list_open;
                     cx.notify();
@@ -172,7 +169,7 @@ impl SettingsWindow {
                         .cursor_pointer()
                         .hover(|d| d.bg(theme.hover))
                         .when(id == profile.id, |d| d.bg(theme.selected))
-                        .child(server_label(&server.host, server.port, &self.i18n))
+                        .child(server_label(server, &self.i18n))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.settings.ircv3_server_list_open = false;
                             this.select_server(id.clone(), cx)
@@ -197,10 +194,7 @@ impl SettingsWindow {
             )
             .child(div().font_weight(FontWeight::BOLD).child(self.i18n.format(
                 "ircv3_configuring",
-                &[(
-                    "server",
-                    &server_label(&profile.host, profile.port, &self.i18n),
-                )],
+                &[("server", &server_label(&profile, &self.i18n))],
             )));
 
         for feature in &IRCV3_FEATURES {
@@ -1156,11 +1150,14 @@ fn outcome_text(i18n: &crate::localization::Localizer, outcome: &Outcome) -> (St
     }
 }
 
-fn server_label(host: &str, port: u16, i18n: &crate::localization::Localizer) -> String {
-    if host.is_empty() {
+/// The display name when there is one, else `host:port`.
+fn server_label(profile: &ServerProfile, i18n: &crate::localization::Localizer) -> String {
+    if !profile.display_name.is_empty() {
+        profile.display_name.clone()
+    } else if profile.host.is_empty() {
         i18n.text("new_server")
     } else {
-        format!("{host}:{port}")
+        format!("{}:{}", profile.host, profile.port)
     }
 }
 
