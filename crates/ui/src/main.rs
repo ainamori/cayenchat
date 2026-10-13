@@ -3992,6 +3992,7 @@ fn notification_rules(settings: &Notifications) -> NotificationRules {
         keyword_alerts: settings.keyword_alerts,
         keywords: settings.keywords.clone(),
         private_messages: settings.private_messages,
+        channel_notices: settings.channel_notices,
         sound: settings.sound,
     }
 }

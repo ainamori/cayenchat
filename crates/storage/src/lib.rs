@@ -833,6 +833,9 @@ pub struct Notifications {
     pub keyword_alerts: bool,
     pub keywords: Vec<String>,
     pub private_messages: bool,
+    /// Let channel NOTICEs trigger mention and keyword notifications.
+    /// Off by default: NOTICEs are mostly bots and services.
+    pub channel_notices: bool,
     /// Beep and flash the taskbar button (Windows) when a notification
     /// fires. Off by default.
     pub sound: bool,
@@ -846,6 +849,7 @@ impl Default for Notifications {
             keyword_alerts: true,
             keywords: Vec::new(),
             private_messages: true,
+            channel_notices: false,
             sound: false,
         }
     }
@@ -1663,6 +1667,7 @@ mod tests {
             assert!(profile.sasl_enabled);
             assert_eq!(profile.sasl_username, "account");
             assert_eq!(settings.notifications, Notifications::default());
+            assert!(!settings.notifications.channel_notices);
             assert_eq!(fs::read(&path).unwrap(), bytes);
             save_to(&path, &settings).unwrap();
             assert_eq!(load_from(&path).unwrap(), Some(settings));
