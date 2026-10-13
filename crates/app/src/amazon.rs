@@ -60,7 +60,23 @@ const TRACKING: &[&str] = &[
     "linkcode",
     "linkid",
     "psc_unused",
+    "ie",
+    "dchild",
+    "sp_csd",
+    "spla",
+    "ufe",
+    "refrid",
+    "sbo",
 ];
+
+/// Tracking parameter families: `__mk_ja_JP` (marketplace charset marker that
+/// Japanese search results always add) and the other `pf_rd_*`/`pd_rd_*`.
+const TRACKING_PREFIXES: &[&str] = &["__mk_", "pf_rd_", "pd_rd_"];
+
+fn is_tracking(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    TRACKING.contains(&key.as_str()) || TRACKING_PREFIXES.iter().any(|p| key.starts_with(p))
+}
 
 /// The short form of pasted text that is, apart from surrounding whitespace
 /// (full-width spaces included), exactly one long Amazon product link.
@@ -91,14 +107,16 @@ fn shorten_link(link: &str) -> Option<String> {
     if !DOMAINS.contains(&bare) {
         return None;
     }
-    let tracking_only = url
-        .query_pairs()
-        .all(|(key, _)| TRACKING.contains(&key.to_ascii_lowercase().as_str()));
-    if !tracking_only {
+    if !url.query_pairs().all(|(key, _)| is_tracking(&key)) {
         return None;
     }
     let segments: Vec<&str> = url.path_segments()?.collect();
-    let (slug_ok, asin, rest) = match segments.as_slice() {
+    // `/-/en/...` only picks the display language of the page.
+    let segments = match segments.as_slice() {
+        ["-", lang, rest @ ..] if lang.len() == 2 || lang.len() == 5 => rest,
+        all => all,
+    };
+    let (slug_ok, asin, rest) = match segments {
         ["dp", asin, rest @ ..] => (true, asin, rest),
         [slug, "dp", asin, rest @ ..] => (is_slug(slug), asin, rest),
         ["gp", "product", asin, rest @ ..] => (true, asin, rest),
@@ -152,6 +170,18 @@ mod tests {
             let url = long(host, path);
             assert!(url.chars().count() >= MIN_LENGTH, "{url}");
             assert_eq!(shorten(&url), format!("https://{host}/dp/{ASIN}"), "{url}");
+        }
+    }
+
+    #[test]
+    fn shortens_links_copied_from_search_results() {
+        let short = "https://www.amazon.co.jp/dp/B012345678";
+        for url in [
+            "https://www.amazon.co.jp/%E5%95%86%E5%93%81/dp/B012345678/ref=sr_1_3?__mk_ja_JP=%E3%82%AB%E3%82%BF%E3%82%AB%E3%83%8A&crid=ABCDEFGHIJKLM&dib=eyJ2IjoiMSJ9&dib_tag=se&keywords=example&qid=1234567890123&sprefix=abc%2Caps%2C200&sr=8-3",
+            "https://www.amazon.co.jp/-/en/Product/dp/B012345678/?pd_rd_w=abcde&pf_rd_p=abcdefgh-1234&ie=UTF8&dchild=1&sp_csd=d2lkZ2V0TmFtZT1zcF9hdGY&spla=1&pd_rd_wg=xyz",
+        ] {
+            assert!(url.chars().count() >= MIN_LENGTH, "{url}");
+            assert_eq!(shorten(url), short, "{url}");
         }
     }
 
