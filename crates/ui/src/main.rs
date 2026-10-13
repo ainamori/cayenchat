@@ -2186,6 +2186,31 @@ impl ChatWindow {
         cx.notify();
     }
 
+    /// Remembers the channels of a `/join` command just sent, so a refusal of
+    /// one that has no conversation yet can still be shown. Bounded.
+    fn note_join_request(&mut self, network: NetworkId, command: &str) {
+        let mut words = command.split_whitespace();
+        if !words
+            .next()
+            .is_some_and(|word| word.eq_ignore_ascii_case("/join"))
+        {
+            return;
+        }
+        let Some(channels) = words.next() else {
+            return;
+        };
+        let casemapping = self.state.casemapping(network);
+        let Some(session) = self.sessions.get_mut(&network) else {
+            return;
+        };
+        for channel in channels.split(',').filter(|name| valid_channel(name)) {
+            if session.pending_joins.len() >= 32 {
+                session.pending_joins.clear();
+            }
+            session.pending_joins.insert(casemapping.fold(channel));
+        }
+    }
+
     fn join_channel(
         &mut self,
         network: NetworkId,
@@ -2194,6 +2219,7 @@ impl ChatWindow {
     ) -> Result<(), String> {
         self.registered_connection(network)?
             .send_command(&format!("/join {channel}"), None)?;
+        self.note_join_request(network, &format!("/join {channel}"));
         cx.notify();
         Ok(())
     }
@@ -2529,7 +2555,11 @@ impl ChatWindow {
         };
         match result {
             Ok(()) => {
-                self.member_prompt = None;
+                if let Some(prompt) = self.member_prompt.take() {
+                    if matches!(prompt.kind, MemberPromptKind::Join) {
+                        self.note_join_request(prompt.network, &format!("/join {}", value.trim()));
+                    }
+                }
                 self.set_feedback(None);
                 window.focus(&self.inputs[&self.state.selection()].focus_handle(cx));
             }
@@ -3171,6 +3201,10 @@ impl ChatWindow {
                 );
             }
             Event::Joined { channel } => {
+                let folded = self.state.casemapping(network).fold(&channel);
+                if let Some(session) = self.sessions.get_mut(&network) {
+                    session.pending_joins.remove(&folded);
+                }
                 self.state.joined_channel(network, &channel);
                 self.state.append_server_message(
                     network,
@@ -3250,9 +3284,19 @@ impl ChatWindow {
                 server_time,
             } => {
                 let alert = kind.is_alert();
+                let join_failed = matches!(kind, ChannelActivityKind::JoinFailed { .. });
                 let text = channel_activity_text(&actor, kind);
                 let meta = MessageMeta::at(server_time);
-                if alert {
+                let folded = self.state.casemapping(network).fold(&channel);
+                let requested = join_failed
+                    && self
+                        .sessions
+                        .get_mut(&network)
+                        .is_some_and(|session| session.pending_joins.remove(&folded));
+                if requested {
+                    self.state
+                        .append_requested_join_alert_at(network, &channel, text, meta);
+                } else if alert {
                     self.state
                         .append_channel_alert_at(network, &channel, text, meta);
                 } else {
@@ -3710,6 +3754,9 @@ impl ChatWindow {
         self.send_failure = None;
         self.feedback = match result {
             Ok(()) => {
+                if let Some(network) = network {
+                    self.note_join_request(network, &text);
+                }
                 self.input_history.record(&text, private_peer.as_deref());
                 input.update(cx, |input, cx| input.clear_after_send(cx));
                 None

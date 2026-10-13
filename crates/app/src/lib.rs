@@ -1272,6 +1272,21 @@ impl AppState {
         }
     }
 
+    /// Like [`AppState::append_channel_alert_at`], but opens the channel's
+    /// conversation first when it is missing, for a refusal of a join this
+    /// client asked for (within the conversation limit).
+    pub fn append_requested_join_alert_at(
+        &mut self,
+        network: NetworkId,
+        name: &str,
+        text: String,
+        meta: MessageMeta,
+    ) {
+        if self.ensure_channel(network, name).is_some() {
+            self.append_channel_alert_at(network, name, text, meta);
+        }
+    }
+
     /// The sequence of the newest message added anywhere, so a caller that
     /// just appended one can find it again ([`AppState::confirm_message`]).
     pub fn latest_sequence(&self) -> u64 {
