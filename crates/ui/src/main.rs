@@ -140,6 +140,19 @@ fn channel_activity_text(actor: &str, kind: ChannelActivityKind) -> String {
         ChannelActivityKind::ModeChanged { modes } => {
             format!("{actor} has changed mode: {modes}")
         }
+        ChannelActivityKind::Kicked {
+            reason, own: true, ..
+        } => with_detail("You were kicked from the channel by", actor, reason),
+        ChannelActivityKind::Kicked { target, reason, .. } => {
+            with_detail(&format!("{target} was kicked by"), actor, reason)
+        }
+        ChannelActivityKind::JoinFailed { banned, reason } => {
+            if banned {
+                format!("Cannot join: you are banned from this channel ({reason})")
+            } else {
+                format!("Cannot join: {reason}")
+            }
+        }
     }
 }
 
@@ -3236,13 +3249,16 @@ impl ChatWindow {
                 kind,
                 server_time,
             } => {
+                let alert = kind.is_alert();
                 let text = channel_activity_text(&actor, kind);
-                self.state.append_channel_activity_at(
-                    network,
-                    &channel,
-                    text,
-                    MessageMeta::at(server_time),
-                );
+                let meta = MessageMeta::at(server_time);
+                if alert {
+                    self.state
+                        .append_channel_alert_at(network, &channel, text, meta);
+                } else {
+                    self.state
+                        .append_channel_activity_at(network, &channel, text, meta);
+                }
             }
             Event::PrivateMessage {
                 sender,
@@ -5789,6 +5805,7 @@ impl ChatWindow {
                 .when(preview.is_none(), |d| d.flex_1())
                 .min_w_0()
                 .when(message.activity, |d| d.text_color(style.event_color))
+                .when(message.alert, |d| d.text_color(theme.warning))
                 .when(message.notice, |d| d.text_color(style.notice_color))
                 .when(message.delivery_failed, |d| d.text_color(theme.warning))
                 .cursor(if over_url {
@@ -6005,6 +6022,7 @@ impl ChatWindow {
                     .flex_1()
                     .min_w_0()
                     .when(message.activity, |d| d.text_color(style.event_color))
+                    .when(message.alert, |d| d.text_color(theme.warning))
                     .when(message.notice, |d| d.text_color(style.notice_color))
                     .child(styled),
             )
