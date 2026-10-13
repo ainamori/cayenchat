@@ -1183,6 +1183,31 @@ point's reference is IRC's concern and is not a generic sync token.
 Private-message recovery, persistence and echo-message reconciliation are
 future work. Details in `architecture.md` (Channel history).
 
+## D045 — Menu structure per OS (#337)
+
+**Status:** Accepted
+
+The maintainer approved this on the issue (2026-10-13). One `app_menus()`
+definition serves the native macOS menus and the Windows/Linux in-window bar;
+only the parts that differ are split with `cfg`.
+
+- macOS: CayenChat (Settings… Cmd+,, Services, Quit Cmd+Q), Connection,
+  Edit, View, Window (Minimize Cmd+M, Zoom). Window is marked with
+  `SystemMenuType::Window` (a vendored GPUI patch) instead of matching the
+  name "Window", so its title can be translated (ウインドウ) and AppKit still
+  adds the window list and other system items.
+- Windows/Linux: File (Settings… Ctrl+,, Quit Ctrl+Q), Connection, Edit, View.
+  No application-named menu and no Window menu.
+- "Connection settings…" is now "Settings…" everywhere; it opens the whole
+  settings window and appears once.
+- Connection offers Connect, Disconnect and Reconnect. Connect applies to a
+  selected server not yet connected in this run (or when there is no server,
+  where it opens settings); Reconnect to one that has been; Disconnect while a
+  connection or scheduled retry exists. Availability is the registration of
+  the action handler on the chat and settings windows, which both menus read
+  through `is_action_available`, so the menus are not rebuilt on state changes.
+- About and Help are out of scope.
+
 ## D044 — Opt-in conversation logs in files (#313)
 
 **Status:** Accepted

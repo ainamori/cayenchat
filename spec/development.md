@@ -485,8 +485,8 @@ this delay.
 ### Manual settings and UI checks
 
 1. Launch and confirm the separate settings window opens over the four-pane
-   chat window. After closing it, reopen it through **CayenChat → 接続設定…**
-   or Cmd+, on macOS; use Ctrl+, on Windows/Linux. With new settings (the
+   chat window. After closing it, reopen it through **CayenChat → 設定…**
+   or Cmd+, on macOS; use **ファイル → 設定…** or Ctrl+, on Windows/Linux. With new settings (the
    test build always starts with new settings) verify the server list says no
    servers are registered, the main log explains how to add one, and the
    drop-down offers IRCnet, IRCnet (IPv6), IRCnet (dev) and another server.

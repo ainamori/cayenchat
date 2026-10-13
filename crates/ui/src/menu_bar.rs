@@ -504,6 +504,7 @@ mod tests {
                                 "Copy diagnostics",
                                 crate::CopyDiagnostics,
                             )],
+                            menu_type: None,
                         }
                         .owned(),
                     ],
@@ -593,6 +594,7 @@ mod tests {
                                 "Copy diagnostics",
                                 crate::CopyDiagnostics,
                             )],
+                            menu_type: None,
                         }
                         .owned(),
                     ],

@@ -188,8 +188,11 @@ actions!(
         HistoryPrevious,
         HistoryNext,
         OpenSettings,
+        Connect,
         Disconnect,
         Reconnect,
+        MinimizeWindow,
+        ZoomWindow,
         ToggleDebug,
         CopyDiagnostics,
         CopyLogSelection,
@@ -1821,10 +1824,35 @@ impl ChatWindow {
         }
     }
 
-    fn reconnect_action(&mut self, _: &Reconnect, window: &mut Window, cx: &mut Context<Self>) {
+    /// Whether Connect applies: the selected server has not been connected in
+    /// this run, or there is no server yet (it then opens settings).
+    fn can_connect_selected(&self) -> bool {
+        match self.selected_network_id() {
+            Some(network) => self
+                .sessions
+                .get(&network)
+                .is_some_and(|session| !session.used()),
+            None => true,
+        }
+    }
+
+    /// Whether Reconnect applies: the selected server has been connected in
+    /// this run.
+    fn can_reconnect_selected(&self) -> bool {
+        self.selected_network_id()
+            .is_some_and(|network| self.sessions.get(&network).is_some_and(ServerSession::used))
+    }
+
+    fn connect_action(&mut self, _: &Connect, window: &mut Window, cx: &mut Context<Self>) {
         match self.selected_network_id() {
             Some(network) => self.reconnect(network, window, cx),
             None => self.open_settings_for(None, window, cx),
+        }
+    }
+
+    fn reconnect_action(&mut self, _: &Reconnect, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(network) = self.selected_network_id() {
+            self.reconnect(network, window, cx);
         }
     }
 
@@ -5351,7 +5379,12 @@ impl ChatWindow {
             .when(self.can_disconnect_selected(), |d| {
                 d.on_action(cx.listener(Self::disconnect_action))
             })
-            .on_action(cx.listener(Self::reconnect_action))
+            .when(self.can_connect_selected(), |d| {
+                d.on_action(cx.listener(Self::connect_action))
+            })
+            .when(self.can_reconnect_selected(), |d| {
+                d.on_action(cx.listener(Self::reconnect_action))
+            })
             .on_action(cx.listener(Self::toggle_debug))
             .on_action(cx.listener(Self::copy_diagnostics))
             .on_action(|_: &Quit, _, cx| cx.quit())
@@ -6387,28 +6420,38 @@ fn navigation_binding(key: &str, command: Command) -> KeyBinding {
 }
 
 fn app_menus(debug_enabled: bool, i18n: &Localizer) -> Vec<Menu> {
+    // macOS keeps Settings and Quit in the application menu; Windows and Linux
+    // put them in File, with no application-named menu.
     let mut app_items = vec![
         MenuItem::action(i18n.text("menu_settings"), OpenSettings),
         MenuItem::separator(),
     ];
     #[cfg(target_os = "macos")]
-    app_items.push(MenuItem::os_submenu(
-        i18n.text("menu_services"),
-        SystemMenuType::Services,
-    ));
-    app_items.push(MenuItem::action(i18n.text("menu_quit"), Quit));
-    vec![
+    app_items.extend([
+        MenuItem::os_submenu(i18n.text("menu_services"), SystemMenuType::Services),
+        MenuItem::separator(),
+    ]);
+    let (app_menu_name, quit_label) = if cfg!(target_os = "macos") {
+        ("CayenChat".to_owned(), "menu_quit")
+    } else {
+        (i18n.text("menu_file"), "menu_exit")
+    };
+    app_items.push(MenuItem::action(i18n.text(quit_label), Quit));
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut menus = vec![
         Menu {
-            name: "CayenChat".into(),
+            name: app_menu_name.into(),
             items: app_items,
+            menu_type: None,
         },
         Menu {
             name: i18n.text("menu_connection").into(),
             items: vec![
-                MenuItem::action(i18n.text("menu_settings"), OpenSettings),
+                MenuItem::action(i18n.text("connect"), Connect),
                 MenuItem::action(i18n.text("disconnect"), Disconnect),
                 MenuItem::action(i18n.text("reconnect"), Reconnect),
             ],
+            menu_type: None,
         },
         Menu {
             name: i18n.text("menu_edit").into(),
@@ -6421,6 +6464,7 @@ fn app_menus(debug_enabled: bool, i18n: &Localizer) -> Vec<Menu> {
                 MenuItem::action(i18n.text("menu_paste"), input::Paste),
                 MenuItem::action(i18n.text("menu_select_all"), input::SelectAll),
             ],
+            menu_type: None,
         },
         Menu {
             name: i18n.text("menu_view").into(),
@@ -6435,12 +6479,21 @@ fn app_menus(debug_enabled: bool, i18n: &Localizer) -> Vec<Menu> {
                 ),
                 MenuItem::action(i18n.text("menu_copy_diagnostics"), CopyDiagnostics),
             ],
+            menu_type: None,
         },
-        Menu {
-            name: i18n.text("menu_window").into(),
-            items: vec![MenuItem::action(i18n.text("menu_settings"), OpenSettings)],
-        },
-    ]
+    ];
+    // Only macOS has a Window menu; AppKit adds the window list, full screen
+    // and the like to it, so it holds just Minimize and Zoom.
+    #[cfg(target_os = "macos")]
+    menus.push(Menu {
+        name: i18n.text("menu_window").into(),
+        items: vec![
+            MenuItem::action(i18n.text("menu_minimize"), MinimizeWindow),
+            MenuItem::action(i18n.text("menu_zoom"), ZoomWindow),
+        ],
+        menu_type: Some(SystemMenuType::Window),
+    });
+    menus
 }
 
 /// Saved key preferences, kept so a desktop key-theme change can rebind
@@ -6537,6 +6590,8 @@ fn fixed_bindings(channel_modifier: ChannelNumberModifier) -> Vec<KeyBinding> {
         KeyBinding::new("secondary-c", CopyLogSelection, Some("MainLog")),
         KeyBinding::new("secondary-q", Quit, None),
     ];
+    #[cfg(target_os = "macos")]
+    bindings.push(KeyBinding::new("secondary-m", MinimizeWindow, None));
 
     for index in 0..10 {
         let digit = (index + 1) % 10;
@@ -6650,6 +6705,16 @@ fn main() {
         apply_shortcuts(ShortcutPrefs::from(&saved), cx);
         cx.set_menus(app_menus(false, &Localizer::new(Language::System)));
         cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &MinimizeWindow, cx| {
+            if let Some(window) = cx.active_window() {
+                let _ = window.update(cx, |_, window, _| window.minimize_window());
+            }
+        });
+        cx.on_action(|_: &ZoomWindow, cx| {
+            if let Some(window) = cx.active_window() {
+                let _ = window.update(cx, |_, window, _| window.zoom_window());
+            }
+        });
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -6858,3 +6923,7 @@ mod navigation_binding_tests;
 #[cfg(test)]
 #[path = "main_tests/bidi_display_tests.rs"]
 mod bidi_display_tests;
+
+#[cfg(test)]
+#[path = "main_tests/menu_tests.rs"]
+mod menu_tests;

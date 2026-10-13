@@ -2,12 +2,12 @@
 //! The settings window and the form it edits.
 
 use crate::{
-    ChatWindow, CopyDiagnostics, Disconnect, FocusNextField, FocusPreviousField, OpenSettings,
-    Quit, Reconnect, ShortcutPrefs, ToggleDebug, account_settings, apply_shortcuts, autostart,
-    avatar_editor, color_picker, connection_config, decorations, diagnostics, field_traversal,
-    forget_removed_profiles, i18n_error, input::TextInput, ircv3_settings, localization::Localizer,
-    notification_rules, saved_connection_secrets, scrollbar, secrets, settings_file,
-    settings_theme, shortcut_settings, theme,
+    ChatWindow, Connect, CopyDiagnostics, Disconnect, FocusNextField, FocusPreviousField,
+    OpenSettings, Quit, Reconnect, ShortcutPrefs, ToggleDebug, account_settings, apply_shortcuts,
+    autostart, avatar_editor, color_picker, connection_config, decorations, diagnostics,
+    field_traversal, forget_removed_profiles, i18n_error, input::TextInput, ircv3_settings,
+    localization::Localizer, notification_rules, saved_connection_secrets, scrollbar, secrets,
+    settings_file, settings_theme, shortcut_settings, theme,
 };
 use cayenchat_app::{attachments::AttachmentFlow, notifications};
 use cayenchat_irc_core::ConnectionConfig;
@@ -1335,6 +1335,15 @@ impl SettingsWindow {
         let _ = self.owner.update(cx, |owner, _, cx| {
             if let Some(network) = owner.selected_network_id() {
                 owner.disconnect(network, cx)
+            }
+        });
+        cx.notify();
+    }
+
+    fn connect_action(&mut self, _: &Connect, _: &mut Window, cx: &mut Context<Self>) {
+        let _ = self.owner.update(cx, |owner, window, cx| {
+            if let Some(network) = owner.selected_network_id() {
+                owner.reconnect(network, window, cx)
             }
         });
         cx.notify();
@@ -3299,7 +3308,18 @@ impl SettingsWindow {
                     .is_ok_and(ChatWindow::can_disconnect_selected),
                 |d| d.on_action(cx.listener(Self::disconnect_action)),
             )
-            .on_action(cx.listener(Self::reconnect_action))
+            .when(
+                self.owner
+                    .read(cx)
+                    .is_ok_and(ChatWindow::can_connect_selected),
+                |d| d.on_action(cx.listener(Self::connect_action)),
+            )
+            .when(
+                self.owner
+                    .read(cx)
+                    .is_ok_and(ChatWindow::can_reconnect_selected),
+                |d| d.on_action(cx.listener(Self::reconnect_action)),
+            )
             .on_action(cx.listener(Self::toggle_debug_action))
             .on_action(cx.listener(Self::copy_diagnostics_action))
             .on_action(|_: &Quit, _, cx| cx.quit())
