@@ -85,10 +85,12 @@ use std::{
 use theme::Theme;
 use whois::{JoinedChannels, WhoisWindow};
 
+/// Queued drafts whose outcome is still unknown, above which a new send is
+/// refused (its input stays) rather than forgetting one. The worker settles
+/// them in order, so this is far above the connection's command queue.
+const PENDING_DRAFTS: usize = 256;
 /// The channel log's share of the log height when nothing was dragged, and
 /// the bounds of what dragging may leave to either log.
-/// Accepted drafts remembered for handing back a refused one.
-const RECENT_SENDS: usize = 16;
 const DEFAULT_LOG_SPLIT: f32 = 0.5;
 /// Pause after the last move or resize before the window layout is written.
 const LAYOUT_SAVE_DELAY: Duration = Duration::from_millis(500);
@@ -510,11 +512,12 @@ struct ChatWindow {
     member_selection: member_selection::MemberSelection,
     /// Sent drafts recalled with Up/Down in the draft input.
     input_history: input_history::InputHistory,
-    /// The latest accepted drafts and the input each came from, so a draft
-    /// the connection refuses later goes back to the right input (a command
-    /// can name another target than the conversation it was typed in).
-    /// Drafts with credentials are not kept.
-    recent_sends: std::collections::VecDeque<(NetworkId, Selection, String)>,
+    /// Drafts the connection queued whose outcome is not known yet, by the
+    /// id it gave them ([`Connection::last_draft_id`]), with the input each
+    /// came from. A draft the connection refuses later goes back to that
+    /// input (a command can name another target than the conversation it
+    /// was typed in). Drafts with credentials are not kept.
+    pending_drafts: HashMap<(NetworkId, u64), (Selection, String)>,
     /// One row per server whose nickname was rejected during registration,
     /// in the order the rejections arrived.
     nick_prompts: Vec<NickPrompt>,
@@ -939,7 +942,7 @@ impl ChatWindow {
             member_prompt: None,
             member_selection: Default::default(),
             input_history: Default::default(),
-            recent_sends: Default::default(),
+            pending_drafts: Default::default(),
             nick_prompts: Vec::new(),
             startup_connections,
             settings_window: None,
@@ -3066,10 +3069,13 @@ impl ChatWindow {
                     self.nick_prompts.retain(|prompt| prompt.network != network);
                 }
                 Event::OutgoingRejected {
-                    channel,
-                    draft,
-                    error,
-                } => self.restore_rejected_draft(network, channel, draft, error, cx),
+                    draft_id, error, ..
+                } => self.restore_rejected_draft(network, *draft_id, error, cx),
+                Event::OutgoingAccepted {
+                    draft_id: Some(id), ..
+                } => {
+                    self.pending_drafts.remove(&(network, *id));
+                }
                 _ => {}
             }
             self.handle_event(network, event);
@@ -3106,6 +3112,9 @@ impl ChatWindow {
             if let Some(session) = self.sessions.get_mut(&network) {
                 session.irc = None;
             }
+            // The ids belong to that connection; a new one starts over.
+            self.pending_drafts
+                .retain(|(owner, _), _| *owner != network);
             if refused {
                 // Retrying rejected credentials risks account lockout or a ban.
                 self.state
@@ -3504,6 +3513,7 @@ impl ChatWindow {
             }
             Event::OutgoingAccepted {
                 local_id,
+                draft_id: _,
                 channel,
                 text,
                 notice,
@@ -3690,6 +3700,8 @@ impl ChatWindow {
                 != Some(&ConnectionStatus::Registered)
             {
                 Err(self.i18n.text("wait_registration"))
+            } else if self.pending_drafts.len() >= PENDING_DRAFTS {
+                Err(self.i18n.text("send_busy"))
             } else if text.starts_with('/') {
                 connection.send_command(&text, selected.map(|channel| channel.name.as_str()))
             } else if let Some(channel) = selected {
@@ -3712,12 +3724,17 @@ impl ChatWindow {
                 self.input_history.record(&text, private_peer.as_deref());
                 if let Some(network) = network
                     && !input_history::is_sensitive(&text, private_peer.as_deref())
+                    && let Some(connection) = self
+                        .sessions
+                        .get(&network)
+                        .and_then(|session| session.irc.as_ref())
                 {
-                    if self.recent_sends.len() >= RECENT_SENDS {
-                        self.recent_sends.pop_front();
+                    // Only messages (plain or by command) have a draft to
+                    // hand back; the worker settles it by this id.
+                    if let Some(id) = connection.last_draft_id() {
+                        self.pending_drafts
+                            .insert((network, id), (selection, text.clone()));
                     }
-                    self.recent_sends
-                        .push_back((network, selection, text.clone()));
                 }
                 input.update(cx, |input, cx| input.clear_after_send(cx));
                 None
@@ -3736,52 +3753,30 @@ impl ChatWindow {
     }
 
     /// Puts back the draft of a message the connection refused after it had
-    /// accepted it, unless something new has been typed since (the draft is
-    /// then still in the input history). The warning is shown either way.
+    /// accepted it, into the input it was typed in, unless something new has
+    /// been typed since (the draft is then still in the input history). The
+    /// warning is shown either way. A draft that was not kept (credentials)
+    /// or is unknown is not guessed at.
     fn restore_rejected_draft(
         &mut self,
         network: NetworkId,
-        channel: &str,
-        draft: &str,
+        draft_id: u64,
         error: &str,
         cx: &mut Context<Self>,
     ) {
         self.send_failure = None;
         self.feedback = Some(error.to_owned());
-        // The input it was typed in; failing that (it fell out of the list),
-        // the conversation with the target, for a plain message only.
-        let origin = self
-            .recent_sends
-            .iter()
-            .rposition(|(n, _, text)| *n == network && text == draft)
-            .and_then(|index| self.recent_sends.remove(index))
-            .map(|(_, selection, _)| selection);
-        let selection = match origin {
-            Some(selection) => selection,
-            None if draft.starts_with('/') => return,
-            None => {
-                let key = cayenchat_irc_core::text::nickname_key(channel);
-                if input_history::is_sensitive(draft, Some(channel)) {
-                    return;
-                }
-                let id = self
-                    .state
-                    .channel_id(network, channel)
-                    .or_else(|| self.state.private_id(network, &key));
-                let Some(id) = id else {
-                    return;
-                };
-                Selection::Channel(id)
-            }
+        let Some((selection, draft)) = self.pending_drafts.remove(&(network, draft_id)) else {
+            return;
         };
         let Some(input) = self.inputs.get(&selection).cloned() else {
             return;
         };
         if input.read(cx).text().is_empty() {
-            input.update(cx, |input, cx| input.set_text(draft, cx));
+            input.update(cx, |input, cx| input.set_text(&draft, cx));
             self.send_failure = Some(SendFailure {
                 selection,
-                text: draft.to_owned(),
+                text: draft,
                 message: error.to_owned(),
             });
         }

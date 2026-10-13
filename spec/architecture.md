@@ -550,11 +550,14 @@ encoding) to the connection handle when it changes. Until the host is known the
 estimate is 10 bytes of username and 63 of host. If the host grows while a
 message is queued, the worker checks again and refuses it with
 `Event::OutgoingRejected` (the draft is the typed text, or the typed line for
-`/me`, `/msg` and the like). The UI puts it back into the input it was typed in
-(it remembers the last 16 accepted drafts and their inputs, none with
-credentials; a plain message falls back to the channel or private conversation
-of the target, a command is not guessed) unless something new was typed (the
-draft is in the input history then).
+`/me`, `/msg` and the like). Each such message gets an id from the connection
+(`Connection::last_draft_id` after the send), repeated in `OutgoingAccepted` and
+`OutgoingRejected`. The UI keeps the id with the input it was typed in (no
+credentials) until the outcome arrives, and puts a refused draft back into that
+input unless something new was typed (the draft is in the input history then);
+an unknown id is not guessed at. A send that would exceed 256 undecided drafts
+is refused with its input left alone. The ids belong to one connection and are
+dropped when it ends.
 Splitting longer text into several lines and `draft/multiline` are not done.
 Connection-stage diagnostics and directional, decoded IRC lines flow as owned
 events from `irc-core` to the UI. The transcript includes message bodies, masks

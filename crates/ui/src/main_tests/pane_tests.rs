@@ -1950,6 +1950,7 @@ fn sent_messages_are_confirmed_in_place_and_unconfirmed_ones_are_marked(cx: &mut
         cx.add_window_view(|window, cx| ChatWindow::with_settings(settings, None, window, cx));
     let accepted = |local_id, text: &str| Event::OutgoingAccepted {
         local_id,
+        draft_id: None,
         channel: "#a".into(),
         text: text.into(),
         notice: false,
@@ -2296,6 +2297,7 @@ fn private_messages_get_their_own_conversations(cx: &mut TestAppContext) {
                 pm("carol", "old", false, true),
                 Event::OutgoingAccepted {
                     local_id: None,
+                    draft_id: None,
                     channel: "BOB".into(),
                     text: "hi bob".into(),
                     notice: false,
@@ -3113,12 +3115,14 @@ fn safe_channel_events_keep_messages_and_members_in_the_channel(cx: &mut TestApp
                 },
                 Event::OutgoingAccepted {
                     local_id: None,
+                    draft_id: None,
                     channel: channel.into(),
                     text: "reply".into(),
                     notice: false,
                 },
                 Event::OutgoingAccepted {
                     local_id: None,
+                    draft_id: None,
                     channel: channel.into(),
                     text: "notice".into(),
                     notice: true,

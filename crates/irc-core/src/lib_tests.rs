@@ -322,6 +322,8 @@ fn closed_worker_keeps_buffered_diagnostics_readable() {
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(0)),
         relay_prefix: Arc::new(AtomicUsize::new(0)),
+        draft_id: Default::default(),
+        draft_seq: Default::default(),
         closed: None,
         transcript: Arc::default(),
     };
@@ -346,6 +348,8 @@ fn member_modes_are_split_to_the_announced_limit_and_validated_first() {
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(2)),
         relay_prefix: Arc::new(AtomicUsize::new(0)),
+        draft_id: Default::default(),
+        draft_seq: Default::default(),
         closed: None,
         transcript: Arc::default(),
     };
@@ -386,6 +390,8 @@ fn member_modes_are_not_sent_in_part_when_the_queue_is_nearly_full() {
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(1)),
         relay_prefix: Arc::new(AtomicUsize::new(0)),
+        draft_id: Default::default(),
+        draft_seq: Default::default(),
         closed: None,
         transcript: Arc::default(),
     };
@@ -416,6 +422,8 @@ fn taken_events_can_be_awaited_until_the_worker_ends() {
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(0)),
         relay_prefix: Arc::new(AtomicUsize::new(0)),
+        draft_id: Default::default(),
+        draft_seq: Default::default(),
         closed: None,
         transcript: Arc::default(),
     };
@@ -4514,7 +4522,7 @@ fn a_queued_message_the_worker_refuses_comes_back_as_a_draft() {
             target: "#test".into(),
             text: text.clone(),
             display_text: text.clone(),
-            draft: Some(text.clone()),
+            draft: Some((7, text.clone())),
             notice: false,
         })
         .unwrap();
@@ -4523,10 +4531,12 @@ fn a_queued_message_the_worker_refuses_comes_back_as_a_draft() {
     });
     match event {
         Event::OutgoingRejected {
+            draft_id,
             channel,
             draft,
             error,
         } => {
+            assert_eq!(draft_id, 7);
             assert_eq!(channel, "#test");
             assert_eq!(draft, text);
             assert!(error.contains("too long"), "{error}");

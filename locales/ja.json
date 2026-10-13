@@ -245,6 +245,7 @@
   "event_message_queued": "{channel} への送信を受け付けました。",
   "wait_registration": "登録完了までお待ちください。",
   "wait_join": "チャンネルへの参加完了までお待ちください。",
+  "send_busy": "前の発言を送信中です。少し待ってからもう一度お試しください。",
   "select_channel": "送信先のチャンネルを選択してください。",
   "not_connected": "切断されています。接続設定を開いて接続してください。",
   "draft_placeholder": "メッセージを入力 — Enter で送信、/ でコマンド",
