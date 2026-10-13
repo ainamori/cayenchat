@@ -1116,6 +1116,9 @@ impl ChatWindow {
             return true;
         }
         self.quit_prompt_open = true;
+        // The request may come from the settings window or the Dock; show
+        // the question in front.
+        window.activate_window();
         let focused = window.focused(cx);
         let connected = self.sessions.values().any(|session| session.irc.is_some());
         let detail = self.i18n.text(if connected {
@@ -1139,14 +1142,10 @@ impl ChatWindow {
                 this.quit_prompt_open = false;
                 if quit {
                     cx.quit();
-                } else {
-                    // Back to where the user was typing.
-                    match focused {
-                        Some(handle) => window.focus(&handle),
-                        None => {
-                            window.focus(&this.inputs[&this.state.selection()].focus_handle(cx))
-                        }
-                    }
+                } else if let Some(handle) = focused {
+                    // Back to where the user was typing. The question may
+                    // have been asked in the settings window.
+                    window.focus(&handle);
                 }
             });
         })
@@ -6462,6 +6461,29 @@ fn navigation_binding(key: &str, command: Command) -> KeyBinding {
     KeyBinding::new(key, Navigate { command }, Some("ChatWindow"))
 }
 
+/// The user's quit request from any window (the settings window has no
+/// handler of its own) or the macOS menu bar: asks first when switched on.
+/// The question opens in the active window, so that it is not hidden behind
+/// the settings window.
+fn request_quit_anywhere(cx: &mut App) {
+    let chat = cx
+        .windows()
+        .into_iter()
+        .find_map(|w| w.downcast::<ChatWindow>());
+    let Some(chat) = chat else {
+        cx.quit();
+        return;
+    };
+    let Ok(entity) = chat.entity(cx) else {
+        cx.quit();
+        return;
+    };
+    let target = cx.active_window().unwrap_or_else(|| chat.into());
+    let _ = target.update(cx, |_, window, cx| {
+        entity.update(cx, |this, cx| this.request_quit(window, cx))
+    });
+}
+
 fn app_menus(debug_enabled: bool, i18n: &Localizer) -> Vec<Menu> {
     let mut app_items = vec![
         MenuItem::action(i18n.text("menu_settings"), OpenSettings),
@@ -6727,17 +6749,20 @@ fn main() {
         cx.set_menus(app_menus(false, &Localizer::new(Language::System)));
         // Reached when no chat window handles it, e.g. from the settings
         // window or the menu bar on macOS.
-        cx.on_action(|_: &Quit, cx| {
-            let chat = cx
+        cx.on_action(|_: &Quit, cx| request_quit_anywhere(cx));
+        // macOS Dock "Quit" is the user's request too; the system's own
+        // shutdown and `cx.quit()` never reach this handler.
+        cx.on_quit_request(|cx| {
+            let Some(chat) = cx
                 .windows()
                 .into_iter()
-                .find_map(|w| w.downcast::<ChatWindow>());
-            match chat {
-                Some(chat) => {
-                    let _ = chat.update(cx, |this, window, cx| this.request_quit(window, cx));
-                }
-                None => cx.quit(),
-            }
+                .find_map(|w| w.downcast::<ChatWindow>())
+            else {
+                return true;
+            };
+            !chat
+                .update(cx, |this, window, cx| this.ask_before_quit(window, cx))
+                .unwrap_or(false)
         });
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {

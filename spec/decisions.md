@@ -1199,8 +1199,16 @@ default and added without a version change, so older files read as off.
   The window stays open, `quit_prompt_open` suppresses a second question, and
   Cancel restores the focus that was in the window. "Quit" calls `cx.quit()`,
   so `on_app_quit` runs the usual shutdown once.
-- The question uses the window prompt (`Window::prompt`), so its Esc and IME
-  handling is the platform's.
+- The question uses the window prompt (`Window::prompt`). Native prompts
+  handle Esc themselves; the vendored GPUI fallback prompt (X11, Wayland)
+  was patched to treat Esc as its cancel button (`vendor/gpui/PATCHES.md`).
+- **Where it is asked:** the settings window has no Quit handler of its own;
+  the application-wide handler (`request_quit_anywhere`) opens the question in
+  the active window, so it is not hidden behind the settings window.
+- **macOS Dock "Quit":** reaches `applicationShouldTerminate:`, which asks
+  `App::on_quit_request`; the answer "Quit" calls `cx.quit()`, which is not
+  asked again. System shutdown/restart/log out, signals and `cx.quit()` are
+  never asked. Written from the AppKit documentation; not run on macOS.
 
 ## D044 — Opt-in conversation logs in files (#313)
 

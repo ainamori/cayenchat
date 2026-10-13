@@ -148,3 +148,14 @@ sends a private message to the platform window, which runs the quit callback
 `run` skips it afterwards. Upstream ignored both messages, so sign-out,
 shutdown and restart killed the process without running any quit handler.
 CayenChat uses this to send IRC QUIT (issue #284).
+
+In `src/window/prompts.rs`, `FallbackPromptRenderer` (used on X11 and Wayland)
+answers Escape with the prompt's cancel button, is wider and centers the detail
+text, so a long detail is no longer cut off. Upstream handles clicks only.
+
+In `src/app.rs`, `src/platform.rs` and `src/platform/mac/platform.rs`,
+`App::on_quit_request` lets the application cancel a quit the user starts from
+outside it. The macOS delegate implements `applicationShouldTerminate:` and asks
+the handler for a Dock "Quit". Quits from `App::quit` and the system's shutdown,
+restart and log out (a quit Apple event with a reason other than "quit") are
+never asked, and other platforms ignore the handler.

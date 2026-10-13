@@ -3,7 +3,7 @@
 
 use crate::{
     ChatWindow, CopyDiagnostics, Disconnect, FocusNextField, FocusPreviousField, OpenSettings,
-    Quit, Reconnect, ShortcutPrefs, ToggleDebug, account_settings, apply_shortcuts, autostart,
+    Reconnect, ShortcutPrefs, ToggleDebug, account_settings, apply_shortcuts, autostart,
     avatar_editor, color_picker, connection_config, decorations, diagnostics, field_traversal,
     forget_removed_profiles, i18n_error, input::TextInput, ircv3_settings, localization::Localizer,
     notification_rules, saved_connection_secrets, scrollbar, secrets, settings_file,
@@ -3330,7 +3330,6 @@ impl SettingsWindow {
             .on_action(cx.listener(Self::reconnect_action))
             .on_action(cx.listener(Self::toggle_debug_action))
             .on_action(cx.listener(Self::copy_diagnostics_action))
-            .on_action(|_: &Quit, _, cx| cx.quit())
     }
 }
 

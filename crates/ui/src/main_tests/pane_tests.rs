@@ -3661,3 +3661,33 @@ fn quitting_asks_first_only_when_switched_on(cx: &mut TestAppContext) {
     cx.simulate_prompt_answer("Cancel");
     cx.run_until_parked();
 }
+
+#[gpui::test]
+fn quit_from_another_window_asks_in_the_chat_window(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        crate::apply_shortcuts(crate::ShortcutPrefs::default(), cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let mut settings = crate::settings_with_channels("#a");
+    settings.language = cayenchat_storage::Language::English;
+    settings.confirm_quit = true;
+    let app = cx.clone();
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    cx.run_until_parked();
+
+    // The settings window has no Quit handler, so the action ends up here.
+    app.update(crate::request_quit_anywhere);
+    assert!(cx.has_pending_prompt());
+    chat.read_with(cx, |chat, _| assert!(chat.quit_prompt_open));
+    app.update(crate::request_quit_anywhere);
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(!cx.has_pending_prompt(), "asked once");
+}
