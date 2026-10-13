@@ -14,6 +14,15 @@ if [ "${1:-}" = --test-build ]; then
     bundle="target/CayenChat Test.app"
     name='CayenChat Test'
     identifier=dev.cayenchat.test
+# --demo: an optimized bundle named "CayenChat" for store screenshots (see the
+# `demo` feature and scripts/screenshots/demo.py), apart from the others.
+elif [ "${1:-}" = --demo ]; then
+    cargo build --locked --release -p cayenchat-ui --features demo
+    binary=target/release/cayenchat
+    mkdir -p target/demo
+    bundle=target/demo/CayenChat.app
+    name=CayenChat
+    identifier=dev.cayenchat.demo
 else
     cargo build --locked -p cayenchat-ui
     binary=target/debug/cayenchat

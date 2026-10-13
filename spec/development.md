@@ -1105,6 +1105,80 @@ back through the clipboard and keeping all of it across `restart-app` were
 all seen in screenshots. The run also found that the app panicked on
 startup without servers, fixed separately.
 
+### Store screenshots
+
+Screenshots for the Mac App Store, the Microsoft Store and the README show a
+scripted conversation instead of real channels, so no one else's nickname,
+words or avatar appear and the same picture can be taken again after the look
+changes. `scripts/screenshots/demo.py` (Python standard library only) is a
+small IRC server on 127.0.0.1 that registers the client, offers `server-time`
+and `draft/metadata-2`, answers JOINs with topics, members and avatars, and
+then plays fixed lines in three channels and one private message, with
+today's local times from 20:30. The shown channel has an image preview, a
+mention of our nickname, a compacted long link and avatars (a few
+users keep the app's default one); the others are left unread, one of them
+with a mention. The avatars and the photo are drawn by the script, so nothing
+with a license of its own is involved. There is an English and a Japanese
+script (`--language`).
+
+The app is a `demo` build (`cargo build --release --locked -p cayenchat-ui
+--features demo`): the settings directory of `test-build`
+(`CAYENCHAT_TEST_DIR`) and the local images of `preview-fixture`, without
+"[test build]" in the window title. It never reaches the network, the user's
+settings or the system credential store. Never ship a `demo` build.
+
+`demo.py run --app BINARY [--language japanese] [--theme dark] [--size
+1280x800]` writes the settings, the window size (`window.json`) and the
+images under `target/tmp/screenshots-<language>-<theme>/`, starts the server
+and the app and says when the conversation has been played; take the
+screenshots then, and press Enter to quit. Store sizes (check each store's
+current requirements before submitting):
+
+- **Mac App Store**: 16:10, 1280×800, 1440×900, 2560×1600 or 2880×1800.
+  Build the bundle with `scripts/bundle-macos.sh --demo` and run
+  `demo.py run --app target/demo/CayenChat.app/Contents/MacOS/cayenchat`, so
+  the menu bar says "CayenChat". Either capture the whole screen at 1440×900
+  (a Retina display gives 2880×1800), or capture only the window without its
+  shadow: `swift scripts/screenshots/window_id.swift PID` prints the window
+  IDs of the app's process (PID is printed by `demo.py`; largest window first,
+  no Screen Recording permission needed), then
+  `screencapture -o -l ID shot.png` (Terminal needs Screen Recording
+  permission for this). `screencapture -o -w shot.png` instead lets you click
+  the window. Put a window capture on a 16:10 background.
+- **Microsoft Store**: at least 1366×768, 16:9 recommended. Run `demo.py run
+  --app target\release\cayenchat.exe --size 1600x900` at 100 % display scale
+  (or `--size 1280x720` at 150 %) and capture the window (Win+Shift+S, window
+  mode), or the whole screen at 1920×1080.
+
+Take both themes and both languages. Captions or backgrounds are added
+afterwards in an image editor; they are not part of this procedure.
+
+The README screenshot is taken under Xvfb (Linux): the window frame and
+fonts differ from macOS and Windows, so it is not used for the stores.
+
+```sh
+cargo build --release --locked -p cayenchat-ui --features demo
+python3 scripts/screenshots/demo.py serve --port 36690 --images target/tmp/readme-shot/images &
+python3 scripts/screenshots/demo.py settings --port 36690 > target/tmp/readme-shot/settings.json
+CAYENCHAT_GUI_SESSION=target/tmp/readme-shot/gui python3 scripts/e2e/gui_session.py start \
+  --app target/release/cayenchat --settings target/tmp/readme-shot/settings.json \
+  --screen 1280x800 --window-size 1280x800 \
+  --env CAYENCHAT_PREVIEW_FIXTURE_DIR="$PWD/target/tmp/readme-shot/images"
+CAYENCHAT_GUI_SESSION=target/tmp/readme-shot/gui python3 scripts/e2e/gui_session.py move 1279 799 --still 2
+```
+
+Without `CAYENCHAT_PREVIEW_FIXTURE_DIR` the image previews and avatars do not
+load. The picture should show the avatars, the photo preview and the unread
+`#random` and `erin` entries. `python3 -m unittest discover -s
+scripts/screenshots -p 'test_*.py'` checks the generated settings.
+
+The last command moves the pointer off the menu bar before the picture is
+taken. Copy the printed PNG to `assets/screenshots/` (`cayenchat-en.png`, and
+`cayenchat-ja.png` from a second run with `--language japanese` for both
+commands), then `stop` the session and the server. Add `--env
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json` when the screen stays
+black.
+
 ### IRC metadata interoperability (Ergo)
 
 Independent server: Ergo v2.19.1 (tag commit
