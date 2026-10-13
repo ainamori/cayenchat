@@ -878,6 +878,10 @@ pub struct Settings {
     /// Reopen the main window where it was left, with its pane sizes (see
     /// [`layout`]). On by default, also for files saved before it existed.
     pub restore_window_layout: bool,
+    /// Shorten long Amazon product links to `/dp/<ASIN>` in the text a send
+    /// puts on the wire; the draft keeps what was typed. On by default, also
+    /// for files saved before it existed.
+    pub shorten_amazon_urls: bool,
     pub credential_backend: CredentialBackendKind,
     pub image_upload: ImageUpload,
     /// Navigation shortcuts the user changed: action id → the key as GPUI
@@ -922,6 +926,7 @@ impl Default for Settings {
             text_key_theme: TextKeyTheme::Auto,
             appearance: Appearance::default(),
             restore_window_layout: true,
+            shorten_amazon_urls: true,
             credential_backend: CredentialBackendKind::System,
             image_upload: ImageUpload::default(),
             keybindings: BTreeMap::new(),
@@ -2862,6 +2867,18 @@ mod tests {
         settings.restore_window_layout = false;
         save_to(&path, &settings).unwrap();
         assert!(!load_from(&path).unwrap().unwrap().restore_window_layout);
+    }
+
+    #[test]
+    fn amazon_url_shortening_is_on_unless_switched_off() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        fs::write(&path, r#"{"version":15,"selected_server":"","servers":[]}"#).unwrap();
+        let mut settings = load_from(&path).unwrap().unwrap();
+        assert!(settings.shorten_amazon_urls, "absent reads as on");
+        settings.shorten_amazon_urls = false;
+        save_to(&path, &settings).unwrap();
+        assert!(!load_from(&path).unwrap().unwrap().shorten_amazon_urls);
     }
 
     #[test]
