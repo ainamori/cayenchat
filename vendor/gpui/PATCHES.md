@@ -148,3 +148,10 @@ sends a private message to the platform window, which runs the quit callback
 `run` skips it afterwards. Upstream ignored both messages, so sign-out,
 shutdown and restart killed the process without running any quit handler.
 CayenChat uses this to send IRC QUIT (issue #284).
+
+In `src/platform/windows/window.rs`, `activate` does not send the simulated
+Alt press when a window of this process is already the foreground window
+(`GetForegroundWindow` + `GetWindowThreadProcessId`): `SetForegroundWindow`
+succeeds then, and the Alt would only reach our own window and focus its menu
+bar. CayenChat activates the chat window and then the initial settings window
+at startup (issue #354).

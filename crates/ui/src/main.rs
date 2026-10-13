@@ -6740,22 +6740,27 @@ fn main() {
         // GPUI's `activate` does nothing on Windows, so a window opened by
         // hand can land behind others (#259). `activate_window` is queued and
         // runs after this callback, so it goes last and to the topmost window;
-        // a login launch stays out of the user's way.
+        // a login launch stays out of the user's way. The chat window is
+        // fronted even when settings open on top of it (#354), or it would
+        // stay behind other apps.
         #[cfg(target_os = "windows")]
-        match autostart::startup_front(autostart::launched_by_registration(), settings_opened) {
-            Some(autostart::StartupFront::Settings) => {
-                let settings = chat_window
-                    .update(cx, |chat, _, _| chat.settings_window)
-                    .ok()
-                    .flatten();
-                if let Some(settings) = settings {
-                    let _ = settings.update(cx, |_, window, _| window.activate_window());
+        for front in
+            autostart::startup_front(autostart::launched_by_registration(), settings_opened)
+        {
+            match front {
+                autostart::StartupFront::Settings => {
+                    let settings = chat_window
+                        .update(cx, |chat, _, _| chat.settings_window)
+                        .ok()
+                        .flatten();
+                    if let Some(settings) = settings {
+                        let _ = settings.update(cx, |_, window, _| window.activate_window());
+                    }
+                }
+                autostart::StartupFront::Chat => {
+                    let _ = chat_window.update(cx, |_, window, _| window.activate_window());
                 }
             }
-            Some(autostart::StartupFront::Chat) => {
-                let _ = chat_window.update(cx, |_, window, _| window.activate_window());
-            }
-            None => {}
         }
         #[cfg(not(target_os = "windows"))]
         let _ = settings_opened;
