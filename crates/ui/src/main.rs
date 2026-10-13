@@ -6705,15 +6705,21 @@ fn main() {
         apply_shortcuts(ShortcutPrefs::from(&saved), cx);
         cx.set_menus(app_menus(false, &Localizer::new(Language::System)));
         cx.on_action(|_: &Quit, cx| cx.quit());
+        // Global actions run inside the active window's update, so updating
+        // that window again here fails; do it once the dispatch has finished.
         cx.on_action(|_: &MinimizeWindow, cx| {
-            if let Some(window) = cx.active_window() {
-                let _ = window.update(cx, |_, window, _| window.minimize_window());
-            }
+            cx.defer(|cx| {
+                if let Some(window) = cx.active_window() {
+                    let _ = window.update(cx, |_, window, _| window.minimize_window());
+                }
+            });
         });
         cx.on_action(|_: &ZoomWindow, cx| {
-            if let Some(window) = cx.active_window() {
-                let _ = window.update(cx, |_, window, _| window.zoom_window());
-            }
+            cx.defer(|cx| {
+                if let Some(window) = cx.active_window() {
+                    let _ = window.update(cx, |_, window, _| window.zoom_window());
+                }
+            });
         });
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
