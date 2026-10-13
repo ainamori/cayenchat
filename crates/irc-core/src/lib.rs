@@ -616,8 +616,14 @@ pub enum Event {
     OutgoingAccepted {
         local_id: Option<u64>,
         channel: String,
+        /// What the conversation shows (`* waves` for an ACTION, a redaction
+        /// for credentials sent to services).
         text: String,
         notice: bool,
+        /// The action's own text when this is a CTCP ACTION (`/me`), for
+        /// the conversation log; `text` is not to be parsed for it. `None`
+        /// for a message and for credentials sent to services.
+        action: Option<String>,
     },
     /// The server rejected the registration nickname (432/433). The link
     /// stays open until the UI supplies another one with
@@ -2320,7 +2326,10 @@ impl Worker {
         // With echo-message the local line is confirmed by
         // the server's echo; a label (labeled-response)
         // names it exactly.
-        let shown = echo_text(&target, display_text);
+        let shown = echo_text(&target, display_text.clone());
+        let action = (shown == display_text)
+            .then(|| text::action_text(&text).map(str::to_owned))
+            .flatten();
         self.next_local_id += 1;
         let local_id = self.next_local_id;
         let label = if self.registered && self.negotiation.enabled(cap::ECHO_MESSAGE) {
@@ -2355,6 +2364,7 @@ impl Worker {
                     channel: target,
                     text: shown,
                     notice,
+                    action,
                 }
             }
             Err(error) => {

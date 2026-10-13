@@ -67,6 +67,7 @@ use cayenchat_storage::{
     Ircv3Preferences, Language, Notifications, Secret, SecretKey, ServerProfile, Settings,
     TextKeyTheme, ThemeMode,
 };
+use futures_util::StreamExt;
 use gpui::{prelude::*, *};
 use input::TextInput;
 use ircv3_settings::own_avatar_failure;
@@ -927,6 +928,13 @@ impl ChatWindow {
             inputs.insert(key, cx.new(|cx| TextInput::new_live(&placeholder, cx)));
         }
         window.focus(&inputs[&state.selection()].focus_handle(cx));
+        // The conversation log thread wakes the window when it fails or finds
+        // its directory locked, so the user hears of it without waiting for
+        // an IRC event.
+        let (log_wake, log_woken) = futures_channel::mpsc::channel::<()>(1);
+        let log_notify: cayenchat_storage::chatlog::Notify = Arc::new(move || {
+            let _ = log_wake.clone().try_send(());
+        });
         let mut this = Self {
             state,
             main_lists: HashMap::new(),
@@ -966,7 +974,10 @@ impl ChatWindow {
             whois_windows: HashMap::new(),
             whois_replies: Vec::new(),
             debug_enabled: false,
-            conversation_logs: conversation_log::ConversationLogs::new(&saved.conversation_log),
+            conversation_logs: conversation_log::ConversationLogs::new(
+                &saved.conversation_log,
+                log_notify,
+            ),
             menu_bar: {
                 let mut bar = menu_bar::MenuBar::new(window, cx, |this| &mut this.menu_bar);
                 bar.set_always(!saved.menu_bar_auto_hide);
@@ -1002,6 +1013,19 @@ impl ChatWindow {
             pane_renders: 0,
         };
         this.update_title(window);
+        cx.spawn(async move |this, cx| {
+            let mut woken = log_woken;
+            while woken.next().await.is_some() {
+                let alive = this.update(cx, |this, cx| {
+                    this.announce_conversation_log();
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         let keys: Vec<Selection> = this.inputs.keys().copied().collect();
         for key in keys {
             this.watch_input(key, cx);
@@ -1045,7 +1069,9 @@ impl ChatWindow {
         cx.on_app_quit(|this, _| {
             this.save_layout_now();
             this.quit_connections();
-            this.conversation_logs.stop();
+            // What is queued is written before the process ends, if the disk
+            // lets it.
+            this.conversation_logs.finish(Duration::from_secs(2));
             async {}
         })
         .detach();
@@ -3634,6 +3660,7 @@ impl ChatWindow {
                 channel,
                 text,
                 notice,
+                action,
             } => {
                 let before = self.state.latest_sequence();
                 if valid_channel(&channel) {
@@ -3668,8 +3695,15 @@ impl ChatWindow {
                         Scope::Private
                     };
                     let own = self.own_nickname(network).unwrap_or("me");
-                    let record =
-                        self.message_record(network, scope, &channel, own, &text, notice, None);
+                    let record = self.own_message_record(
+                        network,
+                        scope,
+                        &channel,
+                        own,
+                        &text,
+                        notice,
+                        action.as_deref(),
+                    );
                     match (local_id, record) {
                         (Some(local_id), Some(record)) => {
                             self.hold_own_message(network, local_id, record)
@@ -3704,7 +3738,7 @@ impl ChatWindow {
                 msgid,
                 server_time,
             } => {
-                self.release_own_message(network, local_id, server_time);
+                self.release_own_message(network, local_id, text.as_deref(), server_time);
                 let pending = self
                     .sessions
                     .get_mut(&network)

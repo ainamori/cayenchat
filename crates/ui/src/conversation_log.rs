@@ -5,7 +5,12 @@
 //! Only what is sent and received now is logged. Replayed history, the
 //! server log, failed sends and CTCP other than ACTION never are.
 
-use std::{collections::HashMap, path::PathBuf, time::SystemTime};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use cayenchat_irc_core::{
     ChannelActivityKind,
@@ -14,7 +19,7 @@ use cayenchat_irc_core::{
 use cayenchat_model::NetworkId;
 use cayenchat_storage::{
     ConversationLog,
-    chatlog::{ChatLogger, Kind, Record, Scope, Status},
+    chatlog::{ChatLogger, Kind, Notify, Record, Retired, Scope, Status},
 };
 use gpui::{prelude::*, *};
 
@@ -34,6 +39,11 @@ pub struct ConversationLogs {
     options: ConversationLog,
     directory: Option<PathBuf>,
     logger: Option<ChatLogger>,
+    /// The logger that was stopped last, possibly still writing; the next
+    /// one waits for it before it takes the directory.
+    retired: Option<Retired>,
+    /// Wakes the window when a logger fails or is locked out.
+    notify: Notify,
     /// Own messages whose echo has not arrived (`echo-message`): they are
     /// logged once the server confirms them, not when it refuses them.
     pending: HashMap<(NetworkId, u64), Record>,
@@ -41,11 +51,13 @@ pub struct ConversationLogs {
 }
 
 impl ConversationLogs {
-    pub fn new(options: &ConversationLog) -> Self {
+    pub fn new(options: &ConversationLog, notify: Notify) -> Self {
         let mut logs = Self {
             options: ConversationLog::default(),
             directory: None,
             logger: None,
+            retired: None,
+            notify,
             pending: HashMap::new(),
             announced_lock: false,
         };
@@ -54,7 +66,8 @@ impl ConversationLogs {
     }
 
     /// Follows changed settings: starts, stops or moves the logger. Turning
-    /// a log off stops the writing at once; files stay.
+    /// a log off stops the writing at once; files stay. Nothing here waits
+    /// for the disk.
     pub fn apply(&mut self, options: &ConversationLog) {
         let directory = options.resolved_directory();
         let wanted = options.enabled() && directory.is_some();
@@ -62,18 +75,42 @@ impl ConversationLogs {
             self.stop();
         }
         if wanted && self.logger.is_none() {
-            self.logger = directory.clone().map(ChatLogger::start);
+            self.logger = directory.clone().map(|directory| {
+                ChatLogger::start_after(
+                    directory,
+                    self.retired.take(),
+                    Some(Arc::clone(&self.notify)),
+                )
+            });
             self.directory = directory;
             self.announced_lock = false;
         }
         self.options = options.clone();
+        // A message held for a kind of log that is now off is never written.
+        let options = &self.options;
+        self.pending.retain(|_, record| match record.scope {
+            Scope::Channel => options.channels,
+            Scope::Private => options.private,
+        });
     }
 
-    /// Writes what is queued and ends the writer thread.
+    /// Ends the writer thread, which writes what is queued first, without
+    /// waiting for it.
     pub fn stop(&mut self) {
-        self.logger = None;
+        if let Some(logger) = self.logger.take() {
+            self.retired = Some(logger.retire());
+        }
         self.directory = None;
         self.pending.clear();
+    }
+
+    /// Stops and waits (at most `timeout`) for what is queued to be written:
+    /// for the way out of the application.
+    pub fn finish(&mut self, timeout: Duration) {
+        self.stop();
+        if let Some(retired) = &self.retired {
+            retired.wait(timeout);
+        }
     }
 
     fn wants(&self, scope: Scope) -> bool {
@@ -185,8 +222,12 @@ impl ChatWindow {
         })
     }
 
+    /// Writes `record` if its kind of log is on now, whenever it was made.
     fn write_log(&self, record: Option<Record>) {
-        if let (Some(record), Some(logger)) = (record, &self.conversation_logs.logger) {
+        if let Some(record) = record
+            && self.conversation_logs.wants(record.scope)
+            && let Some(logger) = &self.conversation_logs.logger
+        {
             logger.log(record);
         }
     }
@@ -264,6 +305,28 @@ impl ChatWindow {
         self.log_record(network, scope, conversation, kind, sender, body, time)
     }
 
+    /// The record for a message we sent. `text` is what the conversation
+    /// shows; `action` is the text of a CTCP ACTION, which `text` only shows
+    /// as `* …`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn own_message_record(
+        &self,
+        network: NetworkId,
+        scope: Scope,
+        conversation: &str,
+        own: &str,
+        text: &str,
+        notice: bool,
+        action: Option<&str>,
+    ) -> Option<Record> {
+        let (kind, body) = match action {
+            Some(action) => (Kind::Action, action),
+            None if notice => (Kind::Notice, text),
+            None => (Kind::Msg, text),
+        };
+        self.log_record(network, scope, conversation, kind, own, body, None)
+    }
+
     /// A message received (or relayed) just now.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn log_message(
@@ -294,11 +357,18 @@ impl ChatWindow {
         &mut self,
         network: NetworkId,
         local_id: u64,
+        text: Option<&str>,
         server_time: Option<SystemTime>,
     ) {
         if let Some(mut record) = self.conversation_logs.pending.remove(&(network, local_id)) {
             if let Some(time) = server_time {
                 record.time = time;
+            }
+            // The server changed the text; an ACTION keeps its own.
+            if let Some(text) = text
+                && record.kind != Kind::Action
+            {
+                record.body = strip_formatting(text);
             }
             self.write_log(Some(record));
         }
@@ -350,15 +420,25 @@ impl SettingsWindow {
             return;
         };
         // The folder is made on demand so that there is something to open.
-        if let Err(error) = std::fs::create_dir_all(&directory) {
-            self.feedback = Some(
-                self.i18n
-                    .format("conversation_log_failed", &[("error", &error.to_string())]),
-            );
-            cx.notify();
-            return;
-        }
-        cx.reveal_path(&directory);
+        // The disk (a network share, say) may be slow, so not on this thread.
+        let creating = cx.background_spawn({
+            let directory = directory.clone();
+            async move { std::fs::create_dir_all(&directory) }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = creating.await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(()) => cx.reveal_path(&directory),
+                Err(error) => {
+                    this.feedback = Some(
+                        this.i18n
+                            .format("conversation_log_failed", &[("error", &error.to_string())]),
+                    );
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn log_toggle(
@@ -397,6 +477,7 @@ impl SettingsWindow {
             .read(cx)
             .ok()
             .and_then(|chat| chat.conversation_logs.status());
+        self.log_status_shown = status.clone();
         let status = status.and_then(|status| {
             if let Some(error) = status.failure {
                 Some(
