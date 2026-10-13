@@ -12,6 +12,8 @@ Rust と GPUI で作った、macOS・Windows・Linux 向けのコンパクトな
 
 チャット履歴は保存しません。
 
+![Linux 版の CayenChat：アバターと画像プレビューのあるチャンネルのログ、メンバー一覧、チャンネル一覧](assets/screenshots/cayenchat-ja.png)
+
 ## ビルドと起動
 
 Rust 1.88 以降が必要です。
