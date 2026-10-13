@@ -2,7 +2,7 @@
 use super::{ChatWindow, LogMenuChoice, LogPosition, LogSelection, Worker};
 use cayenchat_irc_core::Event;
 use cayenchat_model::NetworkId;
-use gpui::{ClipboardItem, TestAppContext, point, px};
+use gpui::{ClipboardItem, EntityInputHandler, Focusable, TestAppContext, point, px};
 
 fn open_chat(cx: &mut TestAppContext) -> (gpui::Entity<ChatWindow>, &mut gpui::VisualTestContext) {
     cx.update(|cx| {
@@ -154,5 +154,76 @@ fn mode_and_topic_open_prompts_without_sending(cx: &mut TestAppContext) {
             chat.member_prompt.as_ref().unwrap().input.read(cx).text(),
             "me"
         );
+    });
+}
+
+#[gpui::test]
+fn escape_closes_the_menu_while_the_message_input_has_focus(cx: &mut TestAppContext) {
+    let (chat, cx) = open_chat(cx);
+    chat.update_in(cx, |chat, window, cx| {
+        let input = chat.inputs[&chat.state.selection()].clone();
+        window.focus(&input.focus_handle(cx));
+        input.update(cx, |input, cx| input.set_text("draft", cx));
+        chat.open_log_menu(point(px(10.), px(10.)), Some("bob"), window, cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    chat.read_with(cx, |chat, cx| {
+        assert!(chat.log_menu.is_none());
+        assert_eq!(
+            chat.inputs[&chat.state.selection()].read(cx).text(),
+            "draft"
+        );
+    });
+}
+
+#[gpui::test]
+fn pasting_waits_for_a_finished_composition(cx: &mut TestAppContext) {
+    let (chat, cx) = open_chat(cx);
+    chat.update_in(cx, |chat, window, cx| {
+        let input = chat.inputs[&chat.state.selection()].clone();
+        window.focus(&input.focus_handle(cx));
+        cx.write_to_clipboard(ClipboardItem::new_string("pasted".into()));
+        input.update(cx, |input, cx| {
+            input.replace_and_mark_text_in_range(None, "かな", None, window, cx)
+        });
+        assert!(input.read(cx).is_composing());
+        let at = point(px(10.), px(10.));
+        chat.open_log_menu(at, None, window, cx);
+        assert!(!chat.log_menu.as_ref().unwrap().can_paste);
+        // A composition started after the menu opened is protected as well.
+        input.update(cx, |input, cx| input.unmark_text(window, cx));
+        chat.open_log_menu(at, None, window, cx);
+        assert!(chat.log_menu.as_ref().unwrap().can_paste);
+        input.update(cx, |input, cx| {
+            input.replace_and_mark_text_in_range(None, "かな", None, window, cx)
+        });
+        chat.log_menu_choice(LogMenuChoice::Paste, window, cx);
+        let input = input.read(cx);
+        assert!(input.is_composing());
+        assert_eq!(input.text(), "かなかな");
+    });
+}
+
+#[gpui::test]
+fn pasting_replaces_the_selection_and_needs_text(cx: &mut TestAppContext) {
+    let (chat, cx) = open_chat(cx);
+    chat.update_in(cx, |chat, window, cx| {
+        let input = chat.inputs[&chat.state.selection()].clone();
+        input.update(cx, |input, cx| {
+            input.set_text("keep SEL end", cx);
+            input.select_everything(cx);
+        });
+        let at = point(px(10.), px(10.));
+        cx.write_to_clipboard(ClipboardItem::new_string("new".into()));
+        chat.open_log_menu(at, None, window, cx);
+        assert!(chat.log_menu.as_ref().unwrap().can_paste);
+        chat.log_menu_choice(LogMenuChoice::Paste, window, cx);
+        assert_eq!(input.read(cx).text(), "new");
+        cx.write_to_clipboard(ClipboardItem::new_image(&gpui::Image::empty()));
+        chat.open_log_menu(at, None, window, cx);
+        assert!(!chat.log_menu.as_ref().unwrap().can_paste);
+        chat.log_menu_choice(LogMenuChoice::Paste, window, cx);
+        assert_eq!(input.read(cx).text(), "new");
     });
 }

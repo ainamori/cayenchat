@@ -2186,11 +2186,20 @@ impl ChatWindow {
             channel,
             private,
             sender,
-            can_paste: cx
-                .read_from_clipboard()
-                .is_some_and(|item| item.text().is_some()),
+            can_paste: self.can_paste_into_input(cx),
         });
         cx.notify();
+    }
+
+    /// Whether the clipboard has text and the selected conversation's input
+    /// is not composing (a paste would replace the composition).
+    fn can_paste_into_input(&self, cx: &App) -> bool {
+        cx.read_from_clipboard()
+            .is_some_and(|item| item.text().is_some())
+            && self
+                .inputs
+                .get(&self.state.selection())
+                .is_some_and(|input| !input.read(cx).is_composing())
     }
 
     fn log_menu_choice(
@@ -2209,6 +2218,7 @@ impl ChatWindow {
         }
         match choice {
             LogMenuChoice::Copy => self.copy_selected_log(cx),
+            LogMenuChoice::Paste if !self.can_paste_into_input(cx) => cx.notify(),
             LogMenuChoice::Paste => {
                 if let Some(input) = self.inputs.get(&self.state.selection()).cloned() {
                     window.focus(&input.focus_handle(cx));
@@ -4897,11 +4907,6 @@ impl ChatWindow {
                     cx.stop_propagation();
                 }),
             )
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" && this.log_menu.take().is_some() {
-                    cx.notify();
-                }
-            }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| this.finish_log_selection()),
@@ -5624,6 +5629,14 @@ impl ChatWindow {
                     }
                 }),
             )
+            // Whatever has the focus (the message input, the log, the
+            // member list), Escape closes the log menu first.
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && this.log_menu.take().is_some() {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .size_full()
             .flex()
             .text_size(px(13.))

@@ -506,16 +506,20 @@ The log of a channel or private conversation has its own context menu (issue
 #358), opened by a right click on a message row or on blank log space; the
 click never touches the text selection. Groups: Copy (enabled with a non-empty
 selection; reuses `copy_selected_log`) and Paste into message box (enabled
-when the clipboard has text; focuses that conversation's draft and pastes
+when the clipboard has text and the draft is not composing, rechecked on
+use; focuses that conversation's draft and pastes
 through the draft's Paste, so nothing is sent); Change channel modes… and
 Change channel topic… (channels only, enabled while registered, each asking
 in the member prompt, which sends `/mode <channel> <text>` or
 `/topic <channel> :<text>` only on submit; the topic prompt starts from the
-current topic; the typed text is never echoed, as a mode may carry a key);
+current topic; the typed text is never echoed, as a mode may carry a key,
+and a channel key in `MODE` (sent or received), a `324` reply and the mode
+activity line is shown as `[redacted]`, also in the wire transcript);
 Change my nickname… (the Nick prompt); and, on a message row whose sender is
 a valid nickname other than ours, Open private conversation with <sender>
 (`private_conversation` with `Missing::Create`, then select; nothing is
-sent). Activity rows and blank space offer no sender entry. Escape or a click
+sent). Activity rows and blank space offer no sender entry. Escape (handled
+at the window, whichever pane has focus) or a click
 outside closes it, and it is closed by any other menu, a prompt or a change of
 selection.
 The core merges WHOIS numerics (311–319, 330, 301 while pending, and other
