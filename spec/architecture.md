@@ -1752,6 +1752,21 @@ The app's saved theme mode remains authoritative. OS reads happen outside
 rendering; non-macOS readers run in the background, with the existing palette
 available during loading or after errors.
 
+## Conversation logs (D044)
+
+`storage::chatlog` knows nothing of IRC: it takes `Record`s (network, scope,
+folded conversation, kind, nick, text without formatting) and appends them to
+the day's file on a thread of its own. `ui::conversation_log` decides what
+becomes a record: the live arms of `ChatWindow::handle_event` (channel and
+private messages, channel activity, topic changes, a peer's quit or nick
+change, and our own sends after `OutgoingAccepted`, held until
+`OutgoingConfirmed` when the connection echoes). `ChatWindow` owns the
+`ConversationLogs` (settings applied from `apply_to_chat_window`), is woken by
+the logger's `Notify` callback (a channel read by a task of the window) to
+announce a failure or a lock, and retires the logger without waiting when a
+log is turned off; only quitting waits, for at most 2 seconds.
+`Event::Topic` carries who changed the topic and the server time for it.
+
 ## Server-confirmed sending (D036)
 
 `irc-core::echo::Echoes` (worker) tracks each sent message until its echo,

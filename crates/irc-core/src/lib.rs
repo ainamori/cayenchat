@@ -548,6 +548,10 @@ pub enum Event {
     Topic {
         channel: String,
         topic: String,
+        /// Who changed it, for a `TOPIC` command; `None` for the topic a
+        /// server states on joining.
+        changed_by: Option<String>,
+        server_time: Option<SystemTime>,
     },
     /// A PRIVMSG or NOTICE a user sent to our nickname. Server notices stay
     /// [`Event::ServerLine`]; CTCP other than ACTION is handled by `ctcp`.
@@ -612,8 +616,14 @@ pub enum Event {
     OutgoingAccepted {
         local_id: Option<u64>,
         channel: String,
+        /// What the conversation shows (`* waves` for an ACTION, a redaction
+        /// for credentials sent to services).
         text: String,
         notice: bool,
+        /// The action's own text when this is a CTCP ACTION (`/me`), for
+        /// the conversation log; `text` is not to be parsed for it. `None`
+        /// for a message and for credentials sent to services.
+        action: Option<String>,
     },
     /// The server rejected the registration nickname (432/433). The link
     /// stays open until the UI supplies another one with
@@ -707,6 +717,8 @@ pub enum Event {
     OutgoingConfirmed {
         local_id: u64,
         text: Option<String>,
+        /// The final text of a CTCP ACTION, which `text` never replaces.
+        action: Option<String>,
         msgid: Option<String>,
         server_time: Option<SystemTime>,
     },
@@ -2316,7 +2328,10 @@ impl Worker {
         // With echo-message the local line is confirmed by
         // the server's echo; a label (labeled-response)
         // names it exactly.
-        let shown = echo_text(&target, display_text);
+        let shown = echo_text(&target, display_text.clone());
+        let action = (shown == display_text)
+            .then(|| text::action_text(&text).map(str::to_owned))
+            .flatten();
         self.next_local_id += 1;
         let local_id = self.next_local_id;
         let label = if self.registered && self.negotiation.enabled(cap::ECHO_MESSAGE) {
@@ -2351,6 +2366,7 @@ impl Worker {
                     channel: target,
                     text: shown,
                     notice,
+                    action,
                 }
             }
             Err(error) => {
@@ -3282,7 +3298,7 @@ impl WhoisCollector {
 }
 
 /// The channel topic a server line states or changes, if it is one.
-fn topic_event(message: &IrcMessage) -> Option<Event> {
+fn topic_event(message: &IrcMessage, server_time: Option<SystemTime>) -> Option<Event> {
     let (channel, topic) = match &message.command {
         IrcCommand::Response(Response::RPL_TOPIC, args) => {
             (args.get(1)?, args.get(2).cloned().unwrap_or_default())
@@ -3291,9 +3307,15 @@ fn topic_event(message: &IrcMessage) -> Option<Event> {
         IrcCommand::TOPIC(channel, topic) => (channel, topic.clone().unwrap_or_default()),
         _ => return None,
     };
+    let changed_by = match &message.command {
+        IrcCommand::TOPIC(..) => message.source_nickname().map(str::to_owned),
+        _ => None,
+    };
     valid_channel(channel).then(|| Event::Topic {
         channel: channel.clone(),
         topic,
+        changed_by,
+        server_time,
     })
 }
 
@@ -3611,7 +3633,9 @@ fn translate_message(
             vec![names_snapshot(client, roster, channel)]
         }
         _ => {
-            let mut events = topic_event(&message).into_iter().collect::<Vec<_>>();
+            let mut events = topic_event(&message, server_time)
+                .into_iter()
+                .collect::<Vec<_>>();
             events.push(Event::ServerLine(tags::untagged_line(&message)));
             events
         }

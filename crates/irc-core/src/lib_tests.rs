@@ -9,26 +9,31 @@ use std::{
 
 #[test]
 fn topic_lines_become_topic_events() {
-    let topic = |line: &str| topic_event(&line.parse::<IrcMessage>().unwrap());
-    let event = |channel: &str, text: &str| {
+    let topic = |line: &str| topic_event(&line.parse::<IrcMessage>().unwrap(), None);
+    let event = |channel: &str, text: &str, changed_by: Option<&str>| {
         Some(Event::Topic {
             channel: channel.into(),
             topic: text.into(),
+            changed_by: changed_by.map(str::to_owned),
+            server_time: None,
         })
     };
     assert_eq!(
         topic(":irc.example 332 me #test :Welcome, all"),
-        event("#test", "Welcome, all")
+        event("#test", "Welcome, all", None)
     );
     assert_eq!(
         topic(":irc.example 331 me #test :No topic is set"),
-        event("#test", "")
+        event("#test", "", None)
     );
     assert_eq!(
         topic(":alice!u@h TOPIC #test :New topic"),
-        event("#test", "New topic")
+        event("#test", "New topic", Some("alice"))
     );
-    assert_eq!(topic(":alice!u@h TOPIC #test :"), event("#test", ""));
+    assert_eq!(
+        topic(":alice!u@h TOPIC #test :"),
+        event("#test", "", Some("alice"))
+    );
     assert_eq!(topic(":alice!u@h PRIVMSG #test :hi"), None);
 }
 
@@ -2376,6 +2381,7 @@ fn labeled_messages_are_confirmed_by_their_echo_batch_and_errors() {
                 text,
                 msgid,
                 server_time,
+                ..
             }) => {
                 assert!(server_time.is_some());
                 settled.push(format!("{local_id} ok {text:?} {msgid:?}"));
