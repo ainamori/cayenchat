@@ -227,3 +227,37 @@ fn pasting_replaces_the_selection_and_needs_text(cx: &mut TestAppContext) {
         assert_eq!(input.read(cx).text(), "new");
     });
 }
+
+#[gpui::test]
+fn clicking_the_edit_prompt_does_not_reach_the_message_input(cx: &mut TestAppContext) {
+    let (chat, cx) = open_chat(cx);
+    cx.simulate_resize(gpui::size(px(1000.), px(700.)));
+    let viewport = cx.update(|window, _| window.viewport_size());
+    chat.update_in(cx, |chat, window, cx| {
+        // Over the message input at the bottom of the window.
+        chat.state.set_topic(NetworkId(1), "#a", "old topic");
+        chat.open_log_menu(
+            point(px(500.), viewport.height - px(140.)),
+            None,
+            window,
+            cx,
+        );
+        chat.log_menu_choice(LogMenuChoice::Topic, window, cx);
+    });
+    cx.run_until_parked();
+    let prompt = cx.debug_bounds("member-prompt").expect("prompt drawn");
+    // The empty part of the button row, on top of the message input.
+    let at = point(prompt.right() - px(12.), prompt.bottom() - px(14.));
+    cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+    cx.simulate_click(at, gpui::Modifiers::default());
+    cx.update(|window, cx| {
+        chat.read_with(cx, |chat, cx| {
+            let prompt = chat.member_prompt.as_ref().expect("prompt stays open");
+            assert!(prompt.input.focus_handle(cx).is_focused(window));
+            assert_eq!(prompt.input.read(cx).text(), "old topic");
+            let draft = &chat.inputs[&chat.state.selection()];
+            assert!(!draft.focus_handle(cx).is_focused(window));
+            assert!(draft.read(cx).text().is_empty());
+        });
+    });
+}

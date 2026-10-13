@@ -513,8 +513,11 @@ Change channel topic… (channels only, enabled while registered, each asking
 in the member prompt, which sends `/mode <channel> <text>` or
 `/topic <channel> :<text>` only on submit; the topic prompt starts from the
 current topic; the typed text is never echoed, as a mode may carry a key,
-and a channel key in `MODE` (sent or received), a `324` reply and the mode
-activity line is shown as `[redacted]`, also in the wire transcript);
+and when a `MODE` (sent or received), a `324` reply or the mode activity
+line sets or clears a key, every argument of it is shown as `[redacted]` in
+the server log, the activity line and the wire transcript, as the parser may
+pair the key with another mode such as `-l+k`; the prompt covers the
+background so clicks do not reach the message input);
 Change my nickname… (the Nick prompt); and, on a message row whose sender is
 a valid nickname other than ours, Open private conversation with <sender>
 (`private_conversation` with `Missing::Create`, then select; nothing is

@@ -5563,6 +5563,9 @@ impl ChatWindow {
             });
             div()
                 .id("member-prompt")
+                .debug_selector(|| "member-prompt".into())
+                // Clicks on the dialog must not reach the message input behind it.
+                .occlude()
                 .absolute()
                 .left(position.x - origin.x)
                 .top(position.y - origin.y)
