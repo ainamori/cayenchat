@@ -10,7 +10,7 @@
 //!
 //! Registered launches pass `--autostart`, so they can be told from a launch
 //! by hand. On Windows a launch by hand brings its window to the front
-//! (#259); a registered one does not take the foreground at login.
+//! (#259, #354); a registered one does not take the foreground at login.
 
 /// The argument given to a launch made by the login registration. macOS's
 /// login item has no arguments.
@@ -31,15 +31,15 @@ pub enum StartupFront {
     Settings,
 }
 
-/// Which window to take the foreground with after startup: the initial
-/// settings window when one was opened, else the chat window; none for a
-/// login launch.
+/// The windows to take the foreground with after startup, in the order to
+/// activate them (the last one ends up on top): the chat window, then the
+/// initial settings window when one was opened; none for a login launch.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub fn startup_front(by_registration: bool, settings_opened: bool) -> Option<StartupFront> {
+pub fn startup_front(by_registration: bool, settings_opened: bool) -> Vec<StartupFront> {
     match (by_registration, settings_opened) {
-        (true, _) => None,
-        (false, true) => Some(StartupFront::Settings),
-        (false, false) => Some(StartupFront::Chat),
+        (true, _) => Vec::new(),
+        (false, true) => vec![StartupFront::Chat, StartupFront::Settings],
+        (false, false) => vec![StartupFront::Chat],
     }
 }
 
@@ -49,14 +49,17 @@ mod startup_front_tests {
 
     #[test]
     fn manual_launch_fronts_settings_over_chat() {
-        assert_eq!(startup_front(false, false), Some(StartupFront::Chat));
-        assert_eq!(startup_front(false, true), Some(StartupFront::Settings));
+        assert_eq!(startup_front(false, false), vec![StartupFront::Chat]);
+        assert_eq!(
+            startup_front(false, true),
+            vec![StartupFront::Chat, StartupFront::Settings]
+        );
     }
 
     #[test]
     fn login_launch_fronts_nothing() {
-        assert_eq!(startup_front(true, false), None);
-        assert_eq!(startup_front(true, true), None);
+        assert!(startup_front(true, false).is_empty());
+        assert!(startup_front(true, true).is_empty());
     }
 }
 
