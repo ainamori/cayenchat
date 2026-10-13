@@ -1167,6 +1167,11 @@ CAYENCHAT_GUI_SESSION=target/tmp/readme-shot/gui python3 scripts/e2e/gui_session
 CAYENCHAT_GUI_SESSION=target/tmp/readme-shot/gui python3 scripts/e2e/gui_session.py move 1279 799 --still 2
 ```
 
+Without `CAYENCHAT_PREVIEW_FIXTURE_DIR` the image previews and avatars do not
+load. The picture should show the avatars, the photo preview and the unread
+`#random` and `erin` entries. `python3 -m unittest discover -s
+scripts/screenshots -p 'test_*.py'` checks the generated settings.
+
 The last command moves the pointer off the menu bar before the picture is
 taken. Copy the printed PNG to `assets/screenshots/` (`cayenchat-en.png`, and
 `cayenchat-ja.png` from a second run with `--language japanese` for both
