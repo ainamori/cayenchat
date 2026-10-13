@@ -866,6 +866,7 @@ impl ChatWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.set_global(input::ShortenPastedAmazon(saved.shorten_amazon_urls));
         let i18n = Localizer::new(saved.language);
         // Every configured server is a network in the tree, connected or not.
         let mut sessions = HashMap::new();

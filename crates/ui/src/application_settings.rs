@@ -107,6 +107,31 @@ impl SettingsWindow {
                         cx.notify();
                     })),
             )
+            .child(
+                div()
+                    .id("shorten-amazon-urls")
+                    .ml(px(158.))
+                    .flex()
+                    .gap_2()
+                    .cursor_pointer()
+                    .child(settings_theme::checkbox(
+                        self.settings.values.shorten_amazon_urls,
+                        true,
+                        cx,
+                    ))
+                    .child(self.i18n.text("shorten_amazon_urls"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let value = &mut this.settings.values.shorten_amazon_urls;
+                        *value = !*value;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .ml(px(158.))
+                    .text_color(theme.text_secondary)
+                    .child(self.i18n.text("shorten_amazon_urls_hint")),
+            )
             // macOS has its own menu bar that is always shown.
             .when(!cfg!(target_os = "macos"), |d| {
                 d.child(

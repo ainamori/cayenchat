@@ -47,6 +47,12 @@ actions!(
     ]
 );
 
+/// Whether pasting one long Amazon product link into a message draft inserts
+/// its short form (`shorten_amazon_urls`, #315).
+pub struct ShortenPastedAmazon(pub bool);
+
+impl gpui::Global for ShortenPastedAmazon {}
+
 #[derive(Clone)]
 struct EditSnapshot {
     content: SharedString,
@@ -81,6 +87,8 @@ pub struct TextInput {
     /// Draft inputs let an image-only paste bubble up to the chat window's
     /// attachment flow instead of ignoring it.
     attachments: bool,
+    /// A message draft, the only input that shortens pasted Amazon links.
+    draft: bool,
     native_settings_style: bool,
 }
 
@@ -447,7 +455,16 @@ impl TextInput {
             return;
         };
         if let Some(text) = item.text() {
+            let short = (self.draft && cx.try_global::<ShortenPastedAmazon>().is_some_and(|g| g.0))
+                .then(|| cayenchat_app::amazon::shorten_pasted(&text))
+                .flatten();
+            let start = self.selected_range.start;
             self.replace_text_in_range(None, &text.replace(['\r', '\n'], " "), window, cx);
+            if let Some(short) = short {
+                // A separate edit, so one undo gives back the long link.
+                self.selected_range = start..self.selected_range.end;
+                self.replace_text_in_range(None, &short, window, cx);
+            }
         } else if self.attachments && clipboard_image(&item).is_some() {
             cx.propagate();
         }
@@ -1112,6 +1129,7 @@ impl TextInput {
             completion: None,
             secret: false,
             attachments: false,
+            draft: false,
             native_settings_style: false,
         }
     }
@@ -1121,6 +1139,7 @@ impl TextInput {
         let mut input = Self::new(cx);
         input.placeholder = placeholder.to_owned().into();
         input.attachments = true;
+        input.draft = true;
         input
     }
 
@@ -1341,6 +1360,74 @@ mod tests {
             text_seen(false, cx),
             (Some("pä55".into()), String::new(), Some(String::new()))
         );
+    }
+
+    const LONG_AMAZON: &str = "https://www.amazon.co.jp/SomeProduct/dp/B012345678/ref=sr_1_1?keywords=example&qid=1234567890123&sr=8-1";
+    const SHORT_AMAZON: &str = "https://www.amazon.co.jp/dp/B012345678";
+
+    /// The text of a draft (or another input) after pasting `clipboard` into
+    /// "a  b" with the cursor between the spaces, and after one and two undos.
+    fn paste_into(
+        draft: bool,
+        shorten: bool,
+        clipboard: &str,
+        cx: &mut gpui::TestAppContext,
+    ) -> [String; 3] {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::new(
+                cayenchat_storage::ThemeMode::Light,
+                gpui::WindowAppearance::Light,
+                &cayenchat_storage::Appearance::default(),
+            ));
+            cx.set_global(ShortenPastedAmazon(shorten));
+        });
+        let (input, cx) = cx.add_window_view(|_, cx| {
+            if draft {
+                TextInput::new_live("", cx)
+            } else {
+                TextInput::new_field("", "", false, cx)
+            }
+        });
+        cx.write_to_clipboard(ClipboardItem::new_string(clipboard.into()));
+        input.update_in(cx, |input, window, cx| {
+            input.content = "a  b".into();
+            input.selected_range = 2..2;
+            input.paste(&Paste, window, cx);
+            let pasted = input.content.to_string();
+            input.undo(&Undo, window, cx);
+            let once = input.content.to_string();
+            input.undo(&Undo, window, cx);
+            [pasted, once, input.content.to_string()]
+        })
+    }
+
+    #[gpui::test]
+    fn pasting_one_long_amazon_link_into_a_draft_inserts_the_short_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for clipboard in [LONG_AMAZON.to_owned(), format!("\u{3000}{LONG_AMAZON}\n")] {
+            let [pasted, once, twice] = paste_into(true, true, &clipboard, cx);
+            assert_eq!(pasted, format!("a {SHORT_AMAZON} b"));
+            // One undo gives back the long link, the next what was there before.
+            assert_eq!(once, format!("a {} b", clipboard.replace('\n', " ")));
+            assert_eq!(twice, "a  b");
+        }
+    }
+
+    #[gpui::test]
+    fn other_pastes_are_inserted_as_they_are(cx: &mut gpui::TestAppContext) {
+        let mixed = format!("see {LONG_AMAZON} now");
+        assert_eq!(
+            paste_into(true, true, &mixed, cx)[0],
+            format!("a {mixed} b")
+        );
+        // Option off, or an input that is not a message draft.
+        for (draft, shorten) in [(true, false), (false, true)] {
+            assert_eq!(
+                paste_into(draft, shorten, LONG_AMAZON, cx)[0],
+                format!("a {LONG_AMAZON} b")
+            );
+        }
     }
 
     #[test]

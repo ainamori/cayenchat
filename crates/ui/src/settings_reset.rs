@@ -23,6 +23,7 @@ impl SettingsWindow {
             SettingsTab::Application => {
                 current.language == defaults.language
                     && current.restore_window_layout == defaults.restore_window_layout
+                    && current.shorten_amazon_urls == defaults.shorten_amazon_urls
                     && (cfg!(target_os = "macos")
                         || current.menu_bar_auto_hide == defaults.menu_bar_auto_hide)
                     && (!cfg!(target_os = "linux")
@@ -79,6 +80,7 @@ impl SettingsWindow {
                 self.settings.language_list_open = false;
                 let values = &mut self.settings.values;
                 values.restore_window_layout = defaults.restore_window_layout;
+                values.shorten_amazon_urls = defaults.shorten_amazon_urls;
                 // Settings hidden on this platform keep their saved values.
                 if !cfg!(target_os = "macos") {
                     values.menu_bar_auto_hide = defaults.menu_bar_auto_hide;
@@ -356,6 +358,7 @@ mod tests {
             (SettingsTab::Application, |values| {
                 values.language = Language::English;
                 values.restore_window_layout = !values.restore_window_layout;
+                values.shorten_amazon_urls = !values.shorten_amazon_urls;
                 values.menu_bar_auto_hide = !values.menu_bar_auto_hide;
                 values.linux_display = LinuxDisplay::X11;
                 values.appearance.compact_urls = !values.appearance.compact_urls;
