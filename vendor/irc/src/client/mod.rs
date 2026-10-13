@@ -500,6 +500,9 @@ struct ClientState {
     chanlists: RwLock<HashMap<String, Vec<User>>>,
     /// A thread-safe index to track the current alternative nickname being used.
     alt_nick_index: RwLock<usize>,
+    /// Our nickname as the server confirmed it (RPL_WELCOME, then our own NICK).
+    /// Unlike `current_nickname` this follows nick changes after registration.
+    confirmed_nick: RwLock<Option<String>>,
     /// Default ghost sequence to send if one is required but none is configured.
     default_ghost_sequence: Vec<String>,
 }
@@ -511,6 +514,7 @@ impl ClientState {
             config,
             chanlists: RwLock::new(HashMap::new()),
             alt_nick_index: RwLock::new(0),
+            confirmed_nick: RwLock::new(None),
             default_ghost_sequence: vec![String::from("GHOST")],
         }
     }
@@ -561,7 +565,12 @@ impl ClientState {
                 // channel's list like a PART we sent does. Otherwise the stale
                 // entries stay and the next JOIN and NAMES are appended to them.
                 #[cfg(feature = "channel-lists")]
-                if user.eq_ignore_ascii_case(self.current_nickname()) {
+                if self
+                    .confirmed_nick
+                    .read()
+                    .as_deref()
+                    .is_some_and(|me| user.eq_ignore_ascii_case(me))
+                {
                     let _ = self.chanlists.write().remove(chan);
                     return Ok(());
                 }
@@ -569,7 +578,19 @@ impl ClientState {
             }
             QUIT(_) => self.handle_quit(msg.source_nickname().unwrap_or("")),
             NICK(ref new_nick) => {
-                self.handle_nick_change(msg.source_nickname().unwrap_or(""), new_nick)
+                let old_nick = msg.source_nickname().unwrap_or("");
+                {
+                    let mut me = self.confirmed_nick.write();
+                    if me.as_deref().is_some_and(|me| old_nick.eq_ignore_ascii_case(me)) {
+                        *me = Some(new_nick.clone());
+                    }
+                }
+                self.handle_nick_change(old_nick, new_nick)
+            }
+            Command::Response(Response::RPL_WELCOME, ref args) => {
+                if let Some(nick) = args.first() {
+                    *self.confirmed_nick.write() = Some(nick.clone());
+                }
             }
             ChannelMODE(ref chan, ref modes) => self.handle_mode(chan, modes),
             PRIVMSG(ref target, ref body) => {
