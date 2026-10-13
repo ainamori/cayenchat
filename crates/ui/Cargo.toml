@@ -74,6 +74,10 @@ test-build = ["cayenchat-storage/test-build"]
 # from $CAYENCHAT_PREVIEW_FIXTURE_DIR instead of the network, and no other
 # link is fetched. Never enabled in release builds.
 preview-fixture = []
+# Store and README screenshots (scripts/screenshots/demo.py): the settings
+# directory of `test-build` and the local images of `preview-fixture`, but no
+# "[test build]" in the window title. Never enabled in release builds.
+demo = ["cayenchat-storage/test-build", "preview-fixture"]
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
