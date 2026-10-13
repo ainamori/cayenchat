@@ -2555,10 +2555,12 @@ impl ChatWindow {
         };
         match result {
             Ok(()) => {
-                if let Some(prompt) = self.member_prompt.take() {
-                    if matches!(prompt.kind, MemberPromptKind::Join) {
-                        self.note_join_request(prompt.network, &format!("/join {}", value.trim()));
-                    }
+                if let Some(prompt) = self
+                    .member_prompt
+                    .take()
+                    .filter(|prompt| matches!(prompt.kind, MemberPromptKind::Join))
+                {
+                    self.note_join_request(prompt.network, &format!("/join {}", value.trim()));
                 }
                 self.set_feedback(None);
                 window.focus(&self.inputs[&self.state.selection()].focus_handle(cx));
