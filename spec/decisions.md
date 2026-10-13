@@ -1182,6 +1182,75 @@ point's reference is IRC's concern and is not a generic sync token.
 Private-message recovery, persistence and echo-message reconciliation are
 future work. Details in `architecture.md` (Channel history).
 
+## D044 — Opt-in conversation logs in files (#313)
+
+**Status:** Accepted
+
+The maintainer approved this specification on the issue (2026-10-13).
+
+- **Settings** (`Settings::conversation_log`, added without a version change):
+  `channels` and `private`, both off by default and independent, one setting
+  for all servers, and `directory` (default `<data dir>/CayenChat/logs`).
+  Turning a log off stops the writing; existing files are never deleted. The
+  Application page says that private conversations end up in files. No
+  secret, wire line, server-log line or replayed history (`replayed`, CHATHISTORY, bouncer
+  playback) is written, nor a failed send or CTCP other than ACTION. A send is
+  written once it is known to have gone out: at once without `echo-message`,
+  when the echo confirms it with it.
+- **Path.** `<folder>/<network>/channels/<channel>/<YYYY-MM-DD>.log` and
+  `<folder>/<network>/private/<nick>/<YYYY-MM-DD>.log`. The network is the
+  server's display name (else its host); servers that share it get the first
+  four characters of their profile ID (`Libera (3f2a)`). Channel and nick are
+  folded with the server's CASEMAPPING (private conversations use the same
+  RFC 1459 key as the conversation list). The date is the local date of the
+  line's time. Existing files are appended to.
+- **Safe names** (`storage::chatlog::path_component`, the same on every OS):
+  `/ \ : * ? " < > |`, controls and `%` become `%XX` (UTF-8 bytes); a name
+  of only dots, a trailing dot or space and the first letter of a Windows
+  device name (`CON`, `NUL`, `COM1`…) are escaped too; an empty name is
+  `%00`; a component is cut at 200 bytes. The path is a join of escaped
+  components below the folder, so a server cannot write outside it. The file
+  is opened without following a symbolic link (`O_NOFOLLOW`, and a check on
+  other platforms), `0600` in `0700` directories.
+- **Line format.** A new file starts with `# cayenchat-log 1`. Every other
+  line has four tab-separated columns: time (ISO 8601, local offset,
+  milliseconds; the server's `time` when negotiated, else receipt), kind,
+  nickname, text. The text has IRC formatting removed, tabs turned into
+  spaces and other control characters (newline included) into U+FFFD; the
+  nickname's whitespace is replaced the same way, so a line always has four
+  columns. Readers skip lines starting with `#` and kinds they do not know.
+
+  | Kind | Nick (3rd) | Text (4th) |
+  | --- | --- | --- |
+  | `msg` | speaker | message |
+  | `action` | speaker | the `/me` text |
+  | `notice` | sender | text |
+  | `join` | who joined | empty |
+  | `part` | who left | reason or empty |
+  | `quit` | who quit | reason or empty |
+  | `nick` | old nick | new nick |
+  | `kick` | who kicked | `<target> <reason>` (just the target without a reason) |
+  | `topic` | who changed it | the new topic or empty |
+
+  Joins, parts, kicks, quits and nick changes are logged per channel the
+  client has; a quit or nick change of a peer is logged in their private
+  conversation. Mode changes and refused joins are not logged.
+- **Writing.** `ChatLogger` (storage) has one thread. `log` is `try_send`
+  into a 4096-record queue; a full queue drops the record and counts it
+  (`Status::dropped`). The thread keeps up to 32 files open, flushes and
+  `sync_data`s every second and at exit, so a crash loses at most the last
+  second. Quitting drops the logger, which writes what is queued.
+- **Failure and sharing.** The first I/O error is kept (`Status::failure`)
+  and shown once as a line in every server tab and permanently on the
+  Application page; the file is reopened by the next record. The thread
+  takes an exclusive lock on `<folder>/.cayenchat-log.lock`
+  (`File::try_lock`, so `storage` needs Rust 1.89): a second CayenChat on the
+  same folder writes nothing and says so (`Status::locked`).
+- **Not in scope.** Reading logs back, a viewer, search, SQLite, migration
+  of other clients' logs, compatibility with their file names or formats.
+- **Cost.** Off, a line costs one `Option` test and a flag test. On, the UI
+  thread builds one `Record` and queues it. See `performance.md`.
+
 ## D043 — Decoding HTML numeric character references for display (#320)
 
 **Status:** Accepted
