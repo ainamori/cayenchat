@@ -3738,3 +3738,51 @@ fn closing_another_window_during_the_question_keeps_quitting_possible(cx: &mut T
     cx.simulate_prompt_answer("Cancel");
     cx.run_until_parked();
 }
+
+#[gpui::test]
+fn quit_requested_while_the_chat_window_is_busy_still_asks(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        crate::apply_shortcuts(crate::ShortcutPrefs::default(), cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let mut settings = crate::settings_with_channels("#a");
+    settings.language = cayenchat_storage::Language::English;
+    settings.confirm_quit = true;
+    let app = cx.clone();
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    cx.run_until_parked();
+
+    // The global handler runs inside the chat window's own event handling
+    // when the focused fallback prompt passes Quit on; the window is then
+    // borrowed and cannot be updated.
+    app.update(|cx| {
+        let handle = cx.windows()[0].downcast::<ChatWindow>().unwrap();
+        handle
+            .update(cx, |_, _, cx| crate::request_quit_anywhere(cx))
+            .unwrap();
+    });
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt(), "asked after the event");
+    chat.read_with(cx, |chat, _| assert!(chat.quit_prompt_open));
+
+    // Asking again while the question is open and the window is busy neither
+    // quits nor opens a second question.
+    app.update(|cx| {
+        let handle = cx.windows()[0].downcast::<ChatWindow>().unwrap();
+        handle
+            .update(cx, |_, _, cx| crate::request_quit_anywhere(cx))
+            .unwrap();
+    });
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(!cx.has_pending_prompt(), "asked once");
+    chat.read_with(cx, |chat, _| assert!(!chat.quit_prompt_open));
+}

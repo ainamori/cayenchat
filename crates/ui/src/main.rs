@@ -6466,6 +6466,15 @@ fn navigation_binding(key: &str, command: Command) -> KeyBinding {
 /// front and lives until the application quits, so the question cannot
 /// vanish with an auxiliary window that was closed before it was answered.
 fn request_quit_anywhere(cx: &mut App) {
+    request_quit_in_chat_window(cx, true);
+}
+
+/// The chat window cannot be updated while it is handling an event, which is
+/// the case when the action reached the global handler from the focused
+/// fallback prompt. That is not a reason to skip the question, so the request
+/// is retried once after the current event; if the window still cannot be
+/// updated the request is dropped rather than quitting unasked.
+fn request_quit_in_chat_window(cx: &mut App, retry: bool) {
     let chat = cx
         .windows()
         .into_iter()
@@ -6477,8 +6486,9 @@ fn request_quit_anywhere(cx: &mut App) {
     if chat
         .update(cx, |this, window, cx| this.request_quit(window, cx))
         .is_err()
+        && retry
     {
-        cx.quit();
+        cx.defer(|cx| request_quit_in_chat_window(cx, false));
     }
 }
 
