@@ -338,9 +338,11 @@ mod tests {
             form.settings
                 .keywords
                 .update(cx, |field, cx| field.set_text("cat", cx));
+            form.settings.values.notifications.channel_notices = true;
             form.reset_tab(SettingsTab::Notifications, window, cx);
         });
         form.read_with(cx, |form, cx| {
+            assert!(!form.settings.values.notifications.channel_notices);
             assert_eq!(form.settings.values.notifications, Notifications::default());
             assert_eq!(form.settings.keywords.read(cx).text(), "");
         });
