@@ -2381,6 +2381,7 @@ fn labeled_messages_are_confirmed_by_their_echo_batch_and_errors() {
                 text,
                 msgid,
                 server_time,
+                ..
             }) => {
                 assert!(server_time.is_some());
                 settled.push(format!("{local_id} ok {text:?} {msgid:?}"));

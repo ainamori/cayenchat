@@ -116,6 +116,7 @@ fn enabled_logs_save_live_lines_only(cx: &mut TestAppContext) {
                 Event::OutgoingConfirmed {
                     local_id: 8,
                     text: None,
+                    action: None,
                     msgid: None,
                     server_time: None,
                 },
@@ -183,10 +184,11 @@ fn accepted(local_id: u64, channel: &str, text: &str, action: Option<&str>) -> E
     }
 }
 
-fn confirmed(local_id: u64, text: Option<&str>) -> Event {
+fn confirmed(local_id: u64, text: Option<&str>, action: Option<&str>) -> Event {
     Event::OutgoingConfirmed {
         local_id,
         text: text.map(str::to_owned),
+        action: action.map(str::to_owned),
         msgid: None,
         server_time: None,
     }
@@ -214,9 +216,12 @@ fn own_actions_and_rewritten_echoes_are_saved_as_the_server_has_them(cx: &mut Te
                 },
                 // `/me waves` shows `* waves`; the ACTION is logged as one.
                 accepted(1, "#rust", "* waves", Some("waves")),
-                confirmed(1, None),
+                confirmed(1, None, Some("waves")),
                 accepted(2, "#rust", "before-rewrite", None),
-                confirmed(2, Some("after-rewrite")),
+                confirmed(2, Some("after-rewrite"), None),
+                // The server rewrote an ACTION.
+                accepted(3, "#rust", "* waves", Some("waves")),
+                confirmed(3, None, Some("dances")),
                 // Without an echo.
                 Event::OutgoingAccepted {
                     local_id: None,
@@ -237,6 +242,7 @@ fn own_actions_and_rewritten_echoes_are_saved_as_the_server_has_them(cx: &mut Te
         [
             "action|me|waves",
             "msg|me|after-rewrite",
+            "action|me|dances",
             "action|me|dances",
         ]
     );
@@ -274,7 +280,7 @@ fn turning_a_log_off_drops_the_messages_still_waiting_for_their_echo(cx: &mut Te
         chat.apply_conversation_log(&settings.conversation_log);
         chat.handle_events(
             NetworkId(1),
-            vec![confirmed(1, None), confirmed(2, None)],
+            vec![confirmed(1, None, None), confirmed(2, None, None)],
             Worker::Running,
             cx,
         );

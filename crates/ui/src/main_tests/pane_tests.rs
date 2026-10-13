@@ -1993,6 +1993,7 @@ fn sent_messages_are_confirmed_in_place_and_unconfirmed_ones_are_marked(cx: &mut
                 Event::OutgoingConfirmed {
                     local_id: 1,
                     text: Some("hello world".into()),
+                    action: None,
                     msgid: Some("m1".into()),
                     server_time: None,
                 },

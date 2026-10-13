@@ -3735,10 +3735,17 @@ impl ChatWindow {
             Event::OutgoingConfirmed {
                 local_id,
                 text,
+                action,
                 msgid,
                 server_time,
             } => {
-                self.release_own_message(network, local_id, text.as_deref(), server_time);
+                self.release_own_message(
+                    network,
+                    local_id,
+                    text.as_deref(),
+                    action.as_deref(),
+                    server_time,
+                );
                 let pending = self
                     .sessions
                     .get_mut(&network)

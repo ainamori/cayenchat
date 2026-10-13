@@ -1199,20 +1199,23 @@ The maintainer approved this specification on the issue (2026-10-13).
   when the echo confirms it with it.
 - **Path.** `<folder>/<network>/channels/<channel>/<YYYY-MM-DD>.log` and
   `<folder>/<network>/private/<nick>/<YYYY-MM-DD>.log`. The network is the
-  server's display name (else its host); servers that share it get the first
-  four characters of their profile ID (`Libera (3f2a)`). Channel and nick are
+  server's display name (else its host); servers that share it get the last
+  eight characters of their profile ID (`Libera (9c1d04ab)`; generated IDs
+  all start with `custom-`, so the start cannot tell them apart). Channel and nick are
   folded with the server's CASEMAPPING (private conversations use the same
   RFC 1459 key as the conversation list). The date is the local date of the
   line's time. Existing files are appended to.
 - **Safe names** (`storage::chatlog::path_component`, the same on every OS):
-  `/ \ : * ? " < > |`, controls and `%` become `%XX` (UTF-8 bytes); a name
+  `/ \ : * ? " < > |`, controls, `%` and `~` become `%XX` (UTF-8 bytes); a name
   of only dots, a trailing dot or space and the first letter of a Windows
   device name (`CON`, `NUL`, `COM1`…) are escaped too; an empty name is
   `%00`; a component over 200 bytes is cut and ends in `~` and 16 hex digits
   of the SHA-256 of the whole name, so long names with the same start (and
-  network names whose ID suffix would be cut) stay apart. The path is a join
+  network names whose ID suffix would be cut) stay apart; no other name
+  keeps a `~`, so a cut name never equals another name. The path is a join
   of escaped components below the folder, so a server cannot write outside
-  it; the folder itself and its parents may be symbolic links the user made.
+  it; the folder, its parents and the directories below it may be symbolic
+  links the user made (only the log file itself is not followed).
   The file is opened without following a symbolic link (`O_NOFOLLOW`, and a
   check on other platforms) and without waiting on a pipe (`O_NONBLOCK`),
   `0600` in `0700` directories. Before the first write to a file the opened
@@ -1249,8 +1252,12 @@ The maintainer approved this specification on the issue (2026-10-13).
   second; only files written to since are synced. Nothing on the UI thread
   waits for the disk: turning a log off or moving the folder `retire`s the
   logger (the thread drains its queue, flushes and releases the folder on its
-  own) and the next logger's thread waits for it before taking the lock.
-  Only quitting waits, for at most 2 seconds. A record is written only if
+  own). The next logger on the same folder waits for it in its own thread
+  for at most 10 seconds before taking the lock, and says so if that fails;
+  loggers on other folders do not wait, and a waiting logger that is retired
+  with nothing queued ends at once, so a stuck disk cannot pile up threads
+  (the UI remembers at most 8 stopped loggers). Only quitting waits, for at
+  most 2 seconds. A record is written only if
   its kind of log is on when it is written, and a held own message of a kind
   that is turned off is dropped.
 - **Failure and sharing.** The first I/O error is kept (`Status::failure`)
@@ -1260,13 +1267,14 @@ The maintainer approved this specification on the issue (2026-10-13).
   which wakes the chat window, so the notice does not wait for an IRC event.
   The thread takes an exclusive lock on `<folder>/.cayenchat-log.lock`
   (opened for writing, not append-only: Windows cannot lock an append-only
-  handle; `File::try_lock`, so `storage` needs Rust 1.89): a second
+  handle, a regular file only, never waiting on a pipe; `File::try_lock`, so
+  `storage` needs Rust 1.89): a second
   CayenChat on the same folder writes nothing and says so
   (`Status::locked`).
 - **Own messages.** `OutgoingAccepted.action` carries the text of an ACTION
   (`/me`) so it is logged as `action` and not guessed from the `* …` shown;
   `OutgoingConfirmed.text`, when the server changed the text, replaces the
-  held text.
+  held text, and `OutgoingConfirmed.action` does so for an ACTION.
 - **Not in scope.** Reading logs back, a viewer, search, SQLite, migration
   of other clients' logs, compatibility with their file names or formats.
 - **Cost.** Off, a line costs one `Option` test and a flag test. On, the UI

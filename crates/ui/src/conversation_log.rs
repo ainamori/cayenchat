@@ -28,6 +28,9 @@ use crate::{ChatWindow, SettingsWindow, settings_theme};
 /// Own messages waiting for the server's echo that are remembered at most.
 const PENDING_LIMIT: usize = 64;
 
+/// Stopped loggers that are remembered at most.
+const MAX_RETIRED: usize = 8;
+
 /// What the user should be told about the logger, once.
 pub enum Notice {
     Failed(String),
@@ -39,9 +42,9 @@ pub struct ConversationLogs {
     options: ConversationLog,
     directory: Option<PathBuf>,
     logger: Option<ChatLogger>,
-    /// The logger that was stopped last, possibly still writing; the next
-    /// one waits for it before it takes the directory.
-    retired: Option<Retired>,
+    /// Loggers that were stopped and may still be writing; the next one on
+    /// the same directory waits (a while) for them before it takes the lock.
+    retired: Vec<Retired>,
     /// Wakes the window when a logger fails or is locked out.
     notify: Notify,
     /// Own messages whose echo has not arrived (`echo-message`): they are
@@ -56,7 +59,7 @@ impl ConversationLogs {
             options: ConversationLog::default(),
             directory: None,
             logger: None,
-            retired: None,
+            retired: Vec::new(),
             notify,
             pending: HashMap::new(),
             announced_lock: false,
@@ -76,11 +79,7 @@ impl ConversationLogs {
         }
         if wanted && self.logger.is_none() {
             self.logger = directory.clone().map(|directory| {
-                ChatLogger::start_after(
-                    directory,
-                    self.retired.take(),
-                    Some(Arc::clone(&self.notify)),
-                )
+                ChatLogger::start_after(directory, &self.retired, Some(Arc::clone(&self.notify)))
             });
             self.directory = directory;
             self.announced_lock = false;
@@ -98,7 +97,13 @@ impl ConversationLogs {
     /// waiting for it.
     pub fn stop(&mut self) {
         if let Some(logger) = self.logger.take() {
-            self.retired = Some(logger.retire());
+            self.retired.retain(|retired| !retired.is_finished());
+            // Only the newest few are remembered; a disk that hangs cannot
+            // make this list, or the waiting loggers, grow.
+            if self.retired.len() >= MAX_RETIRED {
+                self.retired.remove(0);
+            }
+            self.retired.push(logger.retire());
         }
         self.directory = None;
         self.pending.clear();
@@ -108,8 +113,9 @@ impl ConversationLogs {
     /// for the way out of the application.
     pub fn finish(&mut self, timeout: Duration) {
         self.stop();
-        if let Some(retired) = &self.retired {
-            retired.wait(timeout);
+        let deadline = std::time::Instant::now() + timeout;
+        for retired in &self.retired {
+            retired.wait(deadline.saturating_duration_since(std::time::Instant::now()));
         }
     }
 
@@ -163,31 +169,12 @@ impl ChatWindow {
         }
     }
 
-    /// The server's name in the log's path: the display name, else the
-    /// host. Servers that share it are told apart by the start of their
-    /// profile ID.
     fn log_network_name(&self, network: NetworkId) -> Option<String> {
         let session = self.sessions.get(&network)?;
-        let label = |profile: &cayenchat_storage::ServerProfile| {
-            if profile.display_name.is_empty() {
-                profile.host.clone()
-            } else {
-                profile.display_name.clone()
-            }
-        };
-        let profile = self.saved.profile(&session.profile_id)?;
-        let name = label(profile);
-        let shared = self
-            .saved
-            .servers
-            .iter()
-            .any(|other| other.id != profile.id && label(other) == name);
-        Some(if shared {
-            let short: String = profile.id.chars().take(4).collect();
-            format!("{name} ({short})")
-        } else {
-            name
-        })
+        network_directory(
+            &self.saved.servers,
+            self.saved.profile(&session.profile_id)?,
+        )
     }
 
     /// The record for one line, or `None` when that kind of conversation
@@ -358,16 +345,21 @@ impl ChatWindow {
         network: NetworkId,
         local_id: u64,
         text: Option<&str>,
+        action: Option<&str>,
         server_time: Option<SystemTime>,
     ) {
         if let Some(mut record) = self.conversation_logs.pending.remove(&(network, local_id)) {
             if let Some(time) = server_time {
                 record.time = time;
             }
-            // The server changed the text; an ACTION keeps its own.
-            if let Some(text) = text
-                && record.kind != Kind::Action
-            {
+            // The server may have changed the text; an ACTION's own text
+            // comes apart from the `* …` the conversation shows.
+            let text = if record.kind == Kind::Action {
+                action
+            } else {
+                text
+            };
+            if let Some(text) = text {
                 record.body = strip_formatting(text);
             }
             self.write_log(Some(record));
@@ -389,6 +381,34 @@ impl ChatWindow {
     pub(crate) fn write_own_message(&self, record: Option<Record>) {
         self.write_log(record);
     }
+}
+
+/// The server's name in the log's path: the display name, else the host.
+/// Servers that share it are told apart by the end of their profile ID
+/// (generated IDs share their `custom-` start).
+fn network_directory(
+    servers: &[cayenchat_storage::ServerProfile],
+    profile: &cayenchat_storage::ServerProfile,
+) -> Option<String> {
+    let label = |profile: &cayenchat_storage::ServerProfile| {
+        if profile.display_name.is_empty() {
+            profile.host.clone()
+        } else {
+            profile.display_name.clone()
+        }
+    };
+    let name = label(profile);
+    let shared = servers
+        .iter()
+        .any(|other| other.id != profile.id && label(other) == name);
+    Some(if shared {
+        let mut short: Vec<char> = profile.id.chars().rev().take(8).collect();
+        short.reverse();
+        let short: String = short.into_iter().collect();
+        format!("{name} ({short})")
+    } else {
+        name
+    })
 }
 
 impl SettingsWindow {
@@ -560,5 +580,27 @@ impl SettingsWindow {
                         .child(status),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cayenchat_storage::Settings;
+
+    use super::network_directory;
+
+    #[test]
+    fn servers_added_with_the_same_name_get_different_directories() {
+        let mut settings = Settings::default();
+        for _ in 0..2 {
+            settings.add_server("irc.example.net").display_name = "SameNetwork".into();
+        }
+        let names: Vec<_> = settings
+            .servers
+            .iter()
+            .filter_map(|profile| network_directory(&settings.servers, profile))
+            .collect();
+        assert_eq!(names.len(), 2);
+        assert_ne!(names[0], names[1], "{names:?}");
     }
 }

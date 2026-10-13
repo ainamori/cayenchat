@@ -50,6 +50,9 @@ const OPEN_FILES: usize = 32;
 const COMPONENT_LIMIT: usize = 200;
 /// What a cut name gets at its end: `~` and 16 hexadecimal digits.
 const SHORTENED_SUFFIX: usize = 17;
+/// How long a logger waits for the one it replaces on the same directory (a
+/// stuck disk) before it gives up and says so.
+const PREVIOUS_WAIT: Duration = Duration::from_secs(10);
 
 /// What a line says. The label is the second column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,11 +122,12 @@ pub fn default_directory() -> Option<PathBuf> {
 }
 
 /// Makes `name` one safe path component on every OS. Characters no OS
-/// accepts (`/ \ : * ? " < > |`, controls) and `%` become `%XX`, as do a
+/// accepts (`/ \ : * ? " < > |`, controls), `%` and `~` become `%XX`, as do a
 /// name that is only dots, a trailing dot or space and the first letter of a
 /// Windows device name (`CON`, `NUL`, `COM1`…). An empty name becomes `%00`.
 /// A result longer than 200 bytes is cut and ends in `~` and a hash of the
-/// whole name, so that names with the same start stay apart.
+/// whole name, so that names with the same start stay apart; as no other
+/// name keeps a `~`, a cut name never equals another name.
 /// The result is never a path of its own, so a name from a server cannot
 /// reach outside the directory it is placed in.
 pub fn path_component(name: &str) -> String {
@@ -144,7 +148,7 @@ pub fn path_component(name: &str) -> String {
     for (index, &ch) in chars.iter().enumerate() {
         let unsafe_char = matches!(
             ch,
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '%'
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '%' | '~'
         ) || ch.is_control();
         let last = index + 1 == chars.len();
         let escape =
@@ -301,12 +305,16 @@ impl Drop for DoneGuard {
 /// next logger on the same directory waits for it (see
 /// [`ChatLogger::start_after`]).
 #[derive(Clone)]
-pub struct Retired(Arc<Done>);
+pub struct Retired(Arc<Done>, PathBuf);
 
 impl Retired {
     /// Whether the logger has finished, waiting at most `timeout`.
     pub fn wait(&self, timeout: Duration) -> bool {
         self.0.wait(Some(timeout))
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.0.wait(Some(Duration::ZERO))
     }
 }
 
@@ -329,6 +337,7 @@ pub struct ChatLogger {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
     done: Arc<Done>,
+    directory: PathBuf,
 }
 
 impl ChatLogger {
@@ -337,17 +346,19 @@ impl ChatLogger {
     /// directory that another CayenChat has locked is not written to (see
     /// [`Status::locked`]); an error is reported through [`Status::failure`].
     pub fn start(directory: PathBuf) -> Self {
-        Self::start_after(directory, None, None)
+        Self::start_after(directory, &[], None)
     }
 
-    /// Like [`ChatLogger::start`]. The writer first waits for `previous`
-    /// (the logger this one replaces, which may hold the directory's lock)
-    /// to finish, and calls `notify` when it first fails or is locked out.
-    pub fn start_after(
-        directory: PathBuf,
-        previous: Option<Retired>,
-        notify: Option<Notify>,
-    ) -> Self {
+    /// Like [`ChatLogger::start`]. The writer first waits (at most ten
+    /// seconds) for the `previous` loggers on the same directory, which may
+    /// hold its lock, to finish; ones on other directories are not waited
+    /// for. It calls `notify` when it first fails or is locked out.
+    pub fn start_after(directory: PathBuf, previous: &[Retired], notify: Option<Notify>) -> Self {
+        let previous: Vec<Retired> = previous
+            .iter()
+            .filter(|retired| retired.1 == directory && !retired.is_finished())
+            .cloned()
+            .collect();
         let shared = Arc::new(Shared {
             notify,
             ..Shared::default()
@@ -356,12 +367,37 @@ impl ChatLogger {
         let (sender, receiver) = mpsc::sync_channel(QUEUE_LIMIT);
         let worker_shared = Arc::clone(&shared);
         let guard = DoneGuard(Arc::clone(&done));
-        let thread = std::thread::Builder::new()
+        let root = directory.clone();
+        let spawned = std::thread::Builder::new()
             .name("chat-log".into())
             .spawn(move || {
                 let _guard = guard;
-                if let Some(previous) = previous {
-                    previous.0.wait(None);
+                let mut early = Vec::new();
+                let deadline = Instant::now() + PREVIOUS_WAIT;
+                for previous in &previous {
+                    while !previous.0.wait(Some(Duration::from_millis(50))) {
+                        // Retired while waiting, with nothing queued: no
+                        // reason to wait on.
+                        loop {
+                            match receiver.try_recv() {
+                                Ok(record) => early.push(record),
+                                Err(mpsc::TryRecvError::Empty) => break,
+                                Err(mpsc::TryRecvError::Disconnected) => {
+                                    if early.is_empty() {
+                                        return;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        if Instant::now() >= deadline {
+                            let error = io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "the previous log writer is stuck on this directory",
+                            );
+                            return fail(&worker_shared, &directory, &error);
+                        }
+                    }
                 }
                 match acquire(&directory) {
                     Ok(Some(lock)) => Writer {
@@ -370,23 +406,28 @@ impl ChatLogger {
                         files: HashMap::new(),
                         _lock: lock,
                     }
-                    .run(receiver),
+                    .run(early, receiver),
                     Ok(None) => {
                         worker_shared.locked.store(true, Ordering::Relaxed);
                         worker_shared.changed();
                     }
                     Err(error) => fail(&worker_shared, &directory, &error),
                 }
-            })
-            .ok();
-        if thread.is_none() {
-            done.set();
-        }
+            });
+        let thread = match spawned {
+            Ok(thread) => Some(thread),
+            Err(error) => {
+                fail(&shared, &root, &error);
+                done.set();
+                None
+            }
+        };
         Self {
             sender: thread.is_some().then_some(sender),
             shared,
             thread,
             done,
+            directory: root,
         }
     }
 
@@ -395,7 +436,7 @@ impl ChatLogger {
     pub fn retire(mut self) -> Retired {
         self.sender = None;
         self.thread = None;
-        Retired(Arc::clone(&self.done))
+        Retired(Arc::clone(&self.done), self.directory.clone())
     }
 
     /// Queues `record`; never waits. A full queue drops it and counts it.
@@ -444,11 +485,23 @@ impl Drop for ChatLogger {
 fn acquire(directory: &Path) -> io::Result<Option<File>> {
     private_file::create_dir(directory)?;
     // Not append-only: Windows refuses to lock a file opened that way.
-    let lock = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(directory.join(LOCK_FILE))?;
+    let mut options = OpenOptions::new();
+    options.create(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // No waiting for the reader of a pipe that took the file's place.
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let lock = options.open(directory.join(LOCK_FILE))?;
+    if !lock.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the lock file is not a regular file",
+        ));
+    }
     match lock.try_lock() {
         Ok(()) => Ok(Some(lock)),
         Err(fs::TryLockError::WouldBlock) => Ok(None),
@@ -481,7 +534,10 @@ struct Writer {
 }
 
 impl Writer {
-    fn run(mut self, receiver: mpsc::Receiver<Record>) {
+    fn run(mut self, early: Vec<Record>, receiver: mpsc::Receiver<Record>) {
+        for record in &early {
+            self.write(record);
+        }
         let mut flush_at = Instant::now() + FLUSH_INTERVAL;
         loop {
             let wait = flush_at.saturating_duration_since(Instant::now());
@@ -739,7 +795,7 @@ mod tests {
         let notify: Notify = Arc::new(move || {
             let _ = sender.send(());
         });
-        let logger = ChatLogger::start_after(directory.path().to_owned(), None, Some(notify));
+        let logger = ChatLogger::start_after(directory.path().to_owned(), &[], Some(notify));
         logger.log(record(Kind::Msg, "alice", "lost"));
         assert!(receiver.recv_timeout(Duration::from_secs(5)).is_ok());
         assert!(logger.status().failure.is_some());
@@ -752,7 +808,7 @@ mod tests {
         first.log(record(Kind::Msg, "alice", "old"));
         wait_for(|| directory.path().join(LOCK_FILE).exists());
         let retired = first.retire();
-        let second = ChatLogger::start_after(directory.path().to_owned(), Some(retired), None);
+        let second = ChatLogger::start_after(directory.path().to_owned(), &[retired], None);
         second.log(record(Kind::Msg, "alice", "new"));
         drop(second);
         let text = fs::read_to_string(path_for(
@@ -807,13 +863,15 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("logs");
         let path = path_for(&root, &record(Kind::Msg, "", ""), &Local);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        crate::private_file::create_dir(path.parent().unwrap()).unwrap();
         let name = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
         let logger = ChatLogger::start(root);
         logger.log(record(Kind::Msg, "alice", "never"));
         drop_after_write(&logger);
-        assert!(logger.status().failure.is_some());
+        let failure = logger.status().failure.unwrap();
+        // Refused by the pipe itself, not by the permission check.
+        assert!(!failure.contains("accessible"), "{failure}");
     }
 
     #[test]
@@ -905,14 +963,61 @@ mod tests {
             &record(Kind::Msg, "", ""),
             &Local,
         );
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        crate::private_file::create_dir(path.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&target, &path).unwrap();
         let logger = ChatLogger::start(directory.path().join("logs"));
         logger.log(record(Kind::Msg, "alice", "never"));
         drop_after_write(&logger);
-        assert!(logger.status().failure.is_some());
+        let failure = logger.status().failure.unwrap();
+        assert!(failure.contains("symbolic link"), "{failure}");
         drop(logger);
         assert_eq!(fs::read(&target).unwrap(), b"keep\n");
+    }
+
+    #[test]
+    fn a_cut_name_never_equals_another_name() {
+        let long = "x".repeat(300);
+        let cut = path_component(&long);
+        assert!(cut.contains('~'));
+        // Using the cut result as a name of its own gives another component.
+        assert_ne!(path_component(&cut), cut);
+        assert_eq!(path_component("a~b"), "a%7Eb");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_in_place_of_the_lock_file_is_refused_without_waiting() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("logs");
+        crate::private_file::create_dir(&root).unwrap();
+        let name = std::ffi::CString::new(root.join(LOCK_FILE).to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let logger = ChatLogger::start(root);
+        wait_for(|| logger.status().failure.is_some());
+        let failure = logger.status().failure.unwrap();
+        // Refused by the pipe itself, not by the permission check.
+        assert!(!failure.contains("accessible"), "{failure}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stuck_logger_does_not_hold_up_other_folders_or_pile_up() {
+        // A pipe as the lock file's place is no way to stall `retire`, so a
+        // logger that never ends is made from a held thread-less `Done`.
+        let stuck_directory = tempfile::tempdir().unwrap();
+        let stuck = Retired(Arc::new(Done::default()), stuck_directory.path().to_owned());
+        let other = tempfile::tempdir().unwrap();
+        // Another folder does not wait for it.
+        let logger =
+            ChatLogger::start_after(other.path().to_owned(), std::slice::from_ref(&stuck), None);
+        logger.log(record(Kind::Msg, "alice", "now"));
+        drop(logger);
+        let path = path_for(other.path(), &record(Kind::Msg, "", ""), &Local);
+        assert!(fs::read_to_string(path).unwrap().contains("now"));
+        // The same folder waits, and a logger retired meanwhile ends at once.
+        let waiting = ChatLogger::start_after(stuck_directory.path().to_owned(), &[stuck], None);
+        let retired = waiting.retire();
+        assert!(retired.wait(Duration::from_secs(2)));
     }
 
     #[cfg(unix)]

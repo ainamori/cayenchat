@@ -717,6 +717,8 @@ pub enum Event {
     OutgoingConfirmed {
         local_id: u64,
         text: Option<String>,
+        /// The final text of a CTCP ACTION, which `text` never replaces.
+        action: Option<String>,
         msgid: Option<String>,
         server_time: Option<SystemTime>,
     },
