@@ -23,7 +23,7 @@ use std::{
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, RecvTimeoutError, SyncSender, TrySendError},
     },
@@ -32,6 +32,7 @@ use std::{
 };
 
 use chrono::{DateTime, Local, TimeZone};
+use sha2::{Digest, Sha256};
 
 use crate::private_file;
 
@@ -47,6 +48,8 @@ const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const OPEN_FILES: usize = 32;
 /// Longest path component in bytes, below the 255 most file systems allow.
 const COMPONENT_LIMIT: usize = 200;
+/// What a cut name gets at its end: `~` and 16 hexadecimal digits.
+const SHORTENED_SUFFIX: usize = 17;
 
 /// What a line says. The label is the second column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,6 +122,8 @@ pub fn default_directory() -> Option<PathBuf> {
 /// accepts (`/ \ : * ? " < > |`, controls) and `%` become `%XX`, as do a
 /// name that is only dots, a trailing dot or space and the first letter of a
 /// Windows device name (`CON`, `NUL`, `COM1`…). An empty name becomes `%00`.
+/// A result longer than 200 bytes is cut and ends in `~` and a hash of the
+/// whole name, so that names with the same start stay apart.
 /// The result is never a path of its own, so a name from a server cannot
 /// reach outside the directory it is placed in.
 pub fn path_component(name: &str) -> String {
@@ -134,6 +139,8 @@ pub fn path_component(name: &str) -> String {
     let device = is_device_name(stem);
     let dots = !name.is_empty() && name.chars().all(|ch| ch == '.');
     let mut out = String::new();
+    // Where the name can be cut for the suffix without splitting an escape.
+    let mut cut = 0;
     for (index, &ch) in chars.iter().enumerate() {
         let unsafe_char = matches!(
             ch,
@@ -142,26 +149,26 @@ pub fn path_component(name: &str) -> String {
         let last = index + 1 == chars.len();
         let escape =
             unsafe_char || dots || (device && index == 0) || (last && (ch == '.' || ch == ' '));
-        // Escaped names can grow threefold; stop before the limit rather
-        // than in the middle of an escape.
-        let mut piece = String::new();
         if escape {
-            push_escaped(&mut piece, ch);
+            push_escaped(&mut out, ch);
         } else {
-            piece.push(ch);
+            out.push(ch);
         }
-        if out.len() + piece.len() > COMPONENT_LIMIT {
-            break;
+        if out.len() <= COMPONENT_LIMIT - SHORTENED_SUFFIX {
+            cut = out.len();
         }
-        out.push_str(&piece);
     }
     if out.is_empty() {
         out.push_str("%00");
     }
-    // A cut name may now end in a dot or a space.
-    if out.ends_with(['.', ' ']) {
-        let ch = out.pop().unwrap_or('.');
-        push_escaped(&mut out, ch);
+    if out.len() > COMPONENT_LIMIT {
+        // Cutting alone would give two long names with the same start the
+        // same file, so the suffix tells them apart.
+        out.truncate(cut);
+        out.push('~');
+        for byte in &Sha256::digest(name.as_bytes())[..8] {
+            out.push_str(&format!("{byte:02x}"));
+        }
     }
     out
 }
@@ -217,6 +224,11 @@ where
     )
 }
 
+/// Called on the writer thread when the logger first fails or finds its
+/// directory locked, so that the user can be told without waiting for
+/// something else to happen. It must not block.
+pub type Notify = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Default)]
 struct Shared {
     /// Another CayenChat holds the directory; nothing is written.
@@ -224,6 +236,78 @@ struct Shared {
     dropped: AtomicU64,
     failure: Mutex<Option<String>>,
     announced: AtomicBool,
+    notify: Option<Notify>,
+}
+
+impl Shared {
+    fn changed(&self) {
+        if let Some(notify) = &self.notify {
+            notify();
+        }
+    }
+}
+
+/// Set when a writer thread has ended, however it ended.
+#[derive(Default)]
+struct Done {
+    finished: Mutex<bool>,
+    condvar: Condvar,
+}
+
+impl Done {
+    fn set(&self) {
+        if let Ok(mut finished) = self.finished.lock() {
+            *finished = true;
+        }
+        self.condvar.notify_all();
+    }
+
+    /// Whether the thread has ended, waiting at most `timeout` (for ever
+    /// with `None`).
+    fn wait(&self, timeout: Option<Duration>) -> bool {
+        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        let Ok(mut finished) = self.finished.lock() else {
+            return true;
+        };
+        while !*finished {
+            let step = match deadline {
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return false;
+                    }
+                    left
+                }
+                None => Duration::from_secs(3600),
+            };
+            finished = match self.condvar.wait_timeout(finished, step) {
+                Ok((finished, _)) => finished,
+                Err(_) => return true,
+            };
+        }
+        true
+    }
+}
+
+struct DoneGuard(Arc<Done>);
+
+impl Drop for DoneGuard {
+    fn drop(&mut self) {
+        self.0.set();
+    }
+}
+
+/// A logger that has been told to stop and is writing what is left. The
+/// next logger on the same directory waits for it (see
+/// [`ChatLogger::start_after`]).
+#[derive(Clone)]
+pub struct Retired(Arc<Done>);
+
+impl Retired {
+    /// Whether the logger has finished, waiting at most `timeout`.
+    pub fn wait(&self, timeout: Duration) -> bool {
+        self.0.wait(Some(timeout))
+    }
 }
 
 /// How a logger is doing, for the settings and the server tabs.
@@ -238,11 +322,13 @@ pub struct Status {
 }
 
 /// Writes records on a thread of its own. Dropping it writes what is queued,
-/// flushes and waits for the thread.
+/// flushes and waits for the thread; [`ChatLogger::retire`] does the same
+/// without waiting.
 pub struct ChatLogger {
     sender: Option<SyncSender<Record>>,
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
+    done: Arc<Done>,
 }
 
 impl ChatLogger {
@@ -251,28 +337,65 @@ impl ChatLogger {
     /// directory that another CayenChat has locked is not written to (see
     /// [`Status::locked`]); an error is reported through [`Status::failure`].
     pub fn start(directory: PathBuf) -> Self {
-        let shared = Arc::new(Shared::default());
+        Self::start_after(directory, None, None)
+    }
+
+    /// Like [`ChatLogger::start`]. The writer first waits for `previous`
+    /// (the logger this one replaces, which may hold the directory's lock)
+    /// to finish, and calls `notify` when it first fails or is locked out.
+    pub fn start_after(
+        directory: PathBuf,
+        previous: Option<Retired>,
+        notify: Option<Notify>,
+    ) -> Self {
+        let shared = Arc::new(Shared {
+            notify,
+            ..Shared::default()
+        });
+        let done = Arc::new(Done::default());
         let (sender, receiver) = mpsc::sync_channel(QUEUE_LIMIT);
         let worker_shared = Arc::clone(&shared);
+        let guard = DoneGuard(Arc::clone(&done));
         let thread = std::thread::Builder::new()
             .name("chat-log".into())
-            .spawn(move || match acquire(&directory) {
-                Ok(Some(lock)) => Writer {
-                    root: directory,
-                    shared: worker_shared,
-                    files: HashMap::new(),
-                    _lock: lock,
+            .spawn(move || {
+                let _guard = guard;
+                if let Some(previous) = previous {
+                    previous.0.wait(None);
                 }
-                .run(receiver),
-                Ok(None) => worker_shared.locked.store(true, Ordering::Relaxed),
-                Err(error) => fail(&worker_shared, &directory, &error),
+                match acquire(&directory) {
+                    Ok(Some(lock)) => Writer {
+                        root: directory,
+                        shared: worker_shared,
+                        files: HashMap::new(),
+                        _lock: lock,
+                    }
+                    .run(receiver),
+                    Ok(None) => {
+                        worker_shared.locked.store(true, Ordering::Relaxed);
+                        worker_shared.changed();
+                    }
+                    Err(error) => fail(&worker_shared, &directory, &error),
+                }
             })
             .ok();
+        if thread.is_none() {
+            done.set();
+        }
         Self {
             sender: thread.is_some().then_some(sender),
             shared,
             thread,
+            done,
         }
+    }
+
+    /// Stops accepting records without waiting: the writer thread writes
+    /// what is queued, flushes, releases the directory and ends on its own.
+    pub fn retire(mut self) -> Retired {
+        self.sender = None;
+        self.thread = None;
+        Retired(Arc::clone(&self.done))
     }
 
     /// Queues `record`; never waits. A full queue drops it and counts it.
@@ -320,9 +443,11 @@ impl Drop for ChatLogger {
 /// `Ok(None)` when another process holds the directory.
 fn acquire(directory: &Path) -> io::Result<Option<File>> {
     private_file::create_dir(directory)?;
+    // Not append-only: Windows refuses to lock a file opened that way.
     let lock = OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(false)
         .open(directory.join(LOCK_FILE))?;
     match lock.try_lock() {
         Ok(()) => Ok(Some(lock)),
@@ -336,13 +461,21 @@ fn fail(shared: &Shared, path: &Path, error: &io::Error) {
         && failure.is_none()
     {
         *failure = Some(format!("{}: {error}", path.display()));
+        drop(failure);
+        shared.changed();
     }
+}
+
+struct Open {
+    file: BufWriter<File>,
+    /// Written to since the last flush.
+    dirty: bool,
 }
 
 struct Writer {
     root: PathBuf,
     shared: Arc<Shared>,
-    files: HashMap<PathBuf, BufWriter<File>>,
+    files: HashMap<PathBuf, Open>,
     /// The lock lives as long as the writer.
     _lock: File,
 }
@@ -381,19 +514,30 @@ impl Writer {
                 self.flush();
                 self.files.clear();
             }
-            let file = open(path)?;
-            self.files.insert(path.to_owned(), file);
+            let file = open(&self.root, path)?;
+            self.files
+                .insert(path.to_owned(), Open { file, dirty: true });
         }
         match self.files.get_mut(path) {
-            Some(file) => file.write_all(line.as_bytes()),
+            Some(open) => {
+                open.dirty = true;
+                open.file.write_all(line.as_bytes())
+            }
             None => Ok(()),
         }
     }
 
     fn flush(&mut self) {
         let mut broken = Vec::new();
-        for (path, file) in &mut self.files {
-            let result = file.flush().and_then(|()| file.get_ref().sync_data());
+        for (path, open) in &mut self.files {
+            if !open.dirty {
+                continue;
+            }
+            open.dirty = false;
+            let result = open
+                .file
+                .flush()
+                .and_then(|()| open.file.get_ref().sync_data());
             if let Err(error) = result {
                 fail(&self.shared, path, &error);
                 broken.push(path.clone());
@@ -405,12 +549,15 @@ impl Writer {
     }
 }
 
-/// Opens `path` for appending (user-only, creating the directories) and
-/// writes the header into a new file. A symbolic link in place of the file
-/// is refused, not followed.
-fn open(path: &Path) -> io::Result<BufWriter<File>> {
+/// Opens `path` below `root` for appending (user-only, creating the
+/// directories) and writes the header into a new file. Nothing is written to
+/// what is not a regular file of the user alone (a symbolic link or a pipe in
+/// place of the file, or permissions that let others read the log): the
+/// caller is told instead.
+fn open(root: &Path, path: &Path) -> io::Result<BufWriter<File>> {
     if let Some(parent) = path.parent() {
         private_file::create_dir(parent)?;
+        check_private_directories(root, parent)?;
     }
     if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return Err(io::Error::new(
@@ -423,14 +570,58 @@ fn open(path: &Path) -> io::Result<BufWriter<File>> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        // No waiting for the reader of a pipe that took the file's place.
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the log file is not a regular file",
+        ));
+    }
+    check_private(&metadata, "file", "600")?;
     let mut file = BufWriter::new(file);
-    if file.get_ref().metadata()?.len() == 0 {
+    if metadata.len() == 0 {
         file.write_all(HEADER.as_bytes())?;
     }
     Ok(file)
+}
+
+/// The directories from `root` (not included) down to `directory` must be
+/// the user's alone, as the ones made here are.
+fn check_private_directories(root: &Path, directory: &Path) -> io::Result<()> {
+    let mut current = directory;
+    while current != root && current.starts_with(root) {
+        check_private(&fs::metadata(current)?, "directory", "700")?;
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn check_private(metadata: &fs::Metadata, what: &str, wanted: &str) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 == 0 {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("the log {what} is accessible to other users ({mode:o}); set it to {wanted}"),
+    ))
+}
+
+#[cfg(not(unix))]
+fn check_private(_: &fs::Metadata, _: &str, _: &str) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -519,7 +710,110 @@ mod tests {
         assert!(long.len() <= COMPONENT_LIMIT);
         let escaped = path_component(&"/".repeat(300));
         assert!(escaped.len() <= COMPONENT_LIMIT);
-        assert!(escaped.len().is_multiple_of(3) && escaped.starts_with("%2F"));
+        assert!(escaped.starts_with("%2F"));
+    }
+
+    #[test]
+    fn long_names_with_the_same_start_stay_apart() {
+        let first = path_component(&format!("{}a", "x".repeat(300)));
+        let second = path_component(&format!("{}b", "x".repeat(300)));
+        assert_ne!(first, second);
+        assert!(first.len() <= COMPONENT_LIMIT && second.len() <= COMPONENT_LIMIT);
+        // Escapes that grow the name past the limit are told apart as well.
+        let first = path_component(&format!("{}a", "/".repeat(100)));
+        let second = path_component(&format!("{}b", "/".repeat(100)));
+        assert_ne!(first, second);
+        assert!(first.len() <= COMPONENT_LIMIT);
+        // The same name always gives the same component.
+        assert_eq!(first, path_component(&format!("{}a", "/".repeat(100))));
+        // A name at the limit is left alone.
+        let exact = "y".repeat(COMPONENT_LIMIT);
+        assert_eq!(path_component(&exact), exact);
+    }
+
+    #[test]
+    fn a_failure_is_notified_without_further_records() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("Libera"), b"").unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let notify: Notify = Arc::new(move || {
+            let _ = sender.send(());
+        });
+        let logger = ChatLogger::start_after(directory.path().to_owned(), None, Some(notify));
+        logger.log(record(Kind::Msg, "alice", "lost"));
+        assert!(receiver.recv_timeout(Duration::from_secs(5)).is_ok());
+        assert!(logger.status().failure.is_some());
+    }
+
+    #[test]
+    fn a_retired_logger_is_replaced_without_waiting_or_a_lock_clash() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = ChatLogger::start(directory.path().to_owned());
+        first.log(record(Kind::Msg, "alice", "old"));
+        wait_for(|| directory.path().join(LOCK_FILE).exists());
+        let retired = first.retire();
+        let second = ChatLogger::start_after(directory.path().to_owned(), Some(retired), None);
+        second.log(record(Kind::Msg, "alice", "new"));
+        drop(second);
+        let text = fs::read_to_string(path_for(
+            directory.path(),
+            &record(Kind::Msg, "", ""),
+            &Local,
+        ))
+        .unwrap();
+        assert!(text.contains("old") && text.contains("new"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_log_file_that_others_can_read_is_not_appended_to() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("logs");
+        let path = path_for(&root, &record(Kind::Msg, "", ""), &Local);
+        crate::private_file::create_dir(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"# cayenchat-log 1\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let logger = ChatLogger::start(root.clone());
+        logger.log(record(Kind::Msg, "alice", "secret"));
+        drop_after_write(&logger);
+        assert!(logger.status().failure.is_some_and(|f| f.contains("644")));
+        drop(logger);
+        assert_eq!(fs::read(&path).unwrap(), b"# cayenchat-log 1\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_conversation_directory_that_others_can_enter_is_not_used() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("logs");
+        let path = path_for(&root, &record(Kind::Msg, "", ""), &Local);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o755)).unwrap();
+        let logger = ChatLogger::start(root);
+        logger.log(record(Kind::Msg, "alice", "secret"));
+        drop_after_write(&logger);
+        assert!(logger.status().failure.is_some());
+        drop(logger);
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_in_place_of_the_file_is_refused_without_waiting() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("logs");
+        let path = path_for(&root, &record(Kind::Msg, "", ""), &Local);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let name = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let logger = ChatLogger::start(root);
+        logger.log(record(Kind::Msg, "alice", "never"));
+        drop_after_write(&logger);
+        assert!(logger.status().failure.is_some());
     }
 
     #[test]
