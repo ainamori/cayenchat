@@ -46,7 +46,10 @@ use irc::{
         data::user::AccessLevel,
         prelude::{Client, Config},
     },
-    proto::{Command as IrcCommand, Message as IrcMessage, Prefix, Response, mode::Mode},
+    proto::{
+        Command as IrcCommand, Message as IrcMessage, Prefix, Response,
+        mode::{ChannelMode, Mode},
+    },
 };
 use tokio::sync::{Notify, mpsc};
 
@@ -900,7 +903,67 @@ async fn diagnostic(events: &EventSender, started: Instant, message: impl Into<S
         .await;
 }
 
+const REDACTED_KEY: &str = "[redacted]";
+
+/// `modes` with the channel key (`+k key`, `-k key`) hidden.
+fn redact_key_modes(modes: &[Mode<ChannelMode>]) -> Vec<Mode<ChannelMode>> {
+    modes
+        .iter()
+        .map(|mode| match mode {
+            Mode::Plus(ChannelMode::Key, Some(_)) => {
+                Mode::Plus(ChannelMode::Key, Some(REDACTED_KEY.into()))
+            }
+            Mode::Minus(ChannelMode::Key, Some(_)) => {
+                Mode::Minus(ChannelMode::Key, Some(REDACTED_KEY.into()))
+            }
+            other => other.clone(),
+        })
+        .collect()
+}
+
+/// Mode arguments as separate words (`MODE` after the target, or
+/// `RPL_CHANNELMODEIS` after the nickname and channel): when the mode string
+/// sets or clears a key, which argument is the key depends on the other
+/// modes, so every argument is hidden.
+fn redact_mode_words(words: &[String]) -> Option<Vec<String>> {
+    let modes = words.first()?;
+    (modes.starts_with(['+', '-']) && modes.contains('k') && words.len() > 1).then(|| {
+        let mut redacted = vec![modes.clone()];
+        redacted.extend(words[1..].iter().map(|_| REDACTED_KEY.to_owned()));
+        redacted
+    })
+}
+
+/// `message` with a channel key in a `MODE` or `324` hidden, if it has one.
+fn without_channel_key(message: &IrcMessage) -> Option<IrcMessage> {
+    let command = match &message.command {
+        IrcCommand::ChannelMODE(channel, modes) => {
+            IrcCommand::ChannelMODE(channel.clone(), redact_key_modes(modes))
+        }
+        IrcCommand::Raw(verb, args)
+            if verb.eq_ignore_ascii_case("MODE")
+                && args.first().is_some_and(|t| valid_channel(t)) =>
+        {
+            let mut redacted = vec![args[0].clone()];
+            redacted.extend(redact_mode_words(&args[1..])?);
+            IrcCommand::Raw(verb.clone(), redacted)
+        }
+        IrcCommand::Response(Response::RPL_CHANNELMODEIS, args) if args.len() > 2 => {
+            let mut redacted = args[..2].to_vec();
+            redacted.extend(redact_mode_words(&args[2..])?);
+            IrcCommand::Response(Response::RPL_CHANNELMODEIS, redacted)
+        }
+        _ => return None,
+    };
+    let mut redacted = message.clone();
+    redacted.command = command;
+    Some(redacted)
+}
+
 fn redacted_wire_line(message: &IrcMessage) -> String {
+    if let Some(redacted) = without_channel_key(message) {
+        return tags::transcript_line(&redacted);
+    }
     match &message.command {
         IrcCommand::PASS(_) => "PASS [redacted]".into(),
         IrcCommand::AUTHENTICATE(data)
@@ -3515,7 +3578,7 @@ fn translate_message(
             channel: channel.clone(),
             actor: actor.clone().unwrap_or_else(|| "server".into()),
             kind: ChannelActivityKind::ModeChanged {
-                modes: modes
+                modes: redact_key_modes(modes)
                     .iter()
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()

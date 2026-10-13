@@ -4669,3 +4669,45 @@ fn a_replayed_line_with_an_old_mask_does_not_change_the_prefix() {
     connection.disconnect().unwrap();
     server.join().unwrap();
 }
+
+#[test]
+fn channel_keys_stay_out_of_the_transcript_and_mode_activity() {
+    let parse = |line: &str| line.parse::<IrcMessage>().unwrap();
+    for (line, expected) in [
+        (
+            ":op!u@h MODE #chan +k review-key",
+            ":op!u@h MODE #chan +k [redacted]",
+        ),
+        (
+            ":op!u@h MODE #chan +ok bob review-key",
+            ":op!u@h MODE #chan +o+k bob [redacted]",
+        ),
+        (
+            ":op!u@h MODE #chan -k review-key",
+            ":op!u@h MODE #chan -k [redacted]",
+        ),
+        (
+            ":srv 324 me #chan +nk review-key",
+            ":srv 324 me #chan +nk [redacted]",
+        ),
+        (":op!u@h MODE #chan +o bob", ":op!u@h MODE #chan +o bob"),
+    ] {
+        let shown = redacted_wire_line(&parse(line));
+        assert_eq!(shown, expected, "{line}");
+        assert!(!shown.contains("review-key"), "{line}");
+    }
+    let sent = IrcMessage::from(IrcCommand::Raw(
+        "MODE".into(),
+        vec!["#chan".into(), "+k".into(), "review-key".into()],
+    ));
+    assert_eq!(redacted_wire_line(&sent), "MODE #chan +k [redacted]");
+    let modes = [
+        Mode::Plus(ChannelMode::Oper, Some("bob".into())),
+        Mode::Plus(ChannelMode::Key, Some("review-key".into())),
+    ];
+    let shown: Vec<_> = redact_key_modes(&modes)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(shown, ["+o bob", "+k [redacted]"]);
+}
