@@ -1183,6 +1183,25 @@ point's reference is IRC's concern and is not a generic sync token.
 Private-message recovery, persistence and echo-message reconciliation are
 future work. Details in `architecture.md` (Channel history).
 
+## D045 — Optional confirmation before quitting (#349)
+
+**Status:** Implemented
+
+`Settings::confirm_quit` ("Confirm before quitting", Application page), off by
+default and added without a version change, so older files read as off.
+
+- **Asked:** only for the user's own quit requests: the `Quit` action (menu,
+  Cmd/Ctrl+Q) and closing the main window (× or Alt+F4, via
+  `on_window_should_close`). Closing the settings or WHOIS window is not a quit.
+- **Never asked:** SIGTERM/SIGHUP/SIGINT (`signals.rs`) and session end from the
+  OS call `cx.quit()` directly and do not pass through the question.
+- **Before the answer nothing happens:** no QUIT, no layout save, no log flush.
+  The window stays open, `quit_prompt_open` suppresses a second question, and
+  Cancel restores the focus that was in the window. "Quit" calls `cx.quit()`,
+  so `on_app_quit` runs the usual shutdown once.
+- The question uses the window prompt (`Window::prompt`), so its Esc and IME
+  handling is the platform's.
+
 ## D044 — Opt-in conversation logs in files (#313)
 
 **Status:** Accepted

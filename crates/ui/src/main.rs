@@ -534,6 +534,10 @@ struct ChatWindow {
     /// the file that is written to. `None` writes nothing: tests, and the
     /// moment before startup supplies the path.
     restore_layout: bool,
+    /// Ask before the user quits (a setting), and whether that question is
+    /// on screen, so a second quit request does not open another.
+    confirm_quit: bool,
+    quit_prompt_open: bool,
     layout_file: Option<std::path::PathBuf>,
     /// The channel order chosen by dragging or the menu, and the file it is
     /// written to (`None` writes nothing, as for `layout_file`).
@@ -961,6 +965,8 @@ impl ChatWindow {
             settings_window: None,
             window_handle: window.window_handle().downcast::<ChatWindow>(),
             restore_layout: saved.restore_window_layout,
+            confirm_quit: saved.confirm_quit,
+            quit_prompt_open: false,
             layout_file: None,
             channel_orders: Default::default(),
             order_file: None,
@@ -1059,6 +1065,16 @@ impl ChatWindow {
         .detach();
         let view = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
+            // Closing the main window quits the application. With the
+            // question on, nothing is touched until it is answered: asking
+            // keeps the window open, and "Quit" goes through `cx.quit()`,
+            // which runs the usual shutdown in `on_app_quit`.
+            if view
+                .update(cx, |this, cx| this.ask_before_quit(window, cx))
+                .unwrap_or(false)
+            {
+                return false;
+            }
             let _ = view.update(cx, |this, _| {
                 this.note_window_bounds(window);
                 this.save_layout_now();
@@ -1077,6 +1093,65 @@ impl ChatWindow {
         .detach();
         this.note_window_bounds(window);
         this
+    }
+
+    /// The user asked to quit the application (menu, shortcut, closing the
+    /// main window). Quits at once unless the confirmation is on. Quits by
+    /// the system or a signal call `cx.quit()` directly and never ask.
+    fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.ask_before_quit(window, cx) {
+            cx.quit();
+        }
+    }
+
+    /// Opens the quit question when it is on and not yet open. Returns
+    /// whether the question applies, so the caller must not quit now. No
+    /// connection, window or draft is touched here; QUIT is only sent after
+    /// "Quit" is chosen.
+    fn ask_before_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.confirm_quit {
+            return false;
+        }
+        if self.quit_prompt_open {
+            return true;
+        }
+        self.quit_prompt_open = true;
+        let focused = window.focused(cx);
+        let connected = self.sessions.values().any(|session| session.irc.is_some());
+        let detail = self.i18n.text(if connected {
+            "quit_detail_connected"
+        } else {
+            "quit_detail"
+        });
+        let answer = window.prompt(
+            PromptLevel::Info,
+            &self.i18n.text("quit_title"),
+            Some(&detail),
+            &[
+                PromptButton::cancel(self.i18n.text("cancel")),
+                PromptButton::ok(self.i18n.text("quit_confirm")),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let quit = answer.await == Ok(1);
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.quit_prompt_open = false;
+                if quit {
+                    cx.quit();
+                } else {
+                    // Back to where the user was typing.
+                    match focused {
+                        Some(handle) => window.focus(&handle),
+                        None => {
+                            window.focus(&this.inputs[&this.state.selection()].focus_handle(cx))
+                        }
+                    }
+                }
+            });
+        })
+        .detach();
+        true
     }
 
     /// Sends QUIT on every connection and waits briefly for it to be
@@ -5355,7 +5430,7 @@ impl ChatWindow {
             .on_action(cx.listener(Self::reconnect_action))
             .on_action(cx.listener(Self::toggle_debug))
             .on_action(cx.listener(Self::copy_diagnostics))
-            .on_action(|_: &Quit, _, cx| cx.quit())
+            .on_action(cx.listener(|this, _: &Quit, window, cx| this.request_quit(window, cx)))
             .on_action(cx.listener(Self::paste_image))
             .child(left)
             .child(right_split)
@@ -6650,7 +6725,20 @@ fn main() {
         desktop::watch(cx);
         apply_shortcuts(ShortcutPrefs::from(&saved), cx);
         cx.set_menus(app_menus(false, &Localizer::new(Language::System)));
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        // Reached when no chat window handles it, e.g. from the settings
+        // window or the menu bar on macOS.
+        cx.on_action(|_: &Quit, cx| {
+            let chat = cx
+                .windows()
+                .into_iter()
+                .find_map(|w| w.downcast::<ChatWindow>());
+            match chat {
+                Some(chat) => {
+                    let _ = chat.update(cx, |this, window, cx| this.request_quit(window, cx));
+                }
+                None => cx.quit(),
+            }
+        });
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();

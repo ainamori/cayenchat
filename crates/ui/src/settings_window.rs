@@ -1295,6 +1295,7 @@ impl SettingsWindow {
         let language_changed = previous.language != saved.language;
         let layout_changed = previous.restore_window_layout != saved.restore_window_layout;
         let restore_layout = saved.restore_window_layout;
+        let confirm_quit = saved.confirm_quit;
         let shortcuts = ShortcutPrefs::from(&saved);
         let shortcuts_changed = ShortcutPrefs::from(previous) != shortcuts;
         let menu_bar_changed = previous.menu_bar_auto_hide != saved.menu_bar_auto_hide;
@@ -1304,6 +1305,7 @@ impl SettingsWindow {
         let rules = notification_rules(&saved.notifications);
         let _ = self.owner.update(cx, |owner, window, cx| {
             owner.image_provider = provider;
+            owner.confirm_quit = confirm_quit;
             owner.apply_conversation_log(&saved.conversation_log);
             cx.set_global(crate::input::ShortenPastedAmazon(shorten_amazon_urls));
             owner.notification_rules = rules;

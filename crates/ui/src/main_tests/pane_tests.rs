@@ -3610,3 +3610,54 @@ fn switching_settings_tabs_resets_only_the_pane_scroll(cx: &mut TestAppContext) 
         assert_eq!(form.read_with(cx, |f, _| f.nav_scroll.offset()), scrolled);
     }
 }
+
+#[gpui::test]
+fn quitting_asks_first_only_when_switched_on(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        crate::apply_shortcuts(crate::ShortcutPrefs::default(), cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let mut settings = crate::settings_with_channels("#a");
+    settings.language = cayenchat_storage::Language::English;
+    assert!(!settings.confirm_quit);
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    cx.run_until_parked();
+
+    // Off: closing the window goes straight on, with no question.
+    assert!(cx.simulate_close());
+    assert!(!cx.has_pending_prompt());
+
+    chat.update(cx, |chat, _| chat.confirm_quit = true);
+    let input = chat.read_with(cx, |chat, _| chat.inputs[&chat.state.selection()].clone());
+    cx.update(|window, cx| window.focus(&input.focus_handle(cx)));
+    cx.simulate_input("unsent");
+
+    // On: the window stays and one question opens, however often asked.
+    assert!(!cx.simulate_close());
+    assert!(cx.has_pending_prompt());
+    let (title, detail) = cx.pending_prompt().unwrap();
+    assert_eq!(title, "Quit CayenChat?");
+    assert!(detail.contains("quits the application"), "{detail}");
+    assert!(!cx.simulate_close());
+    cx.dispatch_action(super::Quit);
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(!cx.has_pending_prompt(), "asked once");
+
+    // Cancelled: the draft and the focus are where they were, and the next
+    // request asks again.
+    input.read_with(cx, |input, _| assert_eq!(input.text(), "unsent"));
+    cx.update(|window, cx| assert!(input.focus_handle(cx).is_focused(window)));
+    chat.read_with(cx, |chat, _| assert!(!chat.quit_prompt_open));
+    cx.dispatch_action(super::Quit);
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+}
