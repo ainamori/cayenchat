@@ -1020,6 +1020,117 @@ fn rejoining_after_a_kick_lists_each_member_once() {
 }
 
 #[test]
+fn modes_after_rejoining_from_a_kick_reach_the_roster() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut lines = BufReader::new(socket.try_clone().unwrap()).lines();
+        while !lines.next().unwrap().unwrap().starts_with("USER ") {}
+        socket
+            .write_all(b":server 001 me :Welcome\r\n:server 376 me :End of MOTD\r\n")
+            .unwrap();
+        assert_eq!(lines.next().unwrap().unwrap(), "JOIN #a");
+        // carol left while we were out of the channel and is never reported.
+        socket.write_all(b":me!u@h JOIN #a\r\n:server 353 me = #a :@op bob alice carol me\r\n:server 366 me #a :End of NAMES\r\n:op!o@h KICK #a me :bye\r\n:me!u@h JOIN #a\r\n:server 353 me = #a :@op bob alice me\r\n:server 366 me #a :End of NAMES\r\n:op!o@h MODE #a +o alice\r\n:op!o@h MODE #a +v bob\r\n").unwrap();
+    });
+    let mut config = ConnectionConfig::tls("127.0.0.1".into(), "me".into(), vec!["#a".into()]);
+    config.port = port;
+    config.use_tls = false;
+    let mut connection = Connection::connect(config).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last = Vec::new();
+    let mut modes = 0;
+    while Instant::now() < deadline && modes < 2 {
+        match connection.try_recv() {
+            Some(Event::Names { users, .. }) => last = users,
+            Some(Event::ChannelActivity {
+                kind: ChannelActivityKind::ModeChanged { .. },
+                ..
+            }) => modes += 1,
+            Some(_) => {}
+            None => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    // A roster snapshot may follow the last mode change.
+    thread::sleep(Duration::from_millis(100));
+    while let Some(event) = connection.try_recv() {
+        if let Event::Names { users, .. } = event {
+            last = users;
+        }
+    }
+    last.sort();
+    assert_eq!(last, ["+bob", "@alice", "@op", "me"], "modes: {modes}");
+    server.join().unwrap();
+}
+
+/// Connects to a server that sends `script` after the JOIN and returns the last roster.
+fn roster_after_script(script: &'static [u8], settle_events: usize) -> Vec<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut lines = BufReader::new(socket.try_clone().unwrap()).lines();
+        while !lines.next().unwrap().unwrap().starts_with("USER ") {}
+        socket
+            .write_all(b":server 001 me :Welcome\r\n:server 376 me :End of MOTD\r\n")
+            .unwrap();
+        assert_eq!(lines.next().unwrap().unwrap(), "JOIN #a");
+        socket.write_all(script).unwrap();
+    });
+    let mut config = ConnectionConfig::tls("127.0.0.1".into(), "me".into(), vec!["#a".into()]);
+    config.port = port;
+    config.use_tls = false;
+    let mut connection = Connection::connect(config).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last = Vec::new();
+    let mut seen = 0;
+    while Instant::now() < deadline && seen < settle_events {
+        match connection.try_recv() {
+            Some(Event::Names { users, .. }) => {
+                last = users;
+                seen += 1;
+            }
+            Some(_) => {}
+            None => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    thread::sleep(Duration::from_millis(100));
+    while let Some(event) = connection.try_recv() {
+        if let Event::Names { users, .. } = event {
+            last = users;
+        }
+    }
+    last.sort();
+    server.join().unwrap();
+    last
+}
+
+#[test]
+fn a_kick_after_our_nick_changed_drops_the_old_roster() {
+    let last = roster_after_script(
+        b":server 353 me = #a :@op bob alice me\r\n:server 366 me #a :End of NAMES\r\n:me!u@h NICK renamed\r\n:op!o@h KICK #a renamed :bye\r\n:renamed!u@h JOIN #a\r\n:server 353 renamed = #a :@op bob alice renamed\r\n:server 366 renamed #a :End of NAMES\r\n:op!o@h MODE #a +o renamed\r\n:op!o@h MODE #a +v bob\r\n",
+        3,
+    );
+    assert_eq!(last, ["+bob", "@op", "@renamed", "alice"]);
+}
+
+#[test]
+fn a_kick_of_someone_using_our_old_nick_keeps_the_roster() {
+    let last = roster_after_script(
+        b":server 353 me = #a :@op bob me\r\n:server 366 me #a :End of NAMES\r\n:me!u@h NICK renamed\r\n:me!x@y JOIN #a\r\n:op!o@h KICK #a me :bye\r\n:op!o@h MODE #a +v bob\r\n",
+        2,
+    );
+    assert_eq!(last, ["+bob", "@op", "renamed"]);
+}
+
+#[test]
 fn kicks_and_refused_joins_reach_the_channel_log() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
