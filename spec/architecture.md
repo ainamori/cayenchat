@@ -1761,8 +1761,10 @@ becomes a record: the live arms of `ChatWindow::handle_event` (channel and
 private messages, channel activity, topic changes, a peer's quit or nick
 change, and our own sends after `OutgoingAccepted`, held until
 `OutgoingConfirmed` when the connection echoes). `ChatWindow` owns the
-`ConversationLogs` (settings applied from `apply_to_chat_window`), polls its
-failure notice at the start of each event batch and stops it on quit.
+`ConversationLogs` (settings applied from `apply_to_chat_window`), is woken by
+the logger's `Notify` callback (a channel read by a task of the window) to
+announce a failure or a lock, and retires the logger without waiting when a
+log is turned off; only quitting waits, for at most 2 seconds.
 `Event::Topic` carries who changed the topic and the server time for it.
 
 ## Server-confirmed sending (D036)

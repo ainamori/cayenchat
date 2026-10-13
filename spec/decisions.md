@@ -1208,10 +1208,17 @@ The maintainer approved this specification on the issue (2026-10-13).
   `/ \ : * ? " < > |`, controls and `%` become `%XX` (UTF-8 bytes); a name
   of only dots, a trailing dot or space and the first letter of a Windows
   device name (`CON`, `NUL`, `COM1`…) are escaped too; an empty name is
-  `%00`; a component is cut at 200 bytes. The path is a join of escaped
-  components below the folder, so a server cannot write outside it. The file
-  is opened without following a symbolic link (`O_NOFOLLOW`, and a check on
-  other platforms), `0600` in `0700` directories.
+  `%00`; a component over 200 bytes is cut and ends in `~` and 16 hex digits
+  of the SHA-256 of the whole name, so long names with the same start (and
+  network names whose ID suffix would be cut) stay apart. The path is a join
+  of escaped components below the folder, so a server cannot write outside
+  it; the folder itself and its parents may be symbolic links the user made.
+  The file is opened without following a symbolic link (`O_NOFOLLOW`, and a
+  check on other platforms) and without waiting on a pipe (`O_NONBLOCK`),
+  `0600` in `0700` directories. Before the first write to a file the opened
+  file must be a regular file and, on Unix, neither it nor the directories
+  below the folder may be accessible to group or others; otherwise nothing
+  is written and the failure says which mode to set (`chmod 600` / `700`).
 - **Line format.** A new file starts with `# cayenchat-log 1`. Every other
   line has four tab-separated columns: time (ISO 8601, local offset,
   milliseconds; the server's `time` when negotiated, else receipt), kind,
@@ -1239,13 +1246,27 @@ The maintainer approved this specification on the issue (2026-10-13).
   into a 4096-record queue; a full queue drops the record and counts it
   (`Status::dropped`). The thread keeps up to 32 files open, flushes and
   `sync_data`s every second and at exit, so a crash loses at most the last
-  second. Quitting drops the logger, which writes what is queued.
+  second; only files written to since are synced. Nothing on the UI thread
+  waits for the disk: turning a log off or moving the folder `retire`s the
+  logger (the thread drains its queue, flushes and releases the folder on its
+  own) and the next logger's thread waits for it before taking the lock.
+  Only quitting waits, for at most 2 seconds. A record is written only if
+  its kind of log is on when it is written, and a held own message of a kind
+  that is turned off is dropped.
 - **Failure and sharing.** The first I/O error is kept (`Status::failure`)
   and shown once as a line in every server tab and permanently on the
   Application page; the file is reopened by the next record. The thread
-  takes an exclusive lock on `<folder>/.cayenchat-log.lock`
-  (`File::try_lock`, so `storage` needs Rust 1.89): a second CayenChat on the
-  same folder writes nothing and says so (`Status::locked`).
+  calls a `Notify` callback when it first fails or finds the folder locked,
+  which wakes the chat window, so the notice does not wait for an IRC event.
+  The thread takes an exclusive lock on `<folder>/.cayenchat-log.lock`
+  (opened for writing, not append-only: Windows cannot lock an append-only
+  handle; `File::try_lock`, so `storage` needs Rust 1.89): a second
+  CayenChat on the same folder writes nothing and says so
+  (`Status::locked`).
+- **Own messages.** `OutgoingAccepted.action` carries the text of an ACTION
+  (`/me`) so it is logged as `action` and not guessed from the `* …` shown;
+  `OutgoingConfirmed.text`, when the server changed the text, replaces the
+  held text.
 - **Not in scope.** Reading logs back, a viewer, search, SQLite, migration
   of other clients' logs, compatibility with their file names or formats.
 - **Cost.** Off, a line costs one `Option` test and a flag test. On, the UI
