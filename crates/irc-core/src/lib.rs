@@ -1621,7 +1621,11 @@ impl Connection {
     }
 
     pub fn send_command(&self, line: &str, selected_channel: Option<&str>) -> Result<(), String> {
-        let outgoing = parse_slash_command(line, selected_channel)?;
+        let mut outgoing = parse_slash_command(line, selected_channel)?;
+        // A message sent as a command is handed back as the line typed.
+        if let Outgoing::Message { draft, .. } = &mut outgoing {
+            *draft = Some(line.to_owned());
+        }
         let outgoing = with_default_part_reason(outgoing, self.part_message.as_deref());
         self.validate(&outgoing)?;
         self.commands

@@ -87,6 +87,8 @@ use whois::{JoinedChannels, WhoisWindow};
 
 /// The channel log's share of the log height when nothing was dragged, and
 /// the bounds of what dragging may leave to either log.
+/// Accepted drafts remembered for handing back a refused one.
+const RECENT_SENDS: usize = 16;
 const DEFAULT_LOG_SPLIT: f32 = 0.5;
 /// Pause after the last move or resize before the window layout is written.
 const LAYOUT_SAVE_DELAY: Duration = Duration::from_millis(500);
@@ -508,6 +510,11 @@ struct ChatWindow {
     member_selection: member_selection::MemberSelection,
     /// Sent drafts recalled with Up/Down in the draft input.
     input_history: input_history::InputHistory,
+    /// The latest accepted drafts and the input each came from, so a draft
+    /// the connection refuses later goes back to the right input (a command
+    /// can name another target than the conversation it was typed in).
+    /// Drafts with credentials are not kept.
+    recent_sends: std::collections::VecDeque<(NetworkId, Selection, String)>,
     /// One row per server whose nickname was rejected during registration,
     /// in the order the rejections arrived.
     nick_prompts: Vec<NickPrompt>,
@@ -932,6 +939,7 @@ impl ChatWindow {
             member_prompt: None,
             member_selection: Default::default(),
             input_history: Default::default(),
+            recent_sends: Default::default(),
             nick_prompts: Vec::new(),
             startup_connections,
             settings_window: None,
@@ -3702,6 +3710,15 @@ impl ChatWindow {
         self.feedback = match result {
             Ok(()) => {
                 self.input_history.record(&text, private_peer.as_deref());
+                if let Some(network) = network
+                    && !input_history::is_sensitive(&text, private_peer.as_deref())
+                {
+                    if self.recent_sends.len() >= RECENT_SENDS {
+                        self.recent_sends.pop_front();
+                    }
+                    self.recent_sends
+                        .push_back((network, selection, text.clone()));
+                }
                 input.update(cx, |input, cx| input.clear_after_send(cx));
                 None
             }
@@ -3731,10 +3748,32 @@ impl ChatWindow {
     ) {
         self.send_failure = None;
         self.feedback = Some(error.to_owned());
-        let Some(id) = self.state.channel_id(network, channel) else {
-            return;
+        // The input it was typed in; failing that (it fell out of the list),
+        // the conversation with the target, for a plain message only.
+        let origin = self
+            .recent_sends
+            .iter()
+            .rposition(|(n, _, text)| *n == network && text == draft)
+            .and_then(|index| self.recent_sends.remove(index))
+            .map(|(_, selection, _)| selection);
+        let selection = match origin {
+            Some(selection) => selection,
+            None if draft.starts_with('/') => return,
+            None => {
+                let key = cayenchat_irc_core::text::nickname_key(channel);
+                if input_history::is_sensitive(draft, Some(channel)) {
+                    return;
+                }
+                let id = self
+                    .state
+                    .channel_id(network, channel)
+                    .or_else(|| self.state.private_id(network, &key));
+                let Some(id) = id else {
+                    return;
+                };
+                Selection::Channel(id)
+            }
         };
-        let selection = Selection::Channel(id);
         let Some(input) = self.inputs.get(&selection).cloned() else {
             return;
         };
@@ -6681,3 +6720,7 @@ mod navigation_binding_tests;
 #[cfg(test)]
 #[path = "main_tests/bidi_display_tests.rs"]
 mod bidi_display_tests;
+
+#[cfg(test)]
+#[path = "main_tests/rejected_draft_tests.rs"]
+mod rejected_draft_tests;
