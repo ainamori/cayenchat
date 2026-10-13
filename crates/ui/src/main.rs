@@ -519,6 +519,8 @@ struct ChatWindow {
     server_menu: Option<ServerMenu>,
     member_menu: Option<MemberMenu>,
     channel_menu: Option<ChannelMenu>,
+    /// The menu of a right click in the channel log.
+    log_menu: Option<LogMenu>,
     member_prompt: Option<MemberPrompt>,
     /// Members chosen in the member list of the selected channel.
     member_selection: member_selection::MemberSelection,
@@ -681,6 +683,30 @@ struct ChannelMenu {
     private: bool,
 }
 
+/// The menu of a right click in the log of a channel or private
+/// conversation. `sender` is the speaker of the clicked message row, only
+/// when that row names one peer we can open a conversation with.
+struct LogMenu {
+    position: Point<Pixels>,
+    network: NetworkId,
+    conversation: ConversationId,
+    channel: String,
+    private: bool,
+    sender: Option<String>,
+    /// The clipboard held text when the menu opened.
+    can_paste: bool,
+}
+
+#[derive(Clone, Copy)]
+enum LogMenuChoice {
+    Copy,
+    Paste,
+    Mode,
+    Topic,
+    Nick,
+    Private,
+}
+
 struct MemberMenu {
     position: Point<Pixels>,
     network: NetworkId,
@@ -703,6 +729,10 @@ enum MemberPromptKind {
     Join,
     /// Change our own nickname on the server.
     Nick,
+    /// Change the modes of the channel named by the prompt's nickname.
+    Mode,
+    /// Change the topic of the channel named by the prompt's nickname.
+    Topic,
 }
 
 /// The dialog heading, with the nickname as drawn.
@@ -713,6 +743,8 @@ fn member_prompt_title(i18n: &Localizer, kind: MemberPromptKind, nickname: &str)
             MemberPromptKind::Invite => "member_invite_title",
             MemberPromptKind::Join => "channel_join_title",
             MemberPromptKind::Nick => "nickname_change_title",
+            MemberPromptKind::Mode => "channel_mode_title",
+            MemberPromptKind::Topic => "channel_topic_title",
         },
         nickname,
     )
@@ -953,6 +985,7 @@ impl ChatWindow {
             server_menu: None,
             member_menu: None,
             channel_menu: None,
+            log_menu: None,
             member_prompt: None,
             member_selection: Default::default(),
             input_history: Default::default(),
@@ -1736,6 +1769,7 @@ impl ChatWindow {
         if self.menus_for(network) {
             self.member_menu = None;
             self.channel_menu = None;
+            self.log_menu = None;
         }
         if self
             .member_prompt
@@ -1779,6 +1813,10 @@ impl ChatWindow {
             .is_some_and(|menu| menu.network == network)
             || self
                 .channel_menu
+                .as_ref()
+                .is_some_and(|menu| menu.network == network)
+            || self
+                .log_menu
                 .as_ref()
                 .is_some_and(|menu| menu.network == network)
     }
@@ -2098,7 +2136,148 @@ impl ChatWindow {
         let server = self.server_menu.take().is_some();
         let member = self.member_menu.take().is_some();
         let channel = self.channel_menu.take().is_some();
-        server || member || channel
+        let log = self.log_menu.take().is_some();
+        server || member || channel || log
+    }
+
+    /// Whether `conversation` has a non-empty text selection in its log.
+    fn has_log_selection(&self, conversation: ConversationId) -> bool {
+        self.log_selection.is_some_and(|selection| {
+            let (start, end) = selection.bounds();
+            selection.channel == conversation && start != end
+        })
+    }
+
+    /// Opens the log menu at `position` for the selected conversation.
+    /// `sender` is the speaker of the clicked row, if it has one: it must be
+    /// a plain nickname and not ourselves. The log selection is untouched.
+    fn open_log_menu(
+        &mut self,
+        position: Point<Pixels>,
+        sender: Option<&str>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(conversation) = self.state.selected_channel() else {
+            return;
+        };
+        let (id, network, channel, private) = (
+            conversation.id,
+            conversation.network,
+            conversation.name.clone(),
+            conversation.is_private(),
+        );
+        let sender = sender
+            .filter(|sender| cayenchat_irc_core::valid_nickname(sender))
+            .filter(|sender| !self.is_own_nickname(network, sender))
+            .map(str::to_owned);
+        let viewport = window.viewport_size();
+        self.server_menu = None;
+        self.member_menu = None;
+        self.channel_menu = None;
+        self.member_prompt = None;
+        self.log_menu = Some(LogMenu {
+            position: point(
+                position.x.min((viewport.width - px(230.)).max(px(0.))),
+                position.y.min((viewport.height - px(190.)).max(px(0.))),
+            ),
+            network,
+            conversation: id,
+            channel,
+            private,
+            sender,
+            can_paste: cx
+                .read_from_clipboard()
+                .is_some_and(|item| item.text().is_some()),
+        });
+        cx.notify();
+    }
+
+    fn log_menu_choice(
+        &mut self,
+        choice: LogMenuChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(menu) = self.log_menu.take() else {
+            return;
+        };
+        // A menu left over from another conversation does nothing.
+        if self.state.selection() != Selection::Channel(menu.conversation) {
+            cx.notify();
+            return;
+        }
+        match choice {
+            LogMenuChoice::Copy => self.copy_selected_log(cx),
+            LogMenuChoice::Paste => {
+                if let Some(input) = self.inputs.get(&self.state.selection()).cloned() {
+                    window.focus(&input.focus_handle(cx));
+                    input.update(cx, |input, cx| input.paste_clipboard(window, cx));
+                }
+            }
+            LogMenuChoice::Mode | LogMenuChoice::Topic => {
+                let topic = matches!(choice, LogMenuChoice::Topic);
+                let initial = if topic {
+                    self.state
+                        .selected_channel()
+                        .map(|channel| channel.topic.clone())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                let kind = if topic {
+                    MemberPromptKind::Topic
+                } else {
+                    MemberPromptKind::Mode
+                };
+                self.show_member_prompt(
+                    menu.network,
+                    menu.channel.clone(),
+                    kind,
+                    menu.position,
+                    window,
+                    cx,
+                );
+                if let Some(prompt) = self.member_prompt.as_ref().filter(|_| !initial.is_empty()) {
+                    prompt.input.update(cx, |input, cx| {
+                        input.set_text(&initial, cx);
+                        input.select_everything(cx);
+                    });
+                }
+            }
+            LogMenuChoice::Nick => {
+                let nickname = self
+                    .own_nickname(menu.network)
+                    .unwrap_or_default()
+                    .to_owned();
+                self.show_member_prompt(
+                    menu.network,
+                    nickname,
+                    MemberPromptKind::Nick,
+                    menu.position,
+                    window,
+                    cx,
+                );
+            }
+            LogMenuChoice::Private => {
+                // Opens the conversation without sending anything.
+                if let Some(sender) = menu.sender {
+                    let key = cayenchat_irc_core::text::nickname_key(&sender);
+                    if let Some(id) = self.state.private_conversation(
+                        menu.network,
+                        &key,
+                        &sender,
+                        Missing::Create,
+                    ) {
+                        self.ensure_inputs(cx);
+                        self.dispatch(Command::SelectChannel(id), window, cx);
+                    } else {
+                        self.set_feedback(Some(self.i18n.text("private_conversation_limit")));
+                    }
+                }
+            }
+        }
+        cx.notify();
     }
 
     fn channel_menu_command(&mut self, join: bool, cx: &mut Context<Self>) {
@@ -2368,6 +2547,8 @@ impl ChatWindow {
             MemberPromptKind::PrivateMessage => "member_message_placeholder",
             MemberPromptKind::Invite | MemberPromptKind::Join => "member_channel_placeholder",
             MemberPromptKind::Nick => "nickname",
+            MemberPromptKind::Mode => "channel_mode_placeholder",
+            MemberPromptKind::Topic => "channel_topic_placeholder",
         });
         // A new nickname starts from the current one, all selected, so a
         // small change is a small edit and typing replaces it.
@@ -2404,6 +2585,7 @@ impl ChatWindow {
         self.server_menu = None;
         self.member_menu = None;
         self.channel_menu = None;
+        self.log_menu = None;
         if let Some(prompt) = self
             .nick_prompts
             .iter_mut()
@@ -2581,6 +2763,20 @@ impl ChatWindow {
                     Err(self.i18n.text("nickname_change_required"))
                 }
                 MemberPromptKind::Nick => connection.change_nickname(value.trim()),
+                // The prompt's nickname is the channel. The value is not
+                // echoed anywhere: a mode may carry a channel key.
+                MemberPromptKind::Mode if value.trim().is_empty() => {
+                    Err(self.i18n.text("channel_mode_required"))
+                }
+                MemberPromptKind::Mode => connection
+                    .send_command(&format!("/mode {} {}", prompt.nickname, value.trim()), None),
+                MemberPromptKind::Topic if value.trim().is_empty() => {
+                    Err(self.i18n.text("channel_topic_required"))
+                }
+                MemberPromptKind::Topic => connection.send_command(
+                    &format!("/topic {} :{}", prompt.nickname, value.trim()),
+                    None,
+                ),
             },
             Err(error) => Err(error),
         };
@@ -3033,6 +3229,7 @@ impl ChatWindow {
         self.server_menu = None;
         self.member_menu = None;
         self.channel_menu = None;
+        self.log_menu = None;
         self.state.dispatch(command);
         self.log_selection = None;
         self.set_feedback(None);
@@ -4433,6 +4630,7 @@ impl ChatWindow {
                             });
                             this.member_menu = None;
                             this.channel_menu = None;
+                            this.log_menu = None;
                             this.member_prompt = None;
                             cx.stop_propagation();
                             cx.notify();
@@ -4573,6 +4771,7 @@ impl ChatWindow {
                             });
                             this.server_menu = None;
                             this.member_menu = None;
+                            this.log_menu = None;
                             this.member_prompt = None;
                             cx.stop_propagation();
                             cx.notify();
@@ -4689,6 +4888,20 @@ impl ChatWindow {
             .track_focus(&self.log_focus)
             .on_action(cx.listener(Self::copy_log_selection))
             .on_action(cx.listener(Self::copy_log_selection_menu))
+            // A right click off the message rows (blank space or a log
+            // without rows) offers the menu without a speaker.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.open_log_menu(event.position, None, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && this.log_menu.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| this.finish_log_selection()),
@@ -5145,6 +5358,79 @@ impl ChatWindow {
                 .child(div().my_1().border_t_1().border_color(theme.separator))
                 .children(moves)
         });
+        let log_menu = self.log_menu.as_ref().map(|menu| {
+            let registered = self.registered_connection(menu.network).is_ok();
+            let mut groups = vec![vec![
+                (
+                    LogMenuChoice::Copy,
+                    self.i18n.text("log_menu_copy"),
+                    self.has_log_selection(menu.conversation),
+                ),
+                (
+                    LogMenuChoice::Paste,
+                    self.i18n.text("log_menu_paste"),
+                    menu.can_paste,
+                ),
+            ]];
+            if !menu.private {
+                groups.push(vec![
+                    (
+                        LogMenuChoice::Mode,
+                        self.i18n.text("log_menu_mode"),
+                        registered,
+                    ),
+                    (
+                        LogMenuChoice::Topic,
+                        self.i18n.text("log_menu_topic"),
+                        registered,
+                    ),
+                ]);
+            }
+            groups.push(vec![(
+                LogMenuChoice::Nick,
+                self.i18n.text("log_menu_nick"),
+                registered,
+            )]);
+            if let Some(sender) = &menu.sender {
+                groups.push(vec![(
+                    LogMenuChoice::Private,
+                    self.i18n.format_nickname("log_menu_private", sender),
+                    true,
+                )]);
+            }
+            let mut popup = div()
+                .id("log-context-menu")
+                .occlude()
+                .w(px(230.))
+                .p_1()
+                .bg(theme.surface)
+                .border_1()
+                .border_color(border)
+                .shadow_md();
+            for (group, entries) in groups.into_iter().enumerate() {
+                if group > 0 {
+                    popup = popup.child(div().my_1().border_t_1().border_color(theme.separator));
+                }
+                for (index, (choice, label, enabled)) in entries.into_iter().enumerate() {
+                    popup = popup.child(
+                        div()
+                            .id(("log-menu-item", group * 8 + index))
+                            .px_2()
+                            .py_1()
+                            .child(label)
+                            .when(enabled, |d| {
+                                d.cursor_pointer()
+                                    .hover(|d| d.bg(theme.hover_strong))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.log_menu_choice(choice, window, cx)
+                                    }))
+                            })
+                            .when(!enabled, |d| d.text_color(theme.text_muted)),
+                    );
+                }
+            }
+            popup
+        });
         let member_menu = self.member_menu.as_ref().map(|menu| {
             let mut popup = div()
                 .id("member-context-menu")
@@ -5265,7 +5551,9 @@ impl ChatWindow {
             });
             let submit = self.i18n.text(match prompt.kind {
                 MemberPromptKind::Join => "channel_join",
-                MemberPromptKind::Nick => "nickname_change_submit",
+                MemberPromptKind::Nick | MemberPromptKind::Mode | MemberPromptKind::Topic => {
+                    "nickname_change_submit"
+                }
                 MemberPromptKind::PrivateMessage | MemberPromptKind::Invite => "member_submit",
             });
             div()
@@ -5372,6 +5660,9 @@ impl ChatWindow {
                 self.channel_menu.as_ref().zip(channel_menu),
                 |d, (at, menu)| d.child(snapped_menu(at.position, menu)),
             )
+            .when_some(self.log_menu.as_ref().zip(log_menu), |d, (at, menu)| {
+                d.child(snapped_menu(at.position, menu))
+            })
             .when_some(member_prompt, |d, prompt| d.child(prompt))
             .when_some(nick_prompts, |d, prompts| d.child(prompts))
             .into_any_element()
@@ -5977,6 +6268,9 @@ impl ChatWindow {
         });
         // One element for the whole message, so both lines of Reiwa mode
         // share the row's alternating background.
+        // Only a message line names a speaker to open a conversation with;
+        // activity lines (JOIN, MODE, ...) offer the rest of the menu only.
+        let speaker = (!message.activity).then(|| message.sender.clone());
         let row = div()
             .w_full()
             .flex()
@@ -5985,7 +6279,14 @@ impl ChatWindow {
             .py(px(1.))
             .when(style.alternate_rows && index % 2 == 1, |d| {
                 d.bg(style.main_alt)
-            });
+            })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.open_log_menu(event.position, speaker.as_deref(), window, cx);
+                    cx.stop_propagation();
+                }),
+            );
         let row = if reiwa {
             row.children(avatar)
         } else {
@@ -6346,6 +6647,7 @@ impl ChatWindow {
                             let viewport = window.viewport_size();
                             this.server_menu = None;
                             this.channel_menu = None;
+                            this.log_menu = None;
                             this.member_prompt = None;
                             this.member_menu = Some(MemberMenu {
                                 position: point(
@@ -6859,3 +7161,7 @@ mod navigation_binding_tests;
 #[cfg(test)]
 #[path = "main_tests/bidi_display_tests.rs"]
 mod bidi_display_tests;
+
+#[cfg(test)]
+#[path = "main_tests/log_menu_tests.rs"]
+mod log_menu_tests;
