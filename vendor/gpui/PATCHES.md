@@ -160,3 +160,10 @@ outside it. The macOS delegate implements `applicationShouldTerminate:` and asks
 the handler for a Dock "Quit". Quits from `App::quit` and the system's shutdown,
 restart and log out (a quit Apple event with a reason other than "quit") are
 never asked, and other platforms ignore the handler.
+
+In `src/platform/windows/window.rs`, `activate` does not send the simulated
+Alt press when a window of this process is already the foreground window
+(`GetForegroundWindow` + `GetWindowThreadProcessId`): `SetForegroundWindow`
+succeeds then, and the Alt would only reach our own window and focus its menu
+bar. CayenChat activates the chat window and then the initial settings window
+at startup (issue #354).
