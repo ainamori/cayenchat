@@ -1281,6 +1281,7 @@ impl SettingsWindow {
         let rules = notification_rules(&saved.notifications);
         let _ = self.owner.update(cx, |owner, window, cx| {
             owner.image_provider = provider;
+            owner.apply_conversation_log(&saved.conversation_log);
             cx.set_global(crate::input::ShortenPastedAmazon(shorten_amazon_urls));
             owner.notification_rules = rules;
             if shortcuts_changed {

@@ -9,6 +9,7 @@ mod avatars;
 mod char_refs;
 mod color_picker;
 mod compact_urls;
+mod conversation_log;
 mod decorations;
 mod default_avatar;
 mod desktop;
@@ -60,6 +61,7 @@ use cayenchat_irc_core::{
 use cayenchat_model::{
     ConversationId, Network, NetworkId, Provenance, TimeOfDay, Timestamp, display, names,
 };
+use cayenchat_storage::chatlog::{Kind as LogKind, Scope};
 use cayenchat_storage::{
     Appearance, AutoJoinEntry, ChannelNumberModifier, CredentialError, CredentialStore,
     Ircv3Preferences, Language, Notifications, Secret, SecretKey, ServerProfile, Settings,
@@ -553,6 +555,7 @@ struct ChatWindow {
     whois_windows: HashMap<(NetworkId, String), WindowHandle<WhoisWindow>>,
     whois_replies: Vec<(NetworkId, WhoisInfo, bool)>,
     debug_enabled: bool,
+    conversation_logs: conversation_log::ConversationLogs,
     menu_bar: menu_bar::MenuBar,
     appearance: Appearance,
     theme_mode: ThemeMode,
@@ -963,6 +966,7 @@ impl ChatWindow {
             whois_windows: HashMap::new(),
             whois_replies: Vec::new(),
             debug_enabled: false,
+            conversation_logs: conversation_log::ConversationLogs::new(&saved.conversation_log),
             menu_bar: {
                 let mut bar = menu_bar::MenuBar::new(window, cx, |this| &mut this.menu_bar);
                 bar.set_always(!saved.menu_bar_auto_hide);
@@ -1041,6 +1045,7 @@ impl ChatWindow {
         cx.on_app_quit(|this, _| {
             this.save_layout_now();
             this.quit_connections();
+            this.conversation_logs.stop();
             async {}
         })
         .detach();
@@ -3053,6 +3058,7 @@ impl ChatWindow {
     ) -> bool {
         let worker_closed = worker == Worker::Closed;
         let changed = !batch.is_empty();
+        self.announce_conversation_log();
         let mut disconnected = false;
         let mut refused = false;
         // The IRCv3 settings tab shows our own avatar and whether it can
@@ -3263,6 +3269,17 @@ impl ChatWindow {
                     return;
                 }
                 let conversation = self.state.channel_id(network, &channel);
+                if !replayed && conversation.is_some() {
+                    self.log_message(
+                        network,
+                        Scope::Channel,
+                        &channel,
+                        &sender,
+                        &text,
+                        notice,
+                        server_time,
+                    );
+                }
                 self.notify_message(
                     network,
                     ReceivedMessage {
@@ -3285,6 +3302,7 @@ impl ChatWindow {
                 kind,
                 server_time,
             } => {
+                self.log_channel_activity(network, &channel, &actor, &kind, server_time);
                 let alert = kind.is_alert();
                 let join_failed = matches!(kind, ChannelActivityKind::JoinFailed { .. });
                 let text = channel_activity_text(&actor, kind);
@@ -3349,6 +3367,17 @@ impl ChatWindow {
                         ) {
                             return;
                         }
+                        if !replayed {
+                            self.log_message(
+                                network,
+                                Scope::Private,
+                                &sender,
+                                &sender,
+                                &text,
+                                notice,
+                                server_time,
+                            );
+                        }
                         if !notice && !replayed {
                             self.state.highlight(id);
                         }
@@ -3391,11 +3420,32 @@ impl ChatWindow {
                     None,
                     event_provenance(replayed),
                 );
+                if !replayed {
+                    let own = self.own_nickname(network).unwrap_or("me");
+                    self.log_message(
+                        network,
+                        Scope::Private,
+                        &target,
+                        own,
+                        &text,
+                        notice,
+                        server_time,
+                    );
+                }
                 self.append_own_private(network, &target, &text, notice, meta);
             }
             Event::UserNickChanged { from, to } => {
                 let from_key = cayenchat_irc_core::text::nickname_key(&from);
                 if let Some(id) = self.state.private_id(network, &from_key) {
+                    self.log_event(
+                        network,
+                        Scope::Private,
+                        &from,
+                        LogKind::Nick,
+                        &from,
+                        &to,
+                        None,
+                    );
                     let to_key = cayenchat_irc_core::text::nickname_key(&to);
                     self.state.rename_private(network, &from_key, &to_key, &to);
                     self.state
@@ -3405,6 +3455,16 @@ impl ChatWindow {
             Event::UserQuit { nickname, reason } => {
                 let key = cayenchat_irc_core::text::nickname_key(&nickname);
                 if let Some(id) = self.state.private_id(network, &key) {
+                    let detail = reason.clone().unwrap_or_default();
+                    self.log_event(
+                        network,
+                        Scope::Private,
+                        &nickname,
+                        LogKind::Quit,
+                        &nickname,
+                        &detail,
+                        None,
+                    );
                     let text =
                         channel_activity_text(&nickname, ChannelActivityKind::Quit { reason });
                     self.state.append_conversation_activity(id, text);
@@ -3493,7 +3553,27 @@ impl ChatWindow {
                         .retain_present(id, &conversation.members);
                 }
             }
-            Event::Topic { channel, topic } => self.state.set_topic(network, &channel, &topic),
+            Event::Topic {
+                channel,
+                topic,
+                changed_by,
+                server_time,
+            } => {
+                self.state.set_topic(network, &channel, &topic);
+                if let Some(by) = changed_by
+                    && self.state.channel_id(network, &channel).is_some()
+                {
+                    self.log_event(
+                        network,
+                        Scope::Channel,
+                        &channel,
+                        LogKind::Topic,
+                        &by,
+                        &topic,
+                        server_time,
+                    );
+                }
+            }
             Event::ServerLine(line) => self.state.append_server_message(network, line),
             Event::UserAccount {
                 nickname,
@@ -3579,6 +3659,25 @@ impl ChatWindow {
                             .format("event_message_queued", &[("channel", &channel)]),
                     );
                 }
+                // Our line is logged once the server's echo confirms it, or
+                // at once when the server sends none.
+                if self.state.latest_sequence() > before {
+                    let scope = if valid_channel(&channel) {
+                        Scope::Channel
+                    } else {
+                        Scope::Private
+                    };
+                    let own = self.own_nickname(network).unwrap_or("me");
+                    let record =
+                        self.message_record(network, scope, &channel, own, &text, notice, None);
+                    match (local_id, record) {
+                        (Some(local_id), Some(record)) => {
+                            self.hold_own_message(network, local_id, record)
+                        }
+                        (None, record) => self.write_own_message(record),
+                        _ => {}
+                    }
+                }
                 // Confirmed sending: find the line just added again when the
                 // server's echo arrives.
                 if let Some(local_id) = local_id
@@ -3605,6 +3704,7 @@ impl ChatWindow {
                 msgid,
                 server_time,
             } => {
+                self.release_own_message(network, local_id, server_time);
                 let pending = self
                     .sessions
                     .get_mut(&network)
@@ -3617,6 +3717,7 @@ impl ChatWindow {
                 }
             }
             Event::OutgoingFailed { local_id, reason } => {
+                self.drop_own_message(network, local_id);
                 let pending = self
                     .sessions
                     .get_mut(&network)
@@ -3637,6 +3738,7 @@ impl ChatWindow {
                 );
             }
             Event::Disconnected(reason) | Event::Closed(reason) | Event::Refused(reason) => {
+                self.drop_own_messages(network);
                 // What the server never confirmed is shown as not delivered.
                 let unconfirmed: Vec<_> = self
                     .sessions
@@ -6626,6 +6728,10 @@ mod combined_log_tests;
 #[cfg(test)]
 #[path = "main_tests/roster_batch_tests.rs"]
 mod roster_batch_tests;
+
+#[cfg(test)]
+#[path = "main_tests/conversation_log_tests.rs"]
+mod conversation_log_tests;
 
 #[cfg(test)]
 #[path = "main_tests/log_tests.rs"]

@@ -548,6 +548,10 @@ pub enum Event {
     Topic {
         channel: String,
         topic: String,
+        /// Who changed it, for a `TOPIC` command; `None` for the topic a
+        /// server states on joining.
+        changed_by: Option<String>,
+        server_time: Option<SystemTime>,
     },
     /// A PRIVMSG or NOTICE a user sent to our nickname. Server notices stay
     /// [`Event::ServerLine`]; CTCP other than ACTION is handled by `ctcp`.
@@ -3282,7 +3286,7 @@ impl WhoisCollector {
 }
 
 /// The channel topic a server line states or changes, if it is one.
-fn topic_event(message: &IrcMessage) -> Option<Event> {
+fn topic_event(message: &IrcMessage, server_time: Option<SystemTime>) -> Option<Event> {
     let (channel, topic) = match &message.command {
         IrcCommand::Response(Response::RPL_TOPIC, args) => {
             (args.get(1)?, args.get(2).cloned().unwrap_or_default())
@@ -3291,9 +3295,15 @@ fn topic_event(message: &IrcMessage) -> Option<Event> {
         IrcCommand::TOPIC(channel, topic) => (channel, topic.clone().unwrap_or_default()),
         _ => return None,
     };
+    let changed_by = match &message.command {
+        IrcCommand::TOPIC(..) => message.source_nickname().map(str::to_owned),
+        _ => None,
+    };
     valid_channel(channel).then(|| Event::Topic {
         channel: channel.clone(),
         topic,
+        changed_by,
+        server_time,
     })
 }
 
@@ -3611,7 +3621,9 @@ fn translate_message(
             vec![names_snapshot(client, roster, channel)]
         }
         _ => {
-            let mut events = topic_event(&message).into_iter().collect::<Vec<_>>();
+            let mut events = topic_event(&message, server_time)
+                .into_iter()
+                .collect::<Vec<_>>();
             events.push(Event::ServerLine(tags::untagged_line(&message)));
             events
         }
