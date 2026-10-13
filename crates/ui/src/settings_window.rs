@@ -1938,7 +1938,7 @@ impl SettingsWindow {
             } else {
                 for (index, server) in self.saved.ordered_servers().enumerate() {
                     let id = server.id.clone();
-                    let label = format!("{}:{}", server.host, server.port);
+                    let label = ircv3_settings::server_label(server, &self.i18n);
                     menu = menu.child(
                         div()
                             .id(("server-option", index))

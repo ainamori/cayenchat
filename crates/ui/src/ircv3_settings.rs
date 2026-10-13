@@ -1151,7 +1151,10 @@ fn outcome_text(i18n: &crate::localization::Localizer, outcome: &Outcome) -> (St
 }
 
 /// The display name when there is one, else `host:port`.
-fn server_label(profile: &ServerProfile, i18n: &crate::localization::Localizer) -> String {
+pub(crate) fn server_label(
+    profile: &ServerProfile,
+    i18n: &crate::localization::Localizer,
+) -> String {
     if !profile.display_name.is_empty() {
         profile.display_name.clone()
     } else if profile.host.is_empty() {
@@ -1168,7 +1171,18 @@ mod tests {
         peer_reconnect_needed, place_uploaded_avatar, share_draft_with_peers, toggle_feature,
     };
     use crate::session::PeerAvatarConnection;
-    use cayenchat_storage::{Ircv3Preferences, Settings};
+    use cayenchat_storage::{Ircv3Preferences, Language, ServerProfile, Settings};
+
+    #[test]
+    fn server_label_prefers_the_display_name_over_host_and_port() {
+        let i18n = crate::localization::Localizer::new(Language::System);
+        let mut profile = ServerProfile::default();
+        profile.host = "tiarra.example".into();
+        profile.port = 6667;
+        assert_eq!(super::server_label(&profile, &i18n), "tiarra.example:6667");
+        profile.display_name = "Tiarra".into();
+        assert_eq!(super::server_label(&profile, &i18n), "Tiarra");
+    }
 
     #[test]
     fn peers_get_only_a_url_shared_explicitly_while_the_option_is_on() {
