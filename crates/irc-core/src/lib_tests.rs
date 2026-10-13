@@ -321,6 +321,7 @@ fn closed_worker_keeps_buffered_diagnostics_readable() {
         encoding: "UTF-8".into(),
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(0)),
+        relay_prefix: Arc::new(AtomicUsize::new(0)),
         closed: None,
         transcript: Arc::default(),
     };
@@ -344,6 +345,7 @@ fn member_modes_are_split_to_the_announced_limit_and_validated_first() {
         encoding: "UTF-8".into(),
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(2)),
+        relay_prefix: Arc::new(AtomicUsize::new(0)),
         closed: None,
         transcript: Arc::default(),
     };
@@ -383,6 +385,7 @@ fn member_modes_are_not_sent_in_part_when_the_queue_is_nearly_full() {
         encoding: "UTF-8".into(),
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(1)),
+        relay_prefix: Arc::new(AtomicUsize::new(0)),
         closed: None,
         transcript: Arc::default(),
     };
@@ -412,6 +415,7 @@ fn taken_events_can_be_awaited_until_the_worker_ends() {
         encoding: "UTF-8".into(),
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(0)),
+        relay_prefix: Arc::new(AtomicUsize::new(0)),
         closed: None,
         transcript: Arc::default(),
     };
@@ -2401,14 +2405,12 @@ fn labeled_messages_are_confirmed_by_their_echo_batch_and_errors() {
 
 #[test]
 fn a_label_does_not_count_against_the_512_byte_message_limit() {
-    // A one-word text is sent without the colon: `PRIVMSG #test ` is 14
-    // bytes and CRLF 2, so 496 bytes of text fill the 512 bytes a
-    // message may have, which is also what is sent without labels. The
-    // `@label=...` tag has a limit of its own.
-    let text = "x".repeat(496);
+    // The longest one-word text that still fits once the server has added
+    // our prefix and the colon (`PRIVMSG #test ` is 14 bytes, CRLF 2) is
+    // sent with a label as well. The `@label=...` tag has a limit of its own.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let expected = text.clone();
+    let (expected_tx, expected_rx) = std_mpsc::channel::<String>();
     let server = thread::spawn(move || {
         let (mut socket, _) = listener.accept().unwrap();
         socket
@@ -2426,12 +2428,22 @@ fn a_label_does_not_count_against_the_512_byte_message_limit() {
         assert!(tags.starts_with("@label="), "{tags}");
         // The whole text arrives, in a message within its own limit
         // (a single word is sent without the colon).
+        let expected = expected_rx.recv().unwrap();
         assert!(message.ends_with(&expected), "{message}");
         assert!(message.len() + 2 <= 512, "{} bytes", message.len() + 2);
         let _ = read_client_line(&mut lines);
     });
     let mut connection = Connection::connect(plain_config(port, sending_options())).unwrap();
     wait_for(&mut connection, |e| matches!(e, Event::Joined { .. }));
+    let prefix = relay::published(&connection.relay_prefix);
+    let text = "x".repeat(512 - prefix - 16 - 1);
+    expected_tx.send(text.clone()).unwrap();
+    assert!(
+        connection
+            .send_message("#test", &format!("{text}x"), false)
+            .is_err(),
+        "one byte more does not fit"
+    );
     connection.send_message("#test", &text, false).unwrap();
     let event = wait_for(&mut connection, |e| {
         matches!(e, Event::OutgoingAccepted { .. } | Event::ServerLine(_))
@@ -2451,7 +2463,7 @@ fn a_label_does_not_count_against_the_512_byte_message_limit() {
 
     // One byte more does not fit, with or without a label.
     assert!(
-        validate_wire(&format!("PRIVMSG #test {text}x\r\n"), "UTF-8").is_err(),
+        validate_wire(&format!("PRIVMSG #test {}\r\n", "x".repeat(497)), "UTF-8").is_err(),
         "the message part stays limited to 512 bytes"
     );
 }
@@ -4437,5 +4449,106 @@ fn metadata_without_batch_brings_batch_along_or_stays_off() {
         });
         assert!(avatar_events(&events).is_empty());
     }
+    server.join().unwrap();
+}
+
+#[test]
+fn messages_are_limited_by_the_line_the_recipient_gets() {
+    let message = |text: &str| Outgoing::Message {
+        target: "#test".into(),
+        text: text.into(),
+        display_text: text.into(),
+        notice: false,
+    };
+    // `PRIVMSG #test ` is 14 bytes and CRLF 2. A one-word text goes without
+    // the colon, which the server adds when relaying, so it counts as a byte.
+    let prefix = relay::OwnMask::default().prefix_bytes("alice", "UTF-8");
+    let room = 512 - prefix - 16;
+    let exact = "x".repeat(room - 1);
+    assert!(validate_outgoing_relayed(&message(&exact), "UTF-8", prefix).is_ok());
+    let error =
+        validate_outgoing_relayed(&message(&format!("{exact}x")), "UTF-8", prefix).unwrap_err();
+    assert!(error.contains("too long"), "{error}");
+    // With a space the colon is on the wire already, so the limit is the same.
+    let spaced = format!("x {}", "x".repeat(room - 3));
+    assert_eq!(spaced.len(), room - 1);
+    assert!(validate_outgoing_relayed(&message(&spaced), "UTF-8", prefix).is_ok());
+    assert!(validate_outgoing_relayed(&message(&format!("{spaced}x")), "UTF-8", prefix).is_err());
+    // NOTICE is a byte shorter than PRIVMSG.
+    let notice = |text: &str| Outgoing::Message {
+        target: "#test".into(),
+        text: text.into(),
+        display_text: text.into(),
+        notice: true,
+    };
+    assert!(validate_outgoing_relayed(&notice(&"x".repeat(room)), "UTF-8", prefix).is_ok());
+    assert!(validate_outgoing_relayed(&notice(&"x".repeat(room + 1)), "UTF-8", prefix).is_err());
+    // Without the prefix only the command itself is limited.
+    assert!(validate_outgoing(&message(&format!("{exact}x")), "UTF-8").is_ok());
+    assert!(validate_outgoing(&message(&"x".repeat(495)), "UTF-8").is_ok());
+    assert!(validate_outgoing(&message(&"x".repeat(496)), "UTF-8").is_err());
+
+    // A known, shorter mask leaves more room.
+    let mut mask = relay::OwnMask::default();
+    mask.observe(&":alice!u@h.example JOIN #test".parse().unwrap(), "alice");
+    let known = mask.prefix_bytes("alice", "UTF-8");
+    assert!(known < prefix);
+    let longer = "x".repeat(512 - known - 17);
+    assert!(validate_outgoing_relayed(&message(&longer), "UTF-8", known).is_ok());
+    assert!(validate_outgoing_relayed(&message(&longer), "UTF-8", prefix).is_err());
+
+    // ISO-2022-JP counts the converted text: each kana takes 2 bytes plus
+    // the escape sequences, fewer than UTF-8's 3.
+    let kana = "あ".repeat(150);
+    assert!(validate_outgoing_relayed(&message(&kana), "ISO-2022-JP", prefix).is_ok());
+    assert!(validate_outgoing_relayed(&message(&kana), "UTF-8", prefix).is_err());
+}
+
+#[test]
+fn a_replayed_line_with_an_old_mask_does_not_change_the_prefix() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let long_host = "h".repeat(100);
+    let host = long_host.clone();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut lines = BufReader::new(socket.try_clone().unwrap());
+        register_with(
+            &mut socket,
+            &mut lines,
+            "echo-message labeled-response batch message-tags server-time",
+            "NETWORK=t",
+        );
+        // The host we have now, then history and playback written with an
+        // old, short mask of ours, then live traffic to wait for.
+        socket
+            .write_all(
+                format!(
+                    ":srv 396 alice {host} :is now your displayed host\r\n\
+                     :srv BATCH +h chathistory #test\r\n\
+                     @batch=h :alice!old@short PRIVMSG #test :earlier\r\n\
+                     :srv BATCH -h\r\n\
+                     :srv BATCH +p znc.in/playback\r\n\
+                     @batch=p :alice!old@short PRIVMSG #test :played\r\n\
+                     :srv BATCH -p\r\n\
+                     :bob!b@c PRIVMSG #test :live\r\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let _ = read_client_line(&mut lines);
+    });
+    let mut connection = Connection::connect(plain_config(port, sending_options())).unwrap();
+    wait_for(&mut connection, |e| matches!(e, Event::Joined { .. }));
+    wait_for(
+        &mut connection,
+        |e| matches!(e, Event::ChannelMessage { text, .. } if text == "live"),
+    );
+    let prefix = relay::published(&connection.relay_prefix);
+    assert_eq!(prefix, 4 + "alice".len() + "u".len() + long_host.len());
+    connection.disconnect().unwrap();
     server.join().unwrap();
 }
