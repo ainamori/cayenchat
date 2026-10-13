@@ -763,8 +763,8 @@ pub(crate) struct SettingsWindow {
     pub(crate) tab: SettingsTab,
     /// The category list on the left; Up and Down move through it.
     pub(crate) nav_focus: FocusHandle,
-    nav_scroll: ScrollHandle,
-    pane_scroll: ScrollHandle,
+    pub(crate) nav_scroll: ScrollHandle,
+    pub(crate) pane_scroll: ScrollHandle,
     pub(crate) font_picker: Option<FontTarget>,
     pub(crate) color_picker: Option<OpenColorPicker>,
     /// A key being recorded for a shortcut (the Shortcuts tab).
@@ -3080,6 +3080,9 @@ impl SettingsWindow {
             self.shortcut_recording = None;
             // A picker open under a color row does not wait for a return.
             self.color_picker = None;
+            // The new tab starts at its top; the nav list keeps its place.
+            let offset = self.pane_scroll.offset();
+            self.pane_scroll.set_offset(point(offset.x, px(0.)));
         }
         // The system may have changed the registration since it was read.
         self.refresh_autostart(cx);
