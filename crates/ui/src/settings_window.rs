@@ -1010,6 +1010,11 @@ impl SettingsWindow {
             autostart_generation: 0,
             _subscriptions: subscriptions,
         };
+        // Without a server the form shows no fields, so the focus waits on
+        // the page itself and Escape still reaches the window.
+        if this.settings.values.servers.is_empty() {
+            window.focus(&this.nav_focus);
+        }
         this.refresh_autostart(cx);
         this.probe_system_store(cx);
         this.refresh_upload_account(cx);
@@ -1322,6 +1327,21 @@ impl SettingsWindow {
         window.remove_window();
     }
 
+    /// Whether any field holds uncommitted IME text. GPUI never marks an
+    /// Escape keystroke as IME input, so the fields are asked directly.
+    fn is_composing(&self, cx: &App) -> bool {
+        self.settings
+            .text_fields()
+            .into_iter()
+            .chain([&self.upload_token])
+            .chain(
+                self.auto_join
+                    .iter()
+                    .flat_map(|d| d.rows.iter().map(|r| &r.name)),
+            )
+            .any(|field| field.read(cx).is_composing())
+    }
+
     /// Escape closes what is open inside the window, one layer per press
     /// (a dialog, the avatar editor, a picker, a server list), and only
     /// then the window itself, saved like the close button. A key that is
@@ -1337,6 +1357,7 @@ impl SettingsWindow {
             || keystroke.modifiers.modified()
             || keystroke.is_ime_in_progress()
             || self.shortcut_recording.is_some()
+            || self.is_composing(cx)
         {
             return;
         }
@@ -1352,9 +1373,15 @@ impl SettingsWindow {
         } else if self.font_picker.is_some() {
             self.font_picker = None;
             cx.notify();
-        } else if self.settings.server_list_open || self.settings.ircv3_server_list_open {
+        } else if self.settings.server_list_open
+            || self.settings.ircv3_server_list_open
+            || self.settings.encoding_list_open
+            || self.settings.language_list_open
+        {
             self.settings.server_list_open = false;
             self.settings.ircv3_server_list_open = false;
+            self.settings.encoding_list_open = false;
+            self.settings.language_list_open = false;
             cx.notify();
         } else {
             self.close_settings(window, cx);
@@ -3786,5 +3813,79 @@ mod escape_tests {
             owner.read_with(&app, |_, _| true).is_ok(),
             "the chat remains"
         );
+    }
+
+    fn open(
+        cx: &mut TestAppContext,
+        settings: cayenchat_storage::Settings,
+    ) -> (
+        gpui::Entity<SettingsWindow>,
+        &mut gpui::VisualTestContext,
+        TestAppContext,
+    ) {
+        cx.update(|cx| {
+            crate::secrets::install_memory(cx);
+            cx.set_global(crate::theme::Theme::new(
+                cayenchat_storage::ThemeMode::Light,
+                gpui::WindowAppearance::Light,
+                &cayenchat_storage::Appearance::default(),
+            ));
+        });
+        let owner = cx.add_window({
+            let settings = settings.clone();
+            move |window, cx| crate::ChatWindow::with_settings(settings, None, window, cx)
+        });
+        let app = cx.clone();
+        let (form, vcx) = cx
+            .add_window_view(|window, cx| SettingsWindow::new(owner, settings.clone(), window, cx));
+        vcx.run_until_parked();
+        (form, vcx, app)
+    }
+
+    #[gpui::test]
+    fn escape_closes_language_and_encoding_lists_first(cx: &mut TestAppContext) {
+        let (form, cx, mut app) = open(cx, crate::settings_with_channels("#a"));
+        let windows = |app: &mut TestAppContext| app.update(|app| app.windows().len());
+        form.update(cx, |form, cx| {
+            form.settings.language_list_open = true;
+            cx.notify();
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(form.read_with(cx, |form, _| !form.settings.language_list_open));
+        assert_eq!(windows(&mut app), 2);
+        form.update(cx, |form, cx| {
+            form.settings.encoding_list_open = true;
+            cx.notify();
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(form.read_with(cx, |form, _| !form.settings.encoding_list_open));
+        assert_eq!(windows(&mut app), 2);
+    }
+
+    #[gpui::test]
+    fn escape_during_composition_keeps_the_window(cx: &mut TestAppContext) {
+        use gpui::EntityInputHandler;
+        let (form, cx, mut app) = open(cx, crate::settings_with_channels("#a"));
+        let nickname = form.read_with(cx, |form, _| form.settings.nickname.clone());
+        cx.update(|window, cx| {
+            nickname.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "あ", None, window, cx)
+            })
+        });
+        cx.simulate_keystrokes("escape");
+        let windows = |app: &mut TestAppContext| app.update(|app| app.windows().len());
+        assert_eq!(windows(&mut app), 2);
+        cx.update(|window, cx| nickname.update(cx, |input, cx| input.unmark_text(window, cx)));
+        cx.simulate_keystrokes("escape");
+        assert_eq!(windows(&mut app), 1);
+    }
+
+    #[gpui::test]
+    fn escape_closes_settings_without_servers(cx: &mut TestAppContext) {
+        let mut settings = crate::settings_with_channels("#a");
+        settings.servers.clear();
+        let (_form, cx, app) = open(cx, settings);
+        cx.simulate_keystrokes("escape");
+        assert_eq!(app.clone().update(|app| app.windows().len()), 1);
     }
 }

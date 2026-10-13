@@ -423,9 +423,12 @@ has no slide-in animation (a frozen animation was one suspected cause of a
 half-drawn bar, issue #87) and Alt/F10 only move keyboard use in and out of it.
 The settings window has no bar (issue #145; its menus were all disabled).
 In it Escape (#339) closes one open layer per press (auto-join dialog, avatar
-editor, color or font picker, server list) and then the window itself, saved
-like the close button, handing the keyboard back to the chat window. A shortcut
-recording and an IME composition keep their Escape.
+editor, color or font picker, server, language or encoding list) and then the window
+itself, saved like the close button, handing the keyboard back to the chat
+window. A shortcut recording keeps its Escape. GPUI never flags an Escape
+keystroke as IME input, so the fields are asked for marked text
+(`TextInput::is_composing`) and a composition keeps its Escape. With no server
+the form has no field, so the page takes the initial focus to receive Escape.
 The bar shares native menu definitions and actions, supports arrows/Enter/Escape,
 and preserves input focus for editing commands. Alt chords do not toggle it;
 selecting an action or clicking outside dismisses it. Action availability is
