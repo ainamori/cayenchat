@@ -905,17 +905,24 @@ async fn diagnostic(events: &EventSender, started: Instant, message: impl Into<S
 
 const REDACTED_KEY: &str = "[redacted]";
 
-/// `modes` with the channel key (`+k key`, `-k key`) hidden.
+/// `modes` with every argument hidden when they set or clear a channel key.
+/// The parser pairs arguments with modes by its own table (a `-l` takes one),
+/// so in `-l+k key` the key lands on the limit; hiding only the key's own
+/// argument cannot be trusted.
 fn redact_key_modes(modes: &[Mode<ChannelMode>]) -> Vec<Mode<ChannelMode>> {
+    if !modes.iter().any(|mode| {
+        matches!(
+            mode,
+            Mode::Plus(ChannelMode::Key, _) | Mode::Minus(ChannelMode::Key, _)
+        )
+    }) {
+        return modes.to_vec();
+    }
     modes
         .iter()
         .map(|mode| match mode {
-            Mode::Plus(ChannelMode::Key, Some(_)) => {
-                Mode::Plus(ChannelMode::Key, Some(REDACTED_KEY.into()))
-            }
-            Mode::Minus(ChannelMode::Key, Some(_)) => {
-                Mode::Minus(ChannelMode::Key, Some(REDACTED_KEY.into()))
-            }
+            Mode::Plus(m, Some(_)) => Mode::Plus(m.clone(), Some(REDACTED_KEY.into())),
+            Mode::Minus(m, Some(_)) => Mode::Minus(m.clone(), Some(REDACTED_KEY.into())),
             other => other.clone(),
         })
         .collect()
@@ -3700,7 +3707,10 @@ fn translate_message(
             let mut events = topic_event(&message, server_time)
                 .into_iter()
                 .collect::<Vec<_>>();
-            events.push(Event::ServerLine(tags::untagged_line(&message)));
+            let shown = without_channel_key(&message);
+            events.push(Event::ServerLine(tags::untagged_line(
+                shown.as_ref().unwrap_or(&message),
+            )));
             events
         }
     };

@@ -4680,7 +4680,7 @@ fn channel_keys_stay_out_of_the_transcript_and_mode_activity() {
         ),
         (
             ":op!u@h MODE #chan +ok bob review-key",
-            ":op!u@h MODE #chan +o+k bob [redacted]",
+            ":op!u@h MODE #chan +o+k [redacted] [redacted]",
         ),
         (
             ":op!u@h MODE #chan -k review-key",
@@ -4709,5 +4709,45 @@ fn channel_keys_stay_out_of_the_transcript_and_mode_activity() {
         .iter()
         .map(ToString::to_string)
         .collect();
-    assert_eq!(shown, ["+o bob", "+k [redacted]"]);
+    assert_eq!(shown, ["+o [redacted]", "+k [redacted]"]);
+}
+
+#[test]
+fn received_channel_keys_reach_no_event() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut lines = BufReader::new(socket.try_clone().unwrap());
+        register_with(&mut socket, &mut lines, "message-tags", "NETWORK=t");
+        socket
+            .write_all(
+                b":alice!u@h JOIN #test\r\n\
+                  :op!u@h MODE #test +k review-key\r\n\
+                  :op!u@h MODE #test -l+k review-key\r\n\
+                  :op!u@h MODE #test +ok bob review-key\r\n\
+                  :op!u@h MODE #test -k review-key\r\n\
+                  :srv 324 alice #test +nk review-key\r\n\
+                  :srv NOTICE alice :done\r\n",
+            )
+            .unwrap();
+        let _ = read_client_line(&mut lines);
+    });
+    let events = run_fixture(plain_config(port, sending_options()), |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, Event::PrivateMessage { text, .. } if text == "done"))
+    });
+    server.join().unwrap();
+    for event in &events {
+        assert!(!format!("{event:?}").contains("review-key"), "{event:?}");
+    }
+    assert!(events.iter().any(|event| matches!(event,
+        Event::ServerLine(line) if line == ":srv 324 alice #test +nk [redacted]")));
+    assert!(events.iter().any(|event| matches!(event,
+        Event::ChannelActivity { kind: ChannelActivityKind::ModeChanged { modes }, .. }
+            if modes.contains("[redacted]"))));
 }
