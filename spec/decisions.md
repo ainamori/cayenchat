@@ -113,7 +113,8 @@ and Linux issues, including enabling cosmic-text's bounded per-word shaping
 cache for faster channel switching; see `vendor/gpui/PATCHES.md`. A local
 `vendor/zed-xim` likewise replaces the XIM client's panicking COMPOUND_TEXT
 decoding (IBus/Mozc on X11), and `vendor/irc-proto` limits the received line
-length. Every vendored copy is temporary; `vendor/README.md` says when to
+length. `vendor/irc` drops a channel's user list when we are kicked (#342)
+until `Client` goes away (#266). Every vendored copy is temporary; `vendor/README.md` says when to
 switch back to an upstream release. Use Rust edition 2024
 and resolver 3. Enable `font-kit` for macOS glyph rendering and `runtime_shaders` for
 Metal shader compilation at application startup. Keep unused default features off;

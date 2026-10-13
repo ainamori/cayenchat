@@ -3340,9 +3340,10 @@ fn names_snapshot(client: &Client, roster: &mut RosterTracker, channel: &str) ->
             format!("{prefix}{}", user.get_nickname())
         })
         .collect();
-    // The library keeps a channel's list after a KICK and appends the next
-    // NAMES reply to it, so a rejoin lists everyone twice. Keep the last
-    // entry per nickname: it comes from the newest reply.
+    // The library appends every NAMES reply to the channel's list, so a
+    // repeated reply (e.g. /names) lists everyone twice. Keep the last entry
+    // per nickname: it comes from the newest reply. (Our own KICK no longer
+    // leaves a stale list behind: the vendored `irc` drops it, #342.)
     let mut seen = HashSet::new();
     users.reverse();
     users.retain(|user| seen.insert(display_nickname(user).to_lowercase()));

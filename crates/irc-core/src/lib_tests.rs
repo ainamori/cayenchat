@@ -1020,6 +1020,54 @@ fn rejoining_after_a_kick_lists_each_member_once() {
 }
 
 #[test]
+fn modes_after_rejoining_from_a_kick_reach_the_roster() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut lines = BufReader::new(socket.try_clone().unwrap()).lines();
+        while !lines.next().unwrap().unwrap().starts_with("USER ") {}
+        socket
+            .write_all(b":server 001 me :Welcome\r\n:server 376 me :End of MOTD\r\n")
+            .unwrap();
+        assert_eq!(lines.next().unwrap().unwrap(), "JOIN #a");
+        // carol left while we were out of the channel and is never reported.
+        socket.write_all(b":me!u@h JOIN #a\r\n:server 353 me = #a :@op bob alice carol me\r\n:server 366 me #a :End of NAMES\r\n:op!o@h KICK #a me :bye\r\n:me!u@h JOIN #a\r\n:server 353 me = #a :@op bob alice me\r\n:server 366 me #a :End of NAMES\r\n:op!o@h MODE #a +o alice\r\n:op!o@h MODE #a +v bob\r\n").unwrap();
+    });
+    let mut config = ConnectionConfig::tls("127.0.0.1".into(), "me".into(), vec!["#a".into()]);
+    config.port = port;
+    config.use_tls = false;
+    let mut connection = Connection::connect(config).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last = Vec::new();
+    let mut modes = 0;
+    while Instant::now() < deadline && modes < 2 {
+        match connection.try_recv() {
+            Some(Event::Names { users, .. }) => last = users,
+            Some(Event::ChannelActivity {
+                kind: ChannelActivityKind::ModeChanged { .. },
+                ..
+            }) => modes += 1,
+            Some(_) => {}
+            None => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    // A roster snapshot may follow the last mode change.
+    thread::sleep(Duration::from_millis(100));
+    while let Some(event) = connection.try_recv() {
+        if let Event::Names { users, .. } = event {
+            last = users;
+        }
+    }
+    last.sort();
+    assert_eq!(last, ["+bob", "@alice", "@op", "me"], "modes: {modes}");
+    server.join().unwrap();
+}
+
+#[test]
 fn kicks_and_refused_joins_reach_the_channel_log() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
