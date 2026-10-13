@@ -30,7 +30,7 @@ use std::{
     ops::ControlFlow,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc as std_mpsc,
     },
     thread,
@@ -416,14 +416,10 @@ const MAX_CLIENT_TAG_BYTES: usize = 4096;
 /// usual 512-byte limit, its tags against their own limit, and the whole
 /// line for characters the encoding cannot hold. Tag values are UTF-8 (the
 /// worker requests tags only on UTF-8 connections).
-fn validate_tagged_wire(
-    message: &IrcMessage,
-    label: &str,
-    prefix_bytes: usize,
-) -> Result<(), String> {
+fn validate_tagged_wire(message: &IrcMessage, label: &str) -> Result<(), String> {
     let mut untagged = message.clone();
     untagged.tags = None;
-    validate_relayed_wire(&untagged.to_string(), label, prefix_bytes)?;
+    validate_wire(&untagged.to_string(), label)?;
     if let Some(tags) = &message.tags {
         if tags::tag_bytes(tags) > MAX_CLIENT_TAG_BYTES {
             return Err("Message tags exceed the 4094-byte limit.".into());
@@ -615,23 +611,9 @@ pub enum Event {
     /// ends first.
     OutgoingAccepted {
         local_id: Option<u64>,
-        /// The id [`Connection::last_draft_id`] gave the message when it was
-        /// queued; it ends the wait for an [`Event::OutgoingRejected`].
-        draft_id: Option<u64>,
         channel: String,
         text: String,
         notice: bool,
-    },
-    /// A message the connection had queued was refused before it was sent
-    /// (it no longer fits once the server adds our changed host). The
-    /// `draft` is what the user typed and `draft_id` names the send (see
-    /// [`Connection::last_draft_id`]); the UI puts the draft back unless a
-    /// new one was started.
-    OutgoingRejected {
-        draft_id: u64,
-        channel: String,
-        draft: String,
-        error: String,
     },
     /// The server rejected the registration nickname (432/433). The link
     /// stays open until the UI supplies another one with
@@ -1065,9 +1047,6 @@ enum Outgoing {
         target: String,
         text: String,
         display_text: String,
-        /// What the user typed when it is a plain message, for handing back
-        /// if the worker refuses it ([`Event::OutgoingRejected`]).
-        draft: Option<(u64, String)>,
         notice: bool,
     },
     Raw(IrcMessage),
@@ -1260,7 +1239,6 @@ fn parse_slash_command(line: &str, selected: Option<&str>) -> Result<Outgoing, S
                 target: target.into(),
                 text,
                 display_text: format!("* {action}"),
-                draft: None,
                 notice: false,
             })
         }
@@ -1287,7 +1265,6 @@ fn parse_slash_command(line: &str, selected: Option<&str>) -> Result<Outgoing, S
                 target: target.into(),
                 text: text.into(),
                 display_text: text.into(),
-                draft: None,
                 notice: verb == "NOTICE",
             })
         }
@@ -1406,10 +1383,6 @@ pub struct Connection {
     modes_per_line: Arc<AtomicUsize>,
     /// Bytes a server adds in front of our relayed lines (see [`relay`]).
     relay_prefix: Arc<AtomicUsize>,
-    /// The id of the latest queued message that can be handed back (0: it
-    /// was no message), and the last id given out.
-    draft_id: AtomicU64,
-    draft_seq: AtomicU64,
     /// Disconnects once the worker thread has ended.
     closed: Option<Mutex<std_mpsc::Receiver<()>>>,
     /// Whether IRC lines are recorded after registration.
@@ -1489,8 +1462,6 @@ impl Connection {
             part_message,
             modes_per_line,
             relay_prefix,
-            draft_id: AtomicU64::new(0),
-            draft_seq: AtomicU64::new(0),
             closed: Some(Mutex::new(closed)),
             transcript,
         })
@@ -1539,35 +1510,6 @@ impl Connection {
         validate_outgoing_relayed(outgoing, &self.encoding, prefix)
     }
 
-    /// The id of the message the last successful send queued, or `None` when
-    /// that was not a message (a message is a plain one or a message
-    /// command). The worker repeats it in [`Event::OutgoingAccepted`] or
-    /// [`Event::OutgoingRejected`]. Only meaningful on the thread that sends.
-    pub fn last_draft_id(&self) -> Option<u64> {
-        Some(self.draft_id.load(Ordering::Relaxed)).filter(|id| *id != 0)
-    }
-
-    fn next_draft(&self, text: &str) -> (u64, String) {
-        let id = self.draft_seq.fetch_add(1, Ordering::Relaxed) + 1;
-        (id, text.to_owned())
-    }
-
-    /// Queues `outgoing`, recording the id of its draft (0: none) once queued.
-    fn queue(&self, outgoing: Outgoing, what: &str) -> Result<(), String> {
-        let id = match &outgoing {
-            Outgoing::Message {
-                draft: Some((id, _)),
-                ..
-            } => *id,
-            _ => 0,
-        };
-        self.commands
-            .try_send(outgoing)
-            .map_err(|error| format!("Could not queue {what}: {error}"))?;
-        self.draft_id.store(id, Ordering::Relaxed);
-        Ok(())
-    }
-
     pub fn send_message(&self, channel: &str, text: &str, notice: bool) -> Result<(), String> {
         if !valid_channel(channel) {
             return Err("Select a channel before sending.".into());
@@ -1577,11 +1519,12 @@ impl Connection {
             target: channel.to_owned(),
             text: text.to_owned(),
             display_text: text.to_owned(),
-            draft: Some(self.next_draft(text)),
             notice,
         };
         self.validate(&outgoing)?;
-        self.queue(outgoing, "IRC message")
+        self.commands
+            .try_send(outgoing)
+            .map_err(|error| format!("Could not queue IRC message: {error}"))
     }
 
     pub fn send_private_message(
@@ -1598,11 +1541,12 @@ impl Connection {
             target: nickname.to_owned(),
             text: text.to_owned(),
             display_text: text.to_owned(),
-            draft: Some(self.next_draft(text)),
             notice,
         };
         self.validate(&outgoing)?;
-        self.queue(outgoing, "private message")
+        self.commands
+            .try_send(outgoing)
+            .map_err(|error| format!("Could not queue private message: {error}"))
     }
 
     pub fn send_member_command(&self, nickname: &str, action: MemberCommand) -> Result<(), String> {
@@ -1657,14 +1601,12 @@ impl Connection {
     }
 
     pub fn send_command(&self, line: &str, selected_channel: Option<&str>) -> Result<(), String> {
-        let mut outgoing = parse_slash_command(line, selected_channel)?;
-        // A message sent as a command is handed back as the line typed.
-        if let Outgoing::Message { draft, .. } = &mut outgoing {
-            *draft = Some(self.next_draft(line));
-        }
+        let outgoing = parse_slash_command(line, selected_channel)?;
         let outgoing = with_default_part_reason(outgoing, self.part_message.as_deref());
         self.validate(&outgoing)?;
-        self.queue(outgoing, "IRC command")
+        self.commands
+            .try_send(outgoing)
+            .map_err(|error| format!("Could not queue IRC command: {error}"))
     }
 
     pub fn change_nickname(&self, nickname: &str) -> Result<(), String> {
@@ -2302,12 +2244,8 @@ impl Worker {
                 target,
                 text,
                 display_text,
-                draft,
                 notice,
-            } => {
-                self.send_message(target, text, display_text, draft, notice)
-                    .await
-            }
+            } => self.send_message(target, text, display_text, notice).await,
             Outgoing::Raw(message) => self.send_raw(message).await,
             Outgoing::OwnAvatar { request, url } => self.set_own_avatar(request, url).await,
             Outgoing::ShareAvatar(url) => {
@@ -2353,7 +2291,6 @@ impl Worker {
         target: String,
         text: String,
         display_text: String,
-        draft: Option<(u64, String)>,
         notice: bool,
     ) -> Flow {
         // With echo-message the local line is confirmed by
@@ -2382,15 +2319,15 @@ impl Worker {
         };
         let message = echo::with_label(message, label.flatten());
         let line = self.transcript.line(&message);
-        let prefix = relay::published(&self.relay_prefix);
-        let result = validate_tagged_wire(&message, &self.wire_encoding, prefix)
+        // Only the 512 bytes of our own line: the length once the server
+        // relays it is checked by the connection handle before queuing.
+        let result = validate_tagged_wire(&message, &self.wire_encoding)
             .and_then(|_| self.client.send(message).map_err(|error| error.to_string()));
         let event = match result {
             Ok(()) => {
                 self.transcript.record(WireDirection::Sent, line).await;
                 Event::OutgoingAccepted {
                     local_id: tracked.then_some(local_id),
-                    draft_id: draft.map(|(id, _)| id),
                     channel: target,
                     text: shown,
                     notice,
@@ -2398,17 +2335,7 @@ impl Worker {
             }
             Err(error) => {
                 self.echoes.untrack(local_id);
-                match draft {
-                    // The connection handle accepted it, but the prefix grew
-                    // while it was queued: the user gets the draft back.
-                    Some((draft_id, draft)) => Event::OutgoingRejected {
-                        draft_id,
-                        channel: target,
-                        draft,
-                        error,
-                    },
-                    None => Event::ServerLine(format!("Send failed: {error}")),
-                }
+                Event::ServerLine(format!("Send failed: {error}"))
             }
         };
         self.emit(event).await

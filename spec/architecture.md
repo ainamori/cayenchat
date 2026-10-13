@@ -547,17 +547,11 @@ over-long line, so the draft stays. `irc-core::relay` tracks our `user` and
 `znc.in/playback`) show an older mask and are ignored. The worker publishes the
 prefix size (with the current nickname, all counted in the connection
 encoding) to the connection handle when it changes. Until the host is known the
-estimate is 10 bytes of username and 63 of host. If the host grows while a
-message is queued, the worker checks again and refuses it with
-`Event::OutgoingRejected` (the draft is the typed text, or the typed line for
-`/me`, `/msg` and the like). Each such message gets an id from the connection
-(`Connection::last_draft_id` after the send), repeated in `OutgoingAccepted` and
-`OutgoingRejected`. The UI keeps the id with the input it was typed in (no
-credentials) until the outcome arrives, and puts a refused draft back into that
-input unless something new was typed (the draft is in the input history then);
-an unknown id is not guessed at. A send that would exceed 256 undecided drafts
-is refused with its input left alone. The ids belong to one connection and are
-dropped when it ends.
+estimate is 10 bytes of username and 63 of host. Only the connection handle's
+check counts the prefix; the worker's check before writing stays at the 512
+bytes of the line itself. If the host grows between the two (a rare race), the
+message goes out and the recipients may get its end cut off, as was always the
+case before this check existed; it is not handed back to the input.
 Splitting longer text into several lines and `draft/multiline` are not done.
 Connection-stage diagnostics and directional, decoded IRC lines flow as owned
 events from `irc-core` to the UI. The transcript includes message bodies, masks

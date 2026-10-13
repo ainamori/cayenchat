@@ -322,8 +322,6 @@ fn closed_worker_keeps_buffered_diagnostics_readable() {
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(0)),
         relay_prefix: Arc::new(AtomicUsize::new(0)),
-        draft_id: Default::default(),
-        draft_seq: Default::default(),
         closed: None,
         transcript: Arc::default(),
     };
@@ -348,8 +346,6 @@ fn member_modes_are_split_to_the_announced_limit_and_validated_first() {
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(2)),
         relay_prefix: Arc::new(AtomicUsize::new(0)),
-        draft_id: Default::default(),
-        draft_seq: Default::default(),
         closed: None,
         transcript: Arc::default(),
     };
@@ -390,8 +386,6 @@ fn member_modes_are_not_sent_in_part_when_the_queue_is_nearly_full() {
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(1)),
         relay_prefix: Arc::new(AtomicUsize::new(0)),
-        draft_id: Default::default(),
-        draft_seq: Default::default(),
         closed: None,
         transcript: Arc::default(),
     };
@@ -422,8 +416,6 @@ fn taken_events_can_be_awaited_until_the_worker_ends() {
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(0)),
         relay_prefix: Arc::new(AtomicUsize::new(0)),
-        draft_id: Default::default(),
-        draft_seq: Default::default(),
         closed: None,
         transcript: Arc::default(),
     };
@@ -2414,23 +2406,23 @@ fn tagged_messages_have_separate_limits_for_tags_and_message() {
             Some(label.into()),
         )
     };
-    // A text of one word is sent without the colon, so 495 bytes fill
-    // the 512 bytes and 496 do not.
-    assert!(validate_tagged_wire(&tagged("c1", &"x".repeat(495)), "UTF-8", 0).is_ok());
+    // A text of one word is sent without the colon, so 496 bytes fill
+    // the 512 bytes and 497 do not.
+    assert!(validate_tagged_wire(&tagged("c1", &"x".repeat(496)), "UTF-8").is_ok());
     // The message part is limited as before, tags aside.
-    assert!(validate_tagged_wire(&tagged("c1", &"x".repeat(496)), "UTF-8", 0).is_err());
+    assert!(validate_tagged_wire(&tagged("c1", &"x".repeat(497)), "UTF-8").is_err());
     // The tags are limited on their own: 4094 bytes without `@` and the
     // space, so a value of 4094 - "label=".len() fits and one more does not.
     let fits = "l".repeat(4094 - "label=".len());
-    assert!(validate_tagged_wire(&tagged(&fits, "hi"), "UTF-8", 0).is_ok());
+    assert!(validate_tagged_wire(&tagged(&fits, "hi"), "UTF-8").is_ok());
     let too_long = "l".repeat(4094 - "label=".len() + 1);
     assert!(
-        validate_tagged_wire(&tagged(&too_long, "hi"), "UTF-8", 0)
+        validate_tagged_wire(&tagged(&too_long, "hi"), "UTF-8")
             .unwrap_err()
             .contains("tags")
     );
     // A character the encoding cannot hold is still refused.
-    assert!(validate_tagged_wire(&tagged("c1", "🙂"), "ISO-2022-JP", 0).is_err());
+    assert!(validate_tagged_wire(&tagged("c1", "🙂"), "ISO-2022-JP").is_err());
 }
 
 #[test]
@@ -4396,7 +4388,6 @@ fn messages_are_limited_by_the_line_the_recipient_gets() {
         target: "#test".into(),
         text: text.into(),
         display_text: text.into(),
-        draft: None,
         notice: false,
     };
     // `PRIVMSG #test ` is 14 bytes and CRLF 2. A one-word text goes without
@@ -4418,7 +4409,6 @@ fn messages_are_limited_by_the_line_the_recipient_gets() {
         target: "#test".into(),
         text: text.into(),
         display_text: text.into(),
-        draft: None,
         notice: true,
     };
     assert!(validate_outgoing_relayed(&notice(&"x".repeat(room)), "UTF-8", prefix).is_ok());
@@ -4489,60 +4479,6 @@ fn a_replayed_line_with_an_old_mask_does_not_change_the_prefix() {
     );
     let prefix = relay::published(&connection.relay_prefix);
     assert_eq!(prefix, 4 + "alice".len() + "u".len() + long_host.len());
-    connection.disconnect().unwrap();
-    server.join().unwrap();
-}
-
-#[test]
-fn a_queued_message_the_worker_refuses_comes_back_as_a_draft() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let server = thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
-        socket
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let mut lines = BufReader::new(socket.try_clone().unwrap());
-        register_with(
-            &mut socket,
-            &mut lines,
-            "echo-message labeled-response batch message-tags server-time",
-            "NETWORK=t",
-        );
-        let _ = read_client_line(&mut lines);
-    });
-    let mut connection = Connection::connect(plain_config(port, sending_options())).unwrap();
-    wait_for(&mut connection, |e| matches!(e, Event::Joined { .. }));
-    // The check on the handle passed at some earlier moment; by the time
-    // the worker looks, the prefix is larger.
-    let text = "y".repeat(495);
-    connection
-        .commands
-        .try_send(Outgoing::Message {
-            target: "#test".into(),
-            text: text.clone(),
-            display_text: text.clone(),
-            draft: Some((7, text.clone())),
-            notice: false,
-        })
-        .unwrap();
-    let event = wait_for(&mut connection, |e| {
-        matches!(e, Event::OutgoingRejected { .. })
-    });
-    match event {
-        Event::OutgoingRejected {
-            draft_id,
-            channel,
-            draft,
-            error,
-        } => {
-            assert_eq!(draft_id, 7);
-            assert_eq!(channel, "#test");
-            assert_eq!(draft, text);
-            assert!(error.contains("too long"), "{error}");
-        }
-        other => panic!("unexpected {other:?}"),
-    }
     connection.disconnect().unwrap();
     server.join().unwrap();
 }

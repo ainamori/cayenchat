@@ -245,7 +245,6 @@
   "event_message_queued": "Message queued to {channel}.",
   "wait_registration": "Wait until registration completes.",
   "wait_join": "Wait until the channel is joined before sending.",
-  "send_busy": "The connection is still sending earlier messages; try again in a moment.",
   "select_channel": "Select a channel before sending a message.",
   "not_connected": "Disconnected; open Connection Settings to connect.",
   "draft_placeholder": "Message draft — Enter sends, / starts a command",
