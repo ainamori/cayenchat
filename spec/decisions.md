@@ -1204,7 +1204,9 @@ default and added without a version change, so older files read as off.
   was patched to treat Esc as its cancel button (`vendor/gpui/PATCHES.md`).
 - **Where it is asked:** the settings window has no Quit handler of its own;
   the application-wide handler (`request_quit_anywhere`) opens the question in
-  the active window, so it is not hidden behind the settings window.
+  the chat window and brings it to the front, so it is not hidden behind the
+  settings window. The chat window lives until the application quits, so
+  closing the settings window while the question is open cannot strand it.
 - **macOS Dock "Quit":** reaches `applicationShouldTerminate:`, which asks
   `App::on_quit_request`; the answer "Quit" calls `cx.quit()`, which is not
   asked again. System shutdown/restart/log out, signals and `cx.quit()` are

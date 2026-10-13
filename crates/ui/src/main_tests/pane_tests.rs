@@ -3691,3 +3691,50 @@ fn quit_from_another_window_asks_in_the_chat_window(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(!cx.has_pending_prompt(), "asked once");
 }
+
+#[gpui::test]
+fn closing_another_window_during_the_question_keeps_quitting_possible(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        crate::apply_shortcuts(crate::ShortcutPrefs::default(), cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let mut settings = crate::settings_with_channels("#a");
+    settings.language = cayenchat_storage::Language::English;
+    settings.confirm_quit = true;
+    let app = cx.clone();
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    cx.run_until_parked();
+    // A second window, opened last so that it is the active one, as the
+    // settings window is when the user presses Ctrl+Q there.
+    let other = app.update(|cx| {
+        cx.open_window(gpui::WindowOptions::default(), |_, cx| {
+            cx.new(|_| gpui::Empty)
+        })
+        .unwrap()
+    });
+
+    app.update(crate::request_quit_anywhere);
+    assert!(cx.has_pending_prompt());
+    // The other window goes away before the question is answered.
+    other
+        .update(&mut app.clone(), |_, window, _| window.remove_window())
+        .unwrap();
+    app.update(|_| {});
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    chat.read_with(cx, |chat, _| assert!(!chat.quit_prompt_open));
+
+    // The next request asks again instead of being ignored.
+    app.update(crate::request_quit_anywhere);
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+}

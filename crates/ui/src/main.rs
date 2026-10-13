@@ -1143,8 +1143,7 @@ impl ChatWindow {
                 if quit {
                     cx.quit();
                 } else if let Some(handle) = focused {
-                    // Back to where the user was typing. The question may
-                    // have been asked in the settings window.
+                    // Back to where the user was typing.
                     window.focus(&handle);
                 }
             });
@@ -6463,8 +6462,9 @@ fn navigation_binding(key: &str, command: Command) -> KeyBinding {
 
 /// The user's quit request from any window (the settings window has no
 /// handler of its own) or the macOS menu bar: asks first when switched on.
-/// The question opens in the active window, so that it is not hidden behind
-/// the settings window.
+/// The question always opens in the chat window, which is brought to the
+/// front and lives until the application quits, so the question cannot
+/// vanish with an auxiliary window that was closed before it was answered.
 fn request_quit_anywhere(cx: &mut App) {
     let chat = cx
         .windows()
@@ -6474,14 +6474,12 @@ fn request_quit_anywhere(cx: &mut App) {
         cx.quit();
         return;
     };
-    let Ok(entity) = chat.entity(cx) else {
+    if chat
+        .update(cx, |this, window, cx| this.request_quit(window, cx))
+        .is_err()
+    {
         cx.quit();
-        return;
-    };
-    let target = cx.active_window().unwrap_or_else(|| chat.into());
-    let _ = target.update(cx, |_, window, cx| {
-        entity.update(cx, |this, cx| this.request_quit(window, cx))
-    });
+    }
 }
 
 fn app_menus(debug_enabled: bool, i18n: &Localizer) -> Vec<Menu> {
