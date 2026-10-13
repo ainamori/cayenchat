@@ -1322,6 +1322,49 @@ impl SettingsWindow {
         window.remove_window();
     }
 
+    /// Escape closes what is open inside the window, one layer per press
+    /// (a dialog, the avatar editor, a picker, a server list), and only
+    /// then the window itself, saved like the close button. A key that is
+    /// part of an IME composition, or a recording of a shortcut, is theirs.
+    fn escape_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let keystroke = &event.keystroke;
+        if keystroke.key != "escape"
+            || keystroke.modifiers.modified()
+            || keystroke.is_ime_in_progress()
+            || self.shortcut_recording.is_some()
+        {
+            return;
+        }
+        cx.stop_propagation();
+        if self.auto_join.is_some() {
+            self.close_auto_join(window, cx);
+        } else if self.avatar_editor.is_some() {
+            self.avatar_editor = None;
+            cx.notify();
+        } else if self.color_picker.is_some() {
+            self.color_picker = None;
+            cx.notify();
+        } else if self.font_picker.is_some() {
+            self.font_picker = None;
+            cx.notify();
+        } else if self.settings.server_list_open || self.settings.ircv3_server_list_open {
+            self.settings.server_list_open = false;
+            self.settings.ircv3_server_list_open = false;
+            cx.notify();
+        } else {
+            self.close_settings(window, cx);
+            // The chat window takes the keyboard back.
+            let _ = self
+                .owner
+                .update(cx, |_, chat_window, _| chat_window.activate_window());
+        }
+    }
+
     fn open_settings_action(
         &mut self,
         _: &OpenSettings,
@@ -3255,6 +3298,9 @@ impl SettingsWindow {
         let auto_join = self.render_auto_join_dialog(cx);
         field_traversal(div().id("settings-screen"))
             .key_context("SettingsWindow")
+            .on_key_down(
+                cx.listener(|this, event, window, cx| this.escape_key_down(event, window, cx)),
+            )
             .relative()
             .size_full()
             .flex()
@@ -3688,5 +3734,57 @@ mod server_settings_tests {
         for lines in [&lines_a, &lines_b] {
             assert!(pick(lines, "PASS").is_empty() && pick(lines, "AUTHENTICATE").is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::SettingsWindow;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn escape_closes_layers_first_then_the_window(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            crate::secrets::install_memory(cx);
+            cx.set_global(crate::theme::Theme::new(
+                cayenchat_storage::ThemeMode::Light,
+                gpui::WindowAppearance::Light,
+                &cayenchat_storage::Appearance::default(),
+            ));
+        });
+        let settings = crate::settings_with_channels("#a");
+        let owner = cx.add_window(|window, cx| {
+            crate::ChatWindow::with_settings(settings.clone(), None, window, cx)
+        });
+        let mut app = cx.clone();
+        let (form, cx) = cx
+            .add_window_view(|window, cx| SettingsWindow::new(owner, settings.clone(), window, cx));
+        cx.run_until_parked();
+
+        // An open server list takes the first Escape; the window stays.
+        form.update(cx, |form, cx| {
+            form.settings.server_list_open = true;
+            cx.notify();
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(form.read_with(cx, |form, _| !form.settings.server_list_open));
+        let windows = |app: &mut TestAppContext| app.update(|app| app.windows().len());
+        assert_eq!(windows(&mut app), 2);
+
+        // A shortcut being recorded keeps Escape for itself.
+        form.update(cx, |form, cx| {
+            form.toggle_shortcut_recording("next_channel", cx)
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(form.read_with(cx, |form, _| form.shortcut_recording.is_none()));
+        assert_eq!(windows(&mut app), 2);
+
+        // Nothing open: Escape closes the settings window only.
+        cx.simulate_keystrokes("escape");
+        assert_eq!(windows(&mut app), 1);
+        assert!(
+            owner.read_with(&app, |_, _| true).is_ok(),
+            "the chat remains"
+        );
     }
 }
