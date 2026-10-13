@@ -1446,7 +1446,10 @@ ui::notifier worker thread -> notify-rust
 `irc-core` reports a PRIVMSG or NOTICE from a user mask to our nickname as
 `PrivateMessage`; server notices stay server lines, and CTCP other than
 ACTION becomes a readable server line (D029). Private messages notify only as PRIVMSG, because private NOTICEs
-are usually services or bots. Mentions and keywords are separate choices.
+are usually services or bots. Channel NOTICEs are bots too: they notify on
+mentions and keywords only when `Notifications::channel_notices` is on (off by
+default, also for existing settings files); the log highlight and unread
+state do not depend on it. Mentions and keywords are separate choices.
 `irc-core` sets `mentioned` when someone else names our nickname as a whole
 word (RFC 1459 case mapping, formatting ignored), which also covers `nick:`
 and `@nick`; keywords are case-insensitive substrings, so the nickname is
