@@ -103,7 +103,11 @@ impl EventEmitter<ColorChanged> for ColorPicker {}
 
 impl ColorPicker {
     pub fn new(initial: u32, cx: &mut Context<Self>) -> Self {
-        let hex = cx.new(|cx| TextInput::new_field("#RRGGBB", &format_hex(initial), false, cx));
+        let hex = cx.new(|cx| {
+            let mut input = TextInput::new_field("#RRGGBB", &format_hex(initial), false, cx);
+            input.prefer_direct_input();
+            input
+        });
         // Typing a complete color moves the picker; other text is left alone.
         cx.observe(&hex, |this, hex, cx| {
             if let Some(color) = parse_hex(hex.read(cx).text())

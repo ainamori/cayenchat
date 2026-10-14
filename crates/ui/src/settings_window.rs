@@ -334,7 +334,25 @@ impl SettingsForm {
         for input in form.color_inputs() {
             input.update(cx, |input, _| input.select_all_on_double_click());
         }
+        for input in form.direct_input_fields() {
+            input.update(cx, |input, _| input.prefer_direct_input());
+        }
         form
+    }
+
+    /// Fields that mostly take ASCII, so the IME is detached while they have
+    /// focus. Real name, messages, display name and passwords stay out.
+    fn direct_input_fields(&self) -> impl Iterator<Item = &Entity<TextInput>> {
+        [
+            &self.nickname,
+            &self.username,
+            &self.custom_host,
+            &self.port,
+            &self.channels,
+            &self.sasl_username,
+        ]
+        .into_iter()
+        .chain(self.color_inputs())
     }
 
     /// The `#RRGGBB` code fields shown in the colors tab.
@@ -3601,6 +3619,41 @@ mod server_settings_tests {
             field.update(cx, |field, cx| field.set_text("#12", cx));
             click(field, 2, cx);
             assert_eq!(field.read_with(cx, |f, _| f.selection()), 0..3);
+        }
+    }
+
+    #[gpui::test]
+    fn only_ascii_oriented_fields_prefer_direct_input(cx: &mut TestAppContext) {
+        use gpui::EntityInputHandler as _;
+        let store = memory_store();
+        let form = form(configured_a(), &store, cx);
+        let (_, cx) = cx.add_window_view(|_, _| gpui::Empty);
+        let direct = |field: &Entity<TextInput>, cx: &mut gpui::VisualTestContext| {
+            field.update_in(cx, |field, window, cx| {
+                field.prefers_direct_input(window, cx)
+            })
+        };
+        let wanted = [
+            &form.nickname,
+            &form.username,
+            &form.custom_host,
+            &form.port,
+            &form.channels,
+            &form.sasl_username,
+        ];
+        for field in wanted.into_iter().chain(form.color_inputs()) {
+            assert!(direct(field, cx));
+        }
+        let others = [
+            &form.realname,
+            &form.display_name,
+            &form.quit_message,
+            &form.part_message,
+            &form.server_password,
+            &form.sasl_password,
+        ];
+        for field in others {
+            assert!(!direct(field, cx));
         }
     }
 

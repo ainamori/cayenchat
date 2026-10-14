@@ -555,6 +555,14 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);
 
+    /// Attach (`true`) or detach (`false`) the platform's IME for this window.
+    /// Only called when the wanted state changes. Returns whether it was
+    /// applied; `false` makes the next frame ask again. Platforms that cannot do this
+    /// per window keep the default no-op.
+    fn update_ime_enabled(&self, _enabled: bool) -> bool {
+        true
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     fn as_test(&mut self) -> Option<&mut TestWindow> {
         None
@@ -955,6 +963,11 @@ impl PlatformInputHandler {
         self.handler.apple_press_and_hold_enabled()
     }
 
+    pub(crate) fn wants_ime(&mut self, window: &mut Window, cx: &mut App) -> bool {
+        self.handler.accepts_text_input(window, cx)
+            && !self.handler.prefers_direct_input(window, cx)
+    }
+
     pub(crate) fn dispatch_input(&mut self, input: &str, window: &mut Window, cx: &mut App) {
         self.handler.replace_text_in_range(None, input, window, cx);
     }
@@ -1086,6 +1099,18 @@ pub trait InputHandler: 'static {
     #[allow(dead_code)]
     fn apple_press_and_hold_enabled(&mut self) -> bool {
         true
+    }
+
+    /// Whether this handler is a text field at all. Same name and meaning as
+    /// upstream Zed's `InputHandler::accepts_text_input`.
+    fn accepts_text_input(&mut self, _window: &mut Window, _cx: &mut App) -> bool {
+        true
+    }
+
+    /// CayenChat only: the field mostly takes ASCII, so the platform IME is
+    /// detached while it has focus. Input is not restricted.
+    fn prefers_direct_input(&mut self, _window: &mut Window, _cx: &mut App) -> bool {
+        false
     }
 }
 
