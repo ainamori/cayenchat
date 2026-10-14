@@ -1305,6 +1305,8 @@ impl SettingsWindow {
         let shortcuts_changed = ShortcutPrefs::from(previous) != shortcuts;
         let menu_bar_changed = previous.menu_bar_auto_hide != saved.menu_bar_auto_hide;
         let menu_bar_always = !saved.menu_bar_auto_hide;
+        let toolbar_changed = previous.show_toolbar != saved.show_toolbar;
+        let show_toolbar = saved.show_toolbar;
         let provider = saved.image_upload.provider.clone();
         let shorten_amazon_urls = saved.shorten_amazon_urls;
         let rules = notification_rules(&saved.notifications);
@@ -1320,6 +1322,9 @@ impl SettingsWindow {
             if menu_bar_changed {
                 owner.menu_bar.set_always(menu_bar_always);
                 cx.notify();
+            }
+            if toolbar_changed {
+                owner.set_toolbar_shown(show_toolbar, cx);
             }
             if layout_changed {
                 owner.restore_layout = restore_layout;

@@ -1183,6 +1183,42 @@ point's reference is IRC's concern and is not a generic sync token.
 Private-message recovery, persistence and echo-message reconciliation are
 future work. Details in `architecture.md` (Channel history).
 
+## D047 — Toolbar (#368)
+
+**Status:** Accepted
+
+A toolbar of icon buttons sits below the menu bar on every OS (`toolbar.rs`),
+shown by default; View → Show/Hide Toolbar flips it and saves
+`Settings::show_toolbar` (added without a version change; older files read as
+shown). Choices made by the maintainer on #367: one button each for
+connect/reconnect and join/leave whose icon follows the state; the rest use the
+first candidates there.
+
+- **Buttons:** connect or reconnect (`plug-zap` / `refresh-cw`), disconnect
+  (`unplug`) | join or leave (`log-in` / `log-out`) | next unread channel
+  (`chevrons-down`) | WHOIS (`user-search`), upload image (`image-up`) |
+  settings. Topic, mode and nickname (#370) and the next notification (#369)
+  are added with those actions.
+- **No new behavior:** a button calls the handler the menu item or shortcut
+  calls (connect, disconnect, settings, `Command::NextUnreadChannel`) or the
+  helper the context menus use (join/part). WHOIS asks about the peer of a
+  private conversation or the one member chosen in the member list. Upload opens
+  a file dialog and hands the file to the same path as a dropped file.
+- **Unavailable:** a button that cannot act is dimmed and ignores clicks (for
+  example Disconnect without a connection; join, leave and WHOIS off a channel
+  or while not registered; next unread with nothing unread).
+- **Performance:** availability is the pure `toolbar::State`, recomputed when
+  the chat window notifies; the bar is its own `AnyView::cached` view that
+  redraws only when that value (or the theme) changes. Tooltips are built on
+  hover, so a changed shortcut or language needs no redraw.
+- **Tooltip:** the action's name and its current keys (navigation shortcuts as
+  the user set them; Settings has its fixed key).
+- **Icons:** Lucide SVGs per D039, compiled in through an `AssetSource` and
+  drawn as a mask in the theme text color, so light and dark both work.
+- **Layout:** the bar is 34 px high and is inside the window content, so the
+  window size and pane sizes saved for #57 are unchanged; the panes just get
+  that much less height, like with the menu bar.
+
 ## D046 — Optional confirmation before quitting (#349)
 
 **Status:** Implemented

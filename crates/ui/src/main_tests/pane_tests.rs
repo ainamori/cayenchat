@@ -185,7 +185,8 @@ fn clicking_members_selects_them_and_the_menu_keeps_a_chosen_group(cx: &mut Test
     // its rows are 22 px tall (a 20 px line and 1 px padding each side).
     let viewport = cx.update(|window, _| window.viewport_size());
     let x = f32::from(viewport.width) - 240. + 30.;
-    let row = |index: usize| point(px(x), px(22. * index as f32 + 11.));
+    let toolbar = f32::from(crate::toolbar::HEIGHT);
+    let row = |index: usize| point(px(x), px(toolbar + 22. * index as f32 + 11.));
     let none = Modifiers::none();
     let chosen = |chat: &gpui::Entity<ChatWindow>, cx: &mut gpui::VisualTestContext| {
         chat.read_with(cx, |chat, _| {
@@ -801,7 +802,8 @@ fn a_member_who_leaves_stays_unchosen_when_the_nickname_is_taken_again(cx: &mut 
     };
     let width = f32::from(cx.update(|window, _| window.viewport_size()).width);
     // Rows are 22 px tall; the second row is alice.
-    let alice = point(px(width - 240. + 30.), px(22. + 11.));
+    let toolbar = f32::from(crate::toolbar::HEIGHT);
+    let alice = point(px(width - 240. + 30.), px(toolbar + 22. + 11.));
     let none = Modifiers::none();
     cx.simulate_mouse_move(alice, None, none);
     cx.simulate_mouse_down(alice, MouseButton::Left, none);
@@ -851,7 +853,8 @@ fn a_member_who_leaves_stays_unchosen_when_the_nickname_is_taken_again(cx: &mut 
     // The same while a group menu is open: it keeps the nicknames it was
     // opened with, but what it acts on is who is still chosen when an item
     // is clicked.
-    let bob = point(px(width - 240. + 30.), px(22. * 2. + 11.));
+    let toolbar = f32::from(crate::toolbar::HEIGHT);
+    let bob = point(px(width - 240. + 30.), px(toolbar + 22. * 2. + 11.));
     cx.simulate_mouse_move(alice, None, none);
     cx.simulate_mouse_down(alice, MouseButton::Left, none);
     cx.simulate_mouse_up(alice, MouseButton::Left, none);
