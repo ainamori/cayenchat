@@ -6,6 +6,7 @@ mod application_settings;
 mod autostart;
 mod avatar_editor;
 mod avatars;
+mod button_order;
 mod char_refs;
 mod color_picker;
 mod compact_urls;
@@ -1204,13 +1205,13 @@ impl ChatWindow {
             &self.i18n.text("quit_title"),
             Some(&detail),
             &[
-                PromptButton::cancel(self.i18n.text("cancel")),
                 PromptButton::ok(self.i18n.text("quit_confirm")),
+                PromptButton::cancel(self.i18n.text("cancel")),
             ],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
-            let quit = answer.await == Ok(1);
+            let quit = answer.await == Ok(0);
             let _ = this.update_in(cx, |this, window, cx| {
                 this.quit_prompt_open = false;
                 if quit {
@@ -5833,9 +5834,7 @@ impl ChatWindow {
                     d.child(div().text_color(theme.warning).child(feedback))
                 })
                 .child(
-                    div()
-                        .flex()
-                        .gap_2()
+                    button_order::row(div().flex().gap_2())
                         .child(
                             div()
                                 .id("member-prompt-submit")
@@ -6010,9 +6009,7 @@ impl ChatWindow {
                             d.child(div().text_color(theme.warning).child(error))
                         })
                         .child(
-                            div()
-                                .flex()
-                                .gap_2()
+                            button_order::row(div().flex().gap_2())
                                 .child(
                                     div()
                                         .id(("nick-prompt-submit", network.0))

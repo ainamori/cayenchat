@@ -412,10 +412,7 @@ impl SettingsWindow {
                         self.upload_token.clone(),
                     ))
                     .child(
-                        div()
-                            .ml(px(158.))
-                            .flex()
-                            .gap_2()
+                        crate::button_order::row(div().ml(px(158.)).flex().gap_2())
                             .child(
                                 settings_theme::button("upload-token-save", true, cx)
                                     .child(self.i18n.text("image_token_save"))

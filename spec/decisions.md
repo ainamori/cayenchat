@@ -1183,6 +1183,25 @@ point's reference is IRC's concern and is not a generic sync token.
 Private-message recovery, persistence and echo-message reconciliation are
 future work. Details in `architecture.md` (Channel history).
 
+## D047 — Confirm/Cancel button order per OS (#378)
+
+**Status:** Implemented
+
+Left to right: Windows and Linux "confirm, Cancel"; macOS "Cancel, confirm".
+The confirm button keeps its specific label ("Quit", "Delete", …).
+
+- **Native prompts** (`Window::prompt`) always pass `[confirm, Cancel]` and
+  the OS lays them out: the Windows task dialog shows custom buttons left to
+  right, `NSAlert` puts the first button at the right edge, and the Linux
+  fallback prompt stacks them top to bottom. Answer 0 is the confirming
+  action; the quit question was the only one with Cancel first and was
+  flipped. Read from the vendored GPUI sources; not run on Windows or macOS.
+- **Rows drawn by the app** (member and nickname prompts, upload token,
+  avatar editor) list the confirm button first and are wrapped in
+  `button_order::row`, which reverses the row on macOS only, so source and
+  tab order are the same everywhere. GPUI is not changed.
+- New confirm/Cancel pairs follow both rules.
+
 ## D046 — Optional confirmation before quitting (#349)
 
 **Status:** Implemented
