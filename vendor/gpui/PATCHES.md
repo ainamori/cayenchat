@@ -157,3 +157,10 @@ AppKit adds the window list and other window items. Upstream did this only for
 a menu whose name was exactly `"Window"`, so translating the title (CayenChat's
 Japanese "ウインドウ") lost the system items. A nested `os_submenu` of type
 `Window` is registered the same way. Other platforms ignore the field.
+
+In `src/platform/windows/window.rs`, `activate` does not send the simulated
+Alt press when a window of this process is already the foreground window
+(`GetForegroundWindow` + `GetWindowThreadProcessId`): `SetForegroundWindow`
+succeeds then, and the Alt would only reach our own window and focus its menu
+bar. CayenChat activates the chat window and then the initial settings window
+at startup (issue #354).

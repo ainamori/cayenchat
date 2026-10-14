@@ -422,6 +422,13 @@ convention (it resembles macOS full-screen menus). A bar that is always shown
 has no slide-in animation (a frozen animation was one suspected cause of a
 half-drawn bar, issue #87) and Alt/F10 only move keyboard use in and out of it.
 The settings window has no bar (issue #145; its menus were all disabled).
+In it Escape (#339) closes one open layer per press (auto-join dialog, avatar
+editor, color or font picker, server, language or encoding list) and then the window
+itself, saved like the close button, handing the keyboard back to the chat
+window. A shortcut recording keeps its Escape. GPUI never flags an Escape
+keystroke as IME input, so the fields are asked for marked text
+(`TextInput::is_composing`) and a composition keeps its Escape. With no server
+the form has no field, so the page takes the initial focus to receive Escape.
 The bar shares native menu definitions and actions, supports arrows/Enter/Escape,
 and preserves input focus for editing commands. Alt chords do not toggle it;
 selecting an action or clicking outside dismisses it. Action availability is
@@ -1446,7 +1453,10 @@ ui::notifier worker thread -> notify-rust
 `irc-core` reports a PRIVMSG or NOTICE from a user mask to our nickname as
 `PrivateMessage`; server notices stay server lines, and CTCP other than
 ACTION becomes a readable server line (D029). Private messages notify only as PRIVMSG, because private NOTICEs
-are usually services or bots. Mentions and keywords are separate choices.
+are usually services or bots. Channel NOTICEs are bots too: they notify on
+mentions and keywords only when `Notifications::channel_notices` is on (off by
+default, also for existing settings files); the log highlight and unread
+state do not depend on it. Mentions and keywords are separate choices.
 `irc-core` sets `mentioned` when someone else names our nickname as a whole
 word (RFC 1459 case mapping, formatting ignored), which also covers `nick:`
 and `@nick`; keywords are case-insensitive substrings, so the nickname is
