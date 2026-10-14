@@ -188,8 +188,11 @@ actions!(
         HistoryPrevious,
         HistoryNext,
         OpenSettings,
+        Connect,
         Disconnect,
         Reconnect,
+        MinimizeWindow,
+        ZoomWindow,
         ToggleDebug,
         CopyDiagnostics,
         CopyLogSelection,
@@ -391,24 +394,53 @@ fn event_provenance(replayed: bool) -> Provenance {
     }
 }
 
+/// What leads a message's text in the log: `alice: ` before a message,
+/// `* alice ` before the text of a `/me` action.
+fn sender_prefix(message: &cayenchat_model::Message) -> String {
+    let sender = display::neutralize_bidi(&message.sender);
+    if message.action {
+        format!("* {sender} ")
+    } else {
+        format!("{sender}: ")
+    }
+}
+
+/// The kind of a received PRIVMSG or NOTICE and the text it shows: a
+/// PRIVMSG that is a CTCP ACTION (`/me`) is told apart here, once, and shown
+/// by its action text. A NOTICE is never an action.
+fn received_kind(text: &str, notice: bool) -> (Kind, &str) {
+    if notice {
+        return (Kind::Notice, text);
+    }
+    match cayenchat_irc_core::text::action_text(text) {
+        Some(action) => (Kind::Action, action),
+        None => (Kind::Message, text),
+    }
+}
+
 /// Requested history lines as timeline items: history, never news.
 fn history_lines(messages: Vec<HistoryMessage>) -> Vec<TimelineLine> {
     messages
         .into_iter()
-        .map(|message| TimelineLine {
-            sender: message.sender,
-            text: if message.notice {
-                format!("[NOTICE] {}", message.text)
-            } else {
-                message.text
-            },
-            notice: message.notice,
-            meta: irc_message_meta(
-                message.server_time,
-                message.msgid.as_deref(),
-                message.account.as_deref(),
-                Provenance::Replayed,
-            ),
+        .map(|message| {
+            let (kind, shown) = received_kind(&message.text, message.notice);
+            let action = kind.is_action().then(|| shown.to_owned());
+            TimelineLine {
+                action: action.is_some(),
+                text: match action {
+                    Some(action) => action,
+                    None if message.notice => format!("[NOTICE] {}", message.text),
+                    None => message.text,
+                },
+                sender: message.sender,
+                notice: message.notice,
+                meta: irc_message_meta(
+                    message.server_time,
+                    message.msgid.as_deref(),
+                    message.account.as_deref(),
+                    Provenance::Replayed,
+                ),
+            }
         })
         .collect()
 }
@@ -615,8 +647,9 @@ struct ReceivedMessage<'a> {
     /// Where it was added; `None` for the server log.
     conversation: Option<ConversationId>,
     sender: &'a str,
+    /// The text the conversation shows: an action's own text for a `/me`.
     text: &'a str,
-    notice: bool,
+    kind: Kind,
     found: &'a Found,
     replayed: bool,
 }
@@ -1309,19 +1342,14 @@ impl ChatWindow {
     }
 
     /// Mentions of our nickname and keywords in an incoming message, looked
-    /// for in its text (the action of a `/me`) without formatting codes. Our
-    /// own lines and replayed history have none.
-    fn find_mentions(&self, network: NetworkId, sender: &str, text: &str, replayed: bool) -> Found {
-        use cayenchat_irc_core::text::{action_text, mention_ranges, plain_ranges};
+    /// for in its text (the action's own text for a `/me`) without formatting
+    /// codes. Our own lines and replayed history have none.
+    fn find_mentions(&self, network: NetworkId, sender: &str, body: &str, replayed: bool) -> Found {
+        use cayenchat_irc_core::text::{mention_ranges, plain_ranges};
 
         if replayed || self.is_own_nickname(network, sender) {
             return Found::default();
         }
-        let (offset, body) = match action_text(text) {
-            // The prefix `action_text` removes.
-            Some(action) => ("\u{1}ACTION ".len(), action),
-            None => (0, text),
-        };
         let own = self.own_nickname(network);
         let keywords = &self.notification_rules.keywords;
         let (mut mentioned, mut keyword) = (false, false);
@@ -1350,35 +1378,31 @@ impl ChatWindow {
             ranges.sort_by_key(|range| range.start);
             ranges
         });
-        let mut found = Found {
+        Found {
             mentioned,
             keyword,
             ranges,
-        };
-        for range in &mut found.ranges {
-            *range = range.start + offset..range.end + offset;
         }
-        found
     }
 
     /// Shows a desktop notification for an incoming IRC message when the
     /// rules ask for one and the message is not already in front of the user.
     fn notify_message(&mut self, network: NetworkId, message: ReceivedMessage) {
-        use cayenchat_irc_core::text::{action_text, strip_formatting};
+        use cayenchat_irc_core::text::strip_formatting;
 
         let ReceivedMessage {
             channel,
             conversation,
             sender,
             text,
-            notice,
+            kind,
             found,
             replayed,
         } = message;
 
         let Some(trigger) = self.notification_rules.trigger(IncomingMessage {
             channel: channel.is_some(),
-            notice,
+            notice: kind.is_notice(),
             from_self: self.is_own_nickname(network, sender),
             mentioned: found.mentioned,
             keyword: found.keyword,
@@ -1386,9 +1410,10 @@ impl ChatWindow {
         }) else {
             return;
         };
-        let plain = display::neutralize_bidi_owned(match action_text(text) {
-            Some(action) => format!("* {sender} {}", strip_formatting(action)),
-            None => strip_formatting(text),
+        let plain = display::neutralize_bidi_owned(if kind.is_action() {
+            format!("* {sender} {}", strip_formatting(text))
+        } else {
+            strip_formatting(text)
         });
         let visible = self.window_active
             && self.state.selection()
@@ -1894,10 +1919,35 @@ impl ChatWindow {
         }
     }
 
-    fn reconnect_action(&mut self, _: &Reconnect, window: &mut Window, cx: &mut Context<Self>) {
+    /// Whether Connect applies: the selected server has not been connected in
+    /// this run, or there is no server yet (it then opens settings).
+    fn can_connect_selected(&self) -> bool {
+        match self.selected_network_id() {
+            Some(network) => self
+                .sessions
+                .get(&network)
+                .is_some_and(|session| !session.used()),
+            None => true,
+        }
+    }
+
+    /// Whether Reconnect applies: the selected server has been connected in
+    /// this run.
+    fn can_reconnect_selected(&self) -> bool {
+        self.selected_network_id()
+            .is_some_and(|network| self.sessions.get(&network).is_some_and(ServerSession::used))
+    }
+
+    fn connect_action(&mut self, _: &Connect, window: &mut Window, cx: &mut Context<Self>) {
         match self.selected_network_id() {
             Some(network) => self.reconnect(network, window, cx),
             None => self.open_settings_for(None, window, cx),
+        }
+    }
+
+    fn reconnect_action(&mut self, _: &Reconnect, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(network) = self.selected_network_id() {
+            self.reconnect(network, window, cx);
         }
     }
 
@@ -2929,12 +2979,28 @@ impl ChatWindow {
             .filter_map(|row| {
                 channel.messages.get(row).map(|message| {
                     let range = selection.range(row, message.text.len()).unwrap_or(0..0);
+                    // An action copied whole keeps the `* alice` that makes it
+                    // a `/me`; a part of it is copied as selected.
+                    let lead = if message.action
+                        && range.start == 0
+                        && range.end == message.text.len()
+                        && !range.is_empty()
+                    {
+                        sender_prefix(message)
+                    } else {
+                        String::new()
+                    };
                     if !decode {
-                        return message.text[range].to_owned();
+                        return lead + &message.text[range];
                     }
                     // Decoded references are copied as the characters shown.
-                    compact_urls::Compact::new(&message.text, message.links.as_slice(), false, true)
-                        .copy_text(&message.text, range)
+                    lead + &compact_urls::Compact::new(
+                        &message.text,
+                        message.links.as_slice(),
+                        false,
+                        true,
+                    )
+                    .copy_text(&message.text, range)
                 })
             })
             .collect();
@@ -3345,7 +3411,8 @@ impl ChatWindow {
                 account,
                 replayed,
             } => {
-                let found = self.find_mentions(network, &sender, &text, replayed);
+                let (kind, text) = received_kind(&text, notice);
+                let found = self.find_mentions(network, &sender, text, replayed);
                 let meta = MessageMeta {
                     highlights: found.ranges.clone(),
                     ..irc_message_meta(
@@ -3357,14 +3424,10 @@ impl ChatWindow {
                 };
                 // A copy of a message the conversation already has (overlapping
                 // history) neither notifies nor highlights again.
-                if !self.state.append_channel_message_at(
-                    network,
-                    &channel,
-                    &sender,
-                    &text,
-                    Kind::from_notice(notice),
-                    meta,
-                ) {
+                if !self
+                    .state
+                    .append_channel_message_at(network, &channel, &sender, text, kind, meta)
+                {
                     return;
                 }
                 let conversation = self.state.channel_id(network, &channel);
@@ -3374,8 +3437,8 @@ impl ChatWindow {
                         Scope::Channel,
                         &channel,
                         &sender,
-                        &text,
-                        notice,
+                        text,
+                        kind,
                         server_time,
                     );
                 }
@@ -3385,8 +3448,8 @@ impl ChatWindow {
                         channel: Some(&channel),
                         conversation,
                         sender: &sender,
-                        text: &text,
-                        notice,
+                        text,
+                        kind,
                         found: &found,
                         replayed,
                     },
@@ -3432,7 +3495,8 @@ impl ChatWindow {
                 account,
                 replayed,
             } => {
-                let found = self.find_mentions(network, &sender, &text, replayed);
+                let (kind, text) = received_kind(&text, notice);
+                let found = self.find_mentions(network, &sender, text, replayed);
                 let meta = MessageMeta {
                     highlights: found.ranges.clone(),
                     ..irc_message_meta(
@@ -3459,8 +3523,8 @@ impl ChatWindow {
                         if !self.state.append_conversation_message(
                             id,
                             &sender,
-                            &text,
-                            Kind::from_notice(notice),
+                            text,
+                            kind,
                             meta,
                             Unread::Mark,
                         ) {
@@ -3472,8 +3536,8 @@ impl ChatWindow {
                                 Scope::Private,
                                 &sender,
                                 &sender,
-                                &text,
-                                notice,
+                                text,
+                                kind,
                                 server_time,
                             );
                         }
@@ -3484,12 +3548,14 @@ impl ChatWindow {
                     None => {
                         let prefix = if notice {
                             format!("-{sender}- ")
+                        } else if kind.is_action() {
+                            format!("* {sender} ")
                         } else {
                             format!("<{sender}> ")
                         };
                         let meta = meta.after_prefix(prefix.len());
                         self.state
-                            .append_server_message_at(network, prefix + &text, meta);
+                            .append_server_message_at(network, prefix + text, meta);
                     }
                 }
                 self.notify_message(
@@ -3498,8 +3564,8 @@ impl ChatWindow {
                         channel: None,
                         conversation,
                         sender: &sender,
-                        text: &text,
-                        notice,
+                        text,
+                        kind,
                         found: &found,
                         replayed,
                     },
@@ -3513,6 +3579,7 @@ impl ChatWindow {
                 msgid,
                 replayed,
             } => {
+                let (kind, text) = received_kind(&text, notice);
                 let meta = irc_message_meta(
                     server_time,
                     msgid.as_deref(),
@@ -3526,12 +3593,12 @@ impl ChatWindow {
                         Scope::Private,
                         &target,
                         own,
-                        &text,
-                        notice,
+                        text,
+                        kind,
                         server_time,
                     );
                 }
-                self.append_own_private(network, &target, &text, notice, meta);
+                self.append_own_private(network, &target, text, kind, meta);
             }
             Event::UserNickChanged { from, to } => {
                 let from_key = cayenchat_irc_core::text::nickname_key(&from);
@@ -3736,6 +3803,11 @@ impl ChatWindow {
                 action,
             } => {
                 let before = self.state.latest_sequence();
+                // A `/me` is shown by its own text like a received one.
+                let (kind, shown) = match action.as_deref() {
+                    Some(action) => (Kind::Action, action),
+                    None => (Kind::from_notice(notice), text.as_str()),
+                };
                 if valid_channel(&channel) {
                     let nickname = self
                         .sessions
@@ -3746,12 +3818,12 @@ impl ChatWindow {
                         network,
                         &channel,
                         nickname,
-                        &text,
-                        Kind::from_notice(notice),
+                        shown,
+                        kind,
                         Provenance::Live,
                     );
                 } else if cayenchat_irc_core::valid_nickname(&channel) {
-                    self.append_own_private(network, &channel, &text, notice, MessageMeta::live());
+                    self.append_own_private(network, &channel, shown, kind, MessageMeta::live());
                 } else {
                     self.state.append_server_message(
                         network,
@@ -3801,7 +3873,7 @@ impl ChatWindow {
                     {
                         session
                             .pending_sends
-                            .insert(local_id, (id, self.state.latest_sequence(), notice));
+                            .insert(local_id, (id, self.state.latest_sequence(), kind));
                     }
                 }
             }
@@ -3823,11 +3895,12 @@ impl ChatWindow {
                     .sessions
                     .get_mut(&network)
                     .and_then(|session| session.pending_sends.remove(&local_id));
-                if let Some((id, sequence, notice)) = pending {
+                if let Some((id, sequence, kind)) = pending {
                     let meta =
                         irc_message_meta(server_time, msgid.as_deref(), None, Provenance::Live);
-                    self.state
-                        .confirm_message(id, sequence, text, Kind::from_notice(notice), meta);
+                    // The final text of an ACTION is its own text.
+                    let text = if kind.is_action() { action } else { text };
+                    self.state.confirm_message(id, sequence, text, kind, meta);
                 }
             }
             Event::OutgoingFailed { local_id, reason } => {
@@ -3903,7 +3976,7 @@ impl ChatWindow {
         network: NetworkId,
         target: &str,
         text: &str,
-        notice: bool,
+        kind: Kind,
         meta: MessageMeta,
     ) {
         let own = self.own_nickname(network).unwrap_or("me").to_owned();
@@ -3913,18 +3986,16 @@ impl ChatWindow {
             .private_conversation(network, &key, target, Missing::Create)
         {
             Some(id) => {
-                self.state.append_conversation_message(
-                    id,
-                    &own,
-                    text,
-                    Kind::from_notice(notice),
-                    meta,
-                    Unread::Leave,
-                );
+                self.state
+                    .append_conversation_message(id, &own, text, kind, meta, Unread::Leave);
             }
             None => self.state.append_server_message_at(
                 network,
-                format!("→ {target} <{own}> {text}"),
+                if kind.is_action() {
+                    format!("→ {target} * {own} {text}")
+                } else {
+                    format!("→ {target} <{own}> {text}")
+                },
                 meta,
             ),
         }
@@ -5425,7 +5496,12 @@ impl ChatWindow {
             .when(self.can_disconnect_selected(), |d| {
                 d.on_action(cx.listener(Self::disconnect_action))
             })
-            .on_action(cx.listener(Self::reconnect_action))
+            .when(self.can_connect_selected(), |d| {
+                d.on_action(cx.listener(Self::connect_action))
+            })
+            .when(self.can_reconnect_selected(), |d| {
+                d.on_action(cx.listener(Self::reconnect_action))
+            })
             .on_action(cx.listener(Self::toggle_debug))
             .on_action(cx.listener(Self::copy_diagnostics))
             .on_action(cx.listener(|this, _: &Quit, window, cx| this.request_quit(window, cx)))
@@ -5951,10 +6027,10 @@ impl ChatWindow {
         // wrapped lines return to the left edge of the text column. Reiwa
         // mode shows it on its own first line instead.
         let reiwa = style.reiwa_mode && !message.activity;
-        let prefix = if message.activity || reiwa {
+        let prefix = if message.activity || (reiwa && !message.action) {
             String::new()
         } else {
-            format!("{}: ", display::neutralize_bidi(&message.sender))
+            sender_prefix(message)
         };
         let prefix_len = prefix.len();
         let styled = styled_log_text(
@@ -6236,9 +6312,9 @@ impl ChatWindow {
             )
         } else {
             format!(
-                "{} [{network}] {}: ",
+                "{} [{network}] {}",
                 display::neutralize_bidi(&conversation.name),
-                display::neutralize_bidi(&message.sender)
+                sender_prefix(message)
             )
         };
         // Long URLs and character references are drawn as in the channel
@@ -6493,28 +6569,38 @@ fn request_quit_in_chat_window(cx: &mut App, retry: bool) {
 }
 
 fn app_menus(debug_enabled: bool, i18n: &Localizer) -> Vec<Menu> {
+    // macOS keeps Settings and Quit in the application menu; Windows and Linux
+    // put them in File, with no application-named menu.
     let mut app_items = vec![
         MenuItem::action(i18n.text("menu_settings"), OpenSettings),
         MenuItem::separator(),
     ];
     #[cfg(target_os = "macos")]
-    app_items.push(MenuItem::os_submenu(
-        i18n.text("menu_services"),
-        SystemMenuType::Services,
-    ));
-    app_items.push(MenuItem::action(i18n.text("menu_quit"), Quit));
-    vec![
+    app_items.extend([
+        MenuItem::os_submenu(i18n.text("menu_services"), SystemMenuType::Services),
+        MenuItem::separator(),
+    ]);
+    let (app_menu_name, quit_label) = if cfg!(target_os = "macos") {
+        ("CayenChat".to_owned(), "menu_quit")
+    } else {
+        (i18n.text("menu_file"), "menu_exit")
+    };
+    app_items.push(MenuItem::action(i18n.text(quit_label), Quit));
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut menus = vec![
         Menu {
-            name: "CayenChat".into(),
+            name: app_menu_name.into(),
             items: app_items,
+            menu_type: None,
         },
         Menu {
             name: i18n.text("menu_connection").into(),
             items: vec![
-                MenuItem::action(i18n.text("menu_settings"), OpenSettings),
+                MenuItem::action(i18n.text("connect"), Connect),
                 MenuItem::action(i18n.text("disconnect"), Disconnect),
                 MenuItem::action(i18n.text("reconnect"), Reconnect),
             ],
+            menu_type: None,
         },
         Menu {
             name: i18n.text("menu_edit").into(),
@@ -6527,6 +6613,7 @@ fn app_menus(debug_enabled: bool, i18n: &Localizer) -> Vec<Menu> {
                 MenuItem::action(i18n.text("menu_paste"), input::Paste),
                 MenuItem::action(i18n.text("menu_select_all"), input::SelectAll),
             ],
+            menu_type: None,
         },
         Menu {
             name: i18n.text("menu_view").into(),
@@ -6541,12 +6628,21 @@ fn app_menus(debug_enabled: bool, i18n: &Localizer) -> Vec<Menu> {
                 ),
                 MenuItem::action(i18n.text("menu_copy_diagnostics"), CopyDiagnostics),
             ],
+            menu_type: None,
         },
-        Menu {
-            name: i18n.text("menu_window").into(),
-            items: vec![MenuItem::action(i18n.text("menu_settings"), OpenSettings)],
-        },
-    ]
+    ];
+    // Only macOS has a Window menu; AppKit adds the window list, full screen
+    // and the like to it, so it holds just Minimize and Zoom.
+    #[cfg(target_os = "macos")]
+    menus.push(Menu {
+        name: i18n.text("menu_window").into(),
+        items: vec![
+            MenuItem::action(i18n.text("menu_minimize"), MinimizeWindow),
+            MenuItem::action(i18n.text("menu_zoom"), ZoomWindow),
+        ],
+        menu_type: Some(SystemMenuType::Window),
+    });
+    menus
 }
 
 /// Saved key preferences, kept so a desktop key-theme change can rebind
@@ -6643,6 +6739,8 @@ fn fixed_bindings(channel_modifier: ChannelNumberModifier) -> Vec<KeyBinding> {
         KeyBinding::new("secondary-c", CopyLogSelection, Some("MainLog")),
         KeyBinding::new("secondary-q", Quit, None),
     ];
+    #[cfg(target_os = "macos")]
+    bindings.push(KeyBinding::new("secondary-m", MinimizeWindow, None));
 
     for index in 0..10 {
         let digit = (index + 1) % 10;
@@ -6771,6 +6869,22 @@ fn main() {
             !chat
                 .update(cx, |this, window, cx| this.ask_before_quit(window, cx))
                 .unwrap_or(false)
+        });
+        // Global actions run inside the active window's update, so updating
+        // that window again here fails; do it once the dispatch has finished.
+        cx.on_action(|_: &MinimizeWindow, cx| {
+            cx.defer(|cx| {
+                if let Some(window) = cx.active_window() {
+                    let _ = window.update(cx, |_, window, _| window.minimize_window());
+                }
+            });
+        });
+        cx.on_action(|_: &ZoomWindow, cx| {
+            cx.defer(|cx| {
+                if let Some(window) = cx.active_window() {
+                    let _ = window.update(cx, |_, window, _| window.zoom_window());
+                }
+            });
         });
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
@@ -6985,3 +7099,7 @@ mod navigation_binding_tests;
 #[cfg(test)]
 #[path = "main_tests/bidi_display_tests.rs"]
 mod bidi_display_tests;
+
+#[cfg(test)]
+#[path = "main_tests/menu_tests.rs"]
+mod menu_tests;

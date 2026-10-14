@@ -280,7 +280,7 @@ impl MacPlatform {
                 menu_item.setSubmenu_(menu);
                 application_menu.addItem_(menu_item);
 
-                if menu_config.name == "Window" {
+                if menu_config.menu_type == Some(SystemMenuType::Window) {
                     let app: id = msg_send![APP_CLASS, sharedApplication];
                     app.setWindowsMenu_(menu);
                 }
@@ -427,7 +427,7 @@ impl MacPlatform {
                     actions.push(action.boxed_clone());
                     item
                 }
-                MenuItem::Submenu(Menu { name, items }) => {
+                MenuItem::Submenu(Menu { name, items, .. }) => {
                     let item = NSMenuItem::new(nil).autorelease();
                     let submenu = NSMenu::new(nil).autorelease();
                     submenu.setDelegate_(delegate);
@@ -449,6 +449,10 @@ impl MacPlatform {
                         SystemMenuType::Services => {
                             let app: id = msg_send![APP_CLASS, sharedApplication];
                             app.setServicesMenu_(item);
+                        }
+                        SystemMenuType::Window => {
+                            let app: id = msg_send![APP_CLASS, sharedApplication];
+                            app.setWindowsMenu_(submenu);
                         }
                     }
 

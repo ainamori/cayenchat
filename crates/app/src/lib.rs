@@ -342,6 +342,7 @@ impl AppState {
                             activity: false,
                             alert: false,
                             notice: false,
+                            action: false,
                             provenance: Provenance::Live,
                             delivery_failed: false,
                         }
@@ -1026,6 +1027,7 @@ impl AppState {
         let (text, meta) = notice_marked(text, kind, meta);
         let mut message = new_message(sender.into(), text, Line::Text, meta);
         message.notice = kind.is_notice();
+        message.action = kind.is_action();
         if !self.append_to_conversation(id, message) {
             return false;
         }
@@ -1228,13 +1230,18 @@ impl AppState {
         // a server sends lands in the bounded server log instead.
         let (text, meta) = notice_marked(text, kind, meta);
         let Some(id) = self.channel_id(network, name) else {
-            let prefix = format!("{name} <{sender}> ");
+            let prefix = if kind.is_action() {
+                format!("{name} * {sender} ")
+            } else {
+                format!("{name} <{sender}> ")
+            };
             let meta = meta.after_prefix(prefix.len());
             self.append_server_message_at(network, prefix + &text, meta);
             return true;
         };
         let mut message = new_message(sender.into(), text, Line::Text, meta);
         message.notice = kind.is_notice();
+        message.action = kind.is_action();
         if !self.append_to_conversation(id, message) {
             return false;
         }
@@ -1326,6 +1333,7 @@ impl AppState {
             message.links = Links::new(links::find(&message.text));
         }
         message.notice = kind.is_notice();
+        message.action = kind.is_action();
         message.delivery_failed = false;
         if meta.native_id.is_some() {
             message.native_id = meta.native_id;
@@ -1560,6 +1568,7 @@ impl AppState {
                 },
             );
             message.notice = line.notice;
+            message.action = line.action;
             if (message.native_id.is_some() || message.timestamp.is_some())
                 && !self.duplicates.entry(id).or_default().admit(&message)
             {
@@ -1701,6 +1710,7 @@ impl AppState {
                     },
                 );
                 message.notice = line.notice;
+                message.action = line.action;
                 message
             })
             .filter(|message| {
@@ -2072,6 +2082,7 @@ fn new_message(sender: String, text: String, line: Line, meta: MessageMeta) -> M
         activity: line != Line::Text,
         alert: line == Line::Alert,
         notice: false,
+        action: false,
         provenance: meta.provenance,
         delivery_failed: false,
     }

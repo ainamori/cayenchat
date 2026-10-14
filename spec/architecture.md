@@ -408,7 +408,7 @@ window offers Connection and Appearance tabs. With startup connection enabled,
 the UI validates the saved selected profile and connects without opening settings;
 invalid saved connection details open settings with feedback. Only explicitly
 saved credentials are available at startup. The macOS
-application menu and Command+, open that window;
+application menu (Settings…) and Command+, open that window (menus: D045);
 Windows/Linux use Ctrl+, or an in-window menu bar that is shown all the time by
 default (users found a hidden bar hard to discover, issue #60). The Startup &
 Behavior tab has "Hide the menu bar until Alt or F10" (`menu_bar_auto_hide`, off by default,
@@ -422,6 +422,13 @@ convention (it resembles macOS full-screen menus). A bar that is always shown
 has no slide-in animation (a frozen animation was one suspected cause of a
 half-drawn bar, issue #87) and Alt/F10 only move keyboard use in and out of it.
 The settings window has no bar (issue #145; its menus were all disabled).
+In it Escape (#339) closes one open layer per press (auto-join dialog, avatar
+editor, color or font picker, server, language or encoding list) and then the window
+itself, saved like the close button, handing the keyboard back to the chat
+window. A shortcut recording keeps its Escape. GPUI never flags an Escape
+keystroke as IME input, so the fields are asked for marked text
+(`TextInput::is_composing`) and a composition keeps its Escape. With no server
+the form has no field, so the page takes the initial focus to receive Escape.
 The bar shares native menu definitions and actions, supports arrows/Enter/Escape,
 and preserves input focus for editing commands. Alt chords do not toggle it;
 selecting an action or clicking outside dismisses it. Action availability is
@@ -1442,6 +1449,14 @@ ui::notifier worker thread -> notify-rust
         +-- macOS: NSUserNotificationCenter via mac-notification-sys
         +-- Windows: WinRT toast via tauri-winrt-notification
 ```
+
+Events carry the wire text; the UI tells a PRIVMSG's CTCP ACTION (`/me`) apart
+once when the event arrives (`received_kind`) and adds it as `Kind::Action`
+with only the action's own text, so `Message::action` is set and nothing
+searches for `\x01ACTION` again when drawing. Mentions, keywords, links and
+the conversation log then see the action's text; the log draws `* alice waves`
+for such a line (`sender_prefix`), our own `/me` included. A NOTICE is never
+an action.
 
 `irc-core` reports a PRIVMSG or NOTICE from a user mask to our nickname as
 `PrivateMessage`; server notices stay server lines, and CTCP other than
