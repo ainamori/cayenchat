@@ -942,6 +942,25 @@ fn file_open_dialog(
             folder_dialog.SetOkButtonLabel(&HSTRING::from(prompt))?;
         }
 
+        if let Some(filter) = &options.filter {
+            // The strings must outlive the call; the dialog copies them.
+            let wide = |text: &str| -> Vec<u16> {
+                text.encode_utf16().chain(std::iter::once(0)).collect()
+            };
+            let name = wide(&filter.name);
+            let pattern = wide(
+                &filter
+                    .extensions
+                    .iter()
+                    .map(|extension| format!("*.{extension}"))
+                    .join(";"),
+            );
+            folder_dialog.SetFileTypes(&[Common::COMDLG_FILTERSPEC {
+                pszName: PCWSTR(name.as_ptr()),
+                pszSpec: PCWSTR(pattern.as_ptr()),
+            }])?;
+        }
+
         if folder_dialog.Show(window).is_err() {
             // User cancelled
             return Ok(None);
