@@ -1183,6 +1183,37 @@ point's reference is IRC's concern and is not a generic sync token.
 Private-message recovery, persistence and echo-message reconciliation are
 future work. Details in `architecture.md` (Channel history).
 
+## D049 — Direct input for ASCII-oriented fields (#379)
+
+**Status:** Implemented (Windows, Wayland, macOS); not verified on real
+desktops yet
+
+While a field that mostly takes ASCII has focus, the window's IME is detached.
+The IME mode is never read or written back: when focus moves to another field
+the IME is attached again and the OS/IME returns to its own state, so the
+OS-wide settings stay untouched.
+
+- Fields: nickname, username, host, port, auto-join channels, SASL account and
+  the color codes (settings and the color picker's `#RRGGBB`). Not: real name,
+  display name, QUIT/PART messages, the chat input, passwords.
+- It is an aid, not validation: pasted text, full-width characters and existing
+  values are accepted as before.
+- `TextInput::prefer_direct_input` marks a field (off by default, never set by
+  `new_settings_field`). It answers the vendored GPUI `prefers_direct_input`;
+  GPUI attaches the IME only when `accepts_text_input && !prefers_direct_input`.
+  `accepts_text_input` has upstream's meaning ("is a text field"), so
+  `prefers_direct_input` is CayenChat's own and the only difference from
+  upstream. `Window::draw` asks after each frame and calls
+  `PlatformWindow::update_ime_enabled` only when the answer changes.
+- Windows: `ImmAssociateContextEx(hwnd, NULL, 0)` after completing a
+  composition; `IACE_DEFAULT` to attach again. It runs after the frame, because
+  completing the composition needs the window. Wayland: text-input
+  disable/enable (`enable` on focus is skipped while the window wants it off).
+  macOS: `allowedInputSourceLocales` limited to Roman input sources, as for a
+  password field. X11/XIM: no per-field switch; typing works as before.
+- A composition still open when focus moves to such a field is completed into
+  that field (Windows); it is not lost.
+
 ## D048 — Confirm/Cancel button order per OS (#378)
 
 **Status:** Implemented

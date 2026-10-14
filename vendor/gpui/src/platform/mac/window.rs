@@ -1503,6 +1503,32 @@ impl PlatformWindow for MacWindow {
             .detach()
     }
 
+    fn update_ime_enabled(&self, enabled: bool) {
+        // Same approach as a password field: while a field prefers direct
+        // input, only Roman input sources are allowed. AppKit goes back to the
+        // user's input source when the restriction is lifted.
+        let executor = self.0.lock().executor.clone();
+        executor
+            .spawn(async move {
+                unsafe {
+                    let input_context: id =
+                        msg_send![class!(NSTextInputContext), currentInputContext];
+                    if input_context.is_null() {
+                        return;
+                    }
+                    let locales: id = if enabled {
+                        nil
+                    } else {
+                        let roman = NSString::alloc(nil)
+                            .init_str("NSAllRomanInputSourcesLocaleIdentifier");
+                        NSArray::arrayWithObject(nil, roman)
+                    };
+                    let _: () = msg_send![input_context, setAllowedInputSourceLocales: locales];
+                }
+            })
+            .detach()
+    }
+
     fn titlebar_double_click(&self) {
         let this = self.0.lock();
         let window = this.native_window;

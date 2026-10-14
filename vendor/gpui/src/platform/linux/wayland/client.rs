@@ -292,6 +292,14 @@ impl WaylandClientStatePtr {
     pub fn enable_ime(&self) {
         let client = self.get_client();
         let mut state = client.borrow_mut();
+        // A window whose focused field prefers direct input keeps the IME off.
+        if let Some(window) = state.keyboard_focused_window.clone() {
+            drop(state);
+            if !window.ime_wanted() {
+                return;
+            }
+            state = client.borrow_mut();
+        }
         let Some(mut text_input) = state.text_input.take() else {
             return;
         };

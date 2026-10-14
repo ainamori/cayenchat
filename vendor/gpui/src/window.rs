@@ -843,6 +843,7 @@ pub struct Window {
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
     pub(crate) next_frame: Frame,
+    ime_enabled: bool,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
@@ -1248,6 +1249,7 @@ impl Window {
             requested_autoscroll: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
+            ime_enabled: true,
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
@@ -1949,9 +1951,16 @@ impl Window {
         self.next_frame.window_active = self.active.get();
 
         // Register requested input handler with the platform window.
+        let mut wants_ime = true;
         if let Some(input_handler) = self.next_frame.input_handlers.pop() {
-            self.platform_window
-                .set_input_handler(input_handler.unwrap());
+            let mut input_handler = input_handler.unwrap();
+            wants_ime = input_handler.wants_ime(self, cx);
+            self.platform_window.set_input_handler(input_handler);
+        }
+        // Only call into the OS when the wanted state changes.
+        if wants_ime != self.ime_enabled {
+            self.ime_enabled = wants_ime;
+            self.platform_window.update_ime_enabled(wants_ime);
         }
 
         self.layout_engine.as_mut().unwrap().clear();

@@ -1238,7 +1238,36 @@ impl WindowsWindowInner {
         });
         self.state.borrow_mut().callbacks.request_frame = Some(request_frame);
         unsafe { ValidateRect(Some(handle), None).ok().log_err() };
+        let pending_ime_enabled = self.state.borrow_mut().pending_ime_enabled.take();
+        if let Some(enabled) = pending_ime_enabled {
+            self.update_ime_enabled(handle, enabled);
+        }
         Some(0)
+    }
+
+    /// Ported from upstream Zed (`gpui_windows`). Detaching the IME input
+    /// context makes keys reach the window as plain characters; attaching the
+    /// default context again restores the user's IME state.
+    fn update_ime_enabled(&self, handle: HWND, enabled: bool) {
+        unsafe {
+            if enabled {
+                ImmAssociateContextEx(handle, HIMC::default(), IACE_DEFAULT)
+                    .ok()
+                    .log_err();
+            } else {
+                // Commit any composition before the context goes away.
+                let ctx = ImmGetContext(handle);
+                if !ctx.is_invalid() {
+                    ImmNotifyIME(ctx, NI_COMPOSITIONSTR, CPS_COMPLETE, 0)
+                        .ok()
+                        .log_err();
+                    ImmReleaseContext(handle, ctx).ok().log_err();
+                }
+                ImmAssociateContextEx(handle, HIMC::default(), 0)
+                    .ok()
+                    .log_err();
+            }
+        }
     }
 
     #[inline]
