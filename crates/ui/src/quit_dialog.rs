@@ -125,6 +125,8 @@ impl ChatWindow {
                 .size_full()
                 .flex()
                 .justify_center()
+                // Without this the row stretches the box to the window height.
+                .items_start()
                 .pt(px(60.))
                 .bg(Rgba {
                     a: 0.6,
