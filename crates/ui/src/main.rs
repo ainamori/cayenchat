@@ -590,6 +590,11 @@ struct ChatWindow {
     window_bounds: Option<WindowBounds>,
     /// The native window title last set from `render`.
     shown_title: String,
+    /// Keep every CayenChat window above ordinary windows (Windows only).
+    /// Applied to the windows opened later; the native state is set by
+    /// `apply_always_on_top`, never while building a window.
+    #[cfg(target_os = "windows")]
+    always_on_top: bool,
     /// Open WHOIS windows by network and lowercase nickname.
     whois_windows: HashMap<(NetworkId, String), WindowHandle<WhoisWindow>>,
     whois_replies: Vec<(NetworkId, WhoisInfo, bool)>,
@@ -1029,6 +1034,8 @@ impl ChatWindow {
             nick_prompts: Vec::new(),
             startup_connections,
             settings_window: None,
+            #[cfg(target_os = "windows")]
+            always_on_top: saved.always_on_top,
             window_handle: window.window_handle().downcast::<ChatWindow>(),
             restore_layout: saved.restore_window_layout,
             confirm_quit: saved.confirm_quit,
@@ -2607,6 +2614,14 @@ impl ChatWindow {
         let joined = self.joined_channels(network);
         match WhoisWindow::open(owner, network, info, joined, self.i18n.clone(), cx) {
             Ok(handle) => {
+                #[cfg(target_os = "windows")]
+                if self.always_on_top {
+                    let _ = handle.update(cx, |_, window, _| {
+                        if let Err(error) = set_window_always_on_top(window, true) {
+                            log::warn!("Could not keep the WHOIS window on top: {error}");
+                        }
+                    });
+                }
                 self.whois_windows.insert(key, handle);
                 cx.activate(true);
             }
@@ -3029,7 +3044,17 @@ impl ChatWindow {
                 })
             },
         ) {
-            Ok(handle) => self.settings_window = Some(handle),
+            Ok(handle) => {
+                #[cfg(target_os = "windows")]
+                if self.always_on_top {
+                    let _ = handle.update(cx, |_, window, _| {
+                        if let Err(error) = set_window_always_on_top(window, true) {
+                            log::warn!("Could not keep the settings window on top: {error}");
+                        }
+                    });
+                }
+                self.settings_window = Some(handle)
+            }
             Err(error) => {
                 let message = self
                     .i18n
@@ -4355,6 +4380,75 @@ fn notification_rules(settings: &Notifications) -> NotificationRules {
         channel_notices: settings.channel_notices,
         sound: settings.sound,
     }
+}
+
+#[cfg(target_os = "windows")]
+impl ChatWindow {
+    /// Applies the Windows-only preference to the chat window and to the open
+    /// settings and WHOIS windows, and remembers it for windows opened later.
+    /// Dialogs follow their parent window. Callers apply it only when the
+    /// preference is on at startup or changes; test builds skip the native call.
+    fn apply_always_on_top(&mut self, enabled: bool, window: &Window, cx: &mut Context<Self>) {
+        self.always_on_top = enabled;
+        if let Err(error) = set_window_always_on_top(window, enabled) {
+            self.set_feedback(Some(error));
+        }
+        for handle in self.whois_windows.values() {
+            let _ = handle.update(cx, |_, window, _| {
+                if let Err(error) = set_window_always_on_top(window, enabled) {
+                    log::warn!("Could not change the WHOIS window's Z-order: {error}");
+                }
+            });
+        }
+        // The settings window is mid-update when it saves, so reach it after.
+        if let Some(handle) = self.settings_window {
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, _| {
+                    if let Err(error) = set_window_always_on_top(window, enabled) {
+                        log::warn!("Could not change the settings window's Z-order: {error}");
+                    }
+                });
+            });
+        }
+        cx.notify();
+    }
+}
+
+/// Puts a CayenChat window above (or back among) ordinary windows.
+/// Uses the native handle without changing vendored GPUI.
+#[cfg(target_os = "windows")]
+fn set_window_always_on_top(window: &Window, enabled: bool) -> Result<(), String> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+        SetWindowPos,
+    };
+
+    // Test windows have no native handle (GPUI's is `unimplemented!()`), and
+    // tests can change the preference, so they never reach it.
+    if cfg!(test) {
+        return Ok(());
+    }
+    // GPUI has an inherent window_handle() method (its own view handle), so
+    // explicitly call the raw-window-handle trait for the native HWND.
+    let handle = HasWindowHandle::window_handle(window).map_err(|error| error.to_string())?;
+    let RawWindowHandle::Win32(native) = handle.as_raw() else {
+        return Err("The window does not have a Win32 handle".into());
+    };
+    let hwnd = native.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+    let order = if enabled {
+        HWND_TOPMOST
+    } else {
+        HWND_NOTOPMOST
+    };
+    let flags = SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER;
+    if unsafe { SetWindowPos(hwnd, order, 0, 0, 0, 0, flags) } == 0 {
+        return Err(format!(
+            "Could not change the window's Z-order: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
 }
 
 fn default_time_font() -> &'static str {
@@ -7262,6 +7356,8 @@ fn main() {
         let window_bounds = restored.map(|restored| restored.bounds).unwrap_or_else(|| {
             WindowBounds::Windowed(Bounds::centered(None, size(px(960.), px(600.)), cx))
         });
+        #[cfg(target_os = "windows")]
+        let always_on_top = saved.always_on_top;
         let chat_window = cx
             .open_window(
                 WindowOptions {
@@ -7278,6 +7374,14 @@ fn main() {
             )
             .expect("could not open CayenChat window");
         cx.activate(true);
+        // Off is the default state, so only an enabled preference touches the
+        // native window; the settings window below follows it.
+        #[cfg(target_os = "windows")]
+        if always_on_top {
+            let _ = chat_window.update(cx, |chat, window, cx| {
+                chat.apply_always_on_top(true, window, cx)
+            });
+        }
         // Settings open when nothing connects at startup or a saved server
         // cannot start, showing the first such server; valid servers still
         // connect.

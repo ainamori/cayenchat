@@ -206,6 +206,7 @@
   "char_ref_origin": "Converted from HTML numeric character references",
   "reiwa_mode": "Show the channel log in Reiwa mode",
   "restore_window_layout": "Restore window position and size at startup",
+  "always_on_top": "Keep CayenChat windows always on top",
   "confirm_quit": "Confirm before quitting",
   "quit_title": "Quit CayenChat?",
   "quit_detail_connected": "This disconnects from the connected IRC servers and quits the application.",
