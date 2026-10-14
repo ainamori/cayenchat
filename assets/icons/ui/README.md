@@ -12,4 +12,17 @@ and record that here.
 
 | File | Lucide name | Lucide version | Used for |
 | --- | --- | --- | --- |
-| (none yet) | | | |
+| `plug-zap.svg` | `plug-zap` | 1.56.0 | Toolbar: connect |
+| `refresh-cw.svg` | `refresh-cw` | 1.56.0 | Toolbar: reconnect |
+| `unplug.svg` | `unplug` | 1.56.0 | Toolbar: disconnect |
+| `log-in.svg` | `log-in` | 1.56.0 | Toolbar: join the channel |
+| `log-out.svg` | `log-out` | 1.56.0 | Toolbar: leave the channel |
+| `chevrons-down.svg` | `chevrons-down` | 1.56.0 | Toolbar: next unread channel |
+| `user-search.svg` | `user-search` | 1.56.0 | Toolbar: WHOIS |
+| `image-up.svg` | `image-up` | 1.56.0 | Toolbar: upload an image |
+| `settings.svg` | `settings` | 1.56.0 | Toolbar: settings |
+
+The files are unchanged from upstream (`stroke="currentColor"`); the toolbar
+draws them as a mask in the theme's text color, so they show in both light and
+dark. They are compiled into the binary (`toolbar::Icons`), so a new icon is
+also added to that list.

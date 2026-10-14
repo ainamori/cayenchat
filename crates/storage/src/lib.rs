@@ -907,6 +907,10 @@ pub struct Settings {
     /// 15 without a version change; files without it read as off. macOS has
     /// native menus and ignores it.
     pub menu_bar_auto_hide: bool,
+    /// Show the toolbar below the menu bar (View → Toolbar). On by default,
+    /// also for files saved before it existed (added after version 15
+    /// without a version change).
+    pub show_toolbar: bool,
     pub appearance: Appearance,
     /// Reopen the main window where it was left, with its pane sizes (see
     /// [`layout`]). On by default, also for files saved before it existed.
@@ -961,6 +965,7 @@ impl Default for Settings {
             linux_display: LinuxDisplay::Wayland,
             channel_number_modifier: ChannelNumberModifier::Ctrl,
             menu_bar_auto_hide: false,
+            show_toolbar: true,
             text_key_theme: TextKeyTheme::Auto,
             appearance: Appearance::default(),
             restore_window_layout: true,
@@ -2967,5 +2972,17 @@ mod tests {
         settings.menu_bar_auto_hide = true;
         save_to(&path, &settings).unwrap();
         assert!(load_from(&path).unwrap().unwrap().menu_bar_auto_hide);
+    }
+
+    #[test]
+    fn the_toolbar_is_shown_unless_hidden() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        fs::write(&path, r#"{"version":15,"selected_server":"","servers":[]}"#).unwrap();
+        let mut settings = load_from(&path).unwrap().unwrap();
+        assert!(settings.show_toolbar, "absent reads as shown");
+        settings.show_toolbar = false;
+        save_to(&path, &settings).unwrap();
+        assert!(!load_from(&path).unwrap().unwrap().show_toolbar);
     }
 }
