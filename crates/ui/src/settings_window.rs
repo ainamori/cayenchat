@@ -1063,10 +1063,14 @@ impl SettingsWindow {
     /// values back. Edits this window could not save yet are kept.
     /// Takes over the server order the file has, keeping every other edit
     /// in the form, so that saving cannot put back an older order.
+    /// The toolbar's visibility, which the chat window's View menu changes
+    /// without this window, is taken over the same way.
     fn follow_saved_server_order(&mut self) {
         let Ok(Some(file)) = settings_file::load() else {
             return;
         };
+        self.saved.show_toolbar = file.show_toolbar;
+        self.settings.values.show_toolbar = file.show_toolbar;
         if follow_server_order(&mut self.saved.servers, &file.servers) {
             follow_server_order(&mut self.settings.values.servers, &file.servers);
         }
