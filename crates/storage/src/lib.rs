@@ -915,6 +915,11 @@ pub struct Settings {
     /// Reopen the main window where it was left, with its pane sizes (see
     /// [`layout`]). On by default, also for files saved before it existed.
     pub restore_window_layout: bool,
+    /// Keep every CayenChat window (chat, settings, WHOIS) above ordinary
+    /// windows on Windows.
+    /// Off by default, including settings files written before this existed.
+    /// Ignored on other platforms.
+    pub always_on_top: bool,
     /// Ask before the user quits the application. Off by default, also for
     /// files saved before it existed. Quits by the system or by a signal
     /// never ask.
@@ -969,6 +974,7 @@ impl Default for Settings {
             text_key_theme: TextKeyTheme::Auto,
             appearance: Appearance::default(),
             restore_window_layout: true,
+            always_on_top: false,
             confirm_quit: false,
             shorten_amazon_urls: true,
             credential_backend: CredentialBackendKind::System,
@@ -2960,6 +2966,21 @@ mod tests {
         settings.text_key_theme = TextKeyTheme::Emacs;
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path).unwrap(), Some(settings));
+    }
+
+    #[test]
+    fn always_on_top_is_opt_in_for_existing_settings_and_round_trips() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        fs::write(&path, r#"{"version":15,"selected_server":"","servers":[]}"#).unwrap();
+        let mut settings = load_from(&path).unwrap().unwrap();
+        assert!(!settings.always_on_top, "absent reads as off");
+        settings.always_on_top = true;
+        save_to(&path, &settings).unwrap();
+        assert!(load_from(&path).unwrap().unwrap().always_on_top);
+        settings.always_on_top = false;
+        save_to(&path, &settings).unwrap();
+        assert!(!load_from(&path).unwrap().unwrap().always_on_top);
     }
 
     #[test]
