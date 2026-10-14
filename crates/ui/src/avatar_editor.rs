@@ -442,10 +442,7 @@ impl SettingsWindow {
                     ),
                 )
                 .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
+                    crate::button_order::row(div().flex().flex_wrap().gap_2())
                         .child(
                             settings_theme::button("avatar-editor-upload", true, cx)
                                 .child(
