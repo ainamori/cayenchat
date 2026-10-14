@@ -358,7 +358,6 @@
   "upload_reconnect": "Reconnect Account",
   "upload_preparing": "Preparing image…",
   "upload_uploading": "Uploading image to {provider}…",
-  "upload_done": "Image uploaded; the link was added to the draft.",
   "upload_cancel": "Cancel",
   "upload_cancelled": "Upload cancelled. If the transfer had already finished, the image may still exist on {provider}.",
   "upload_busy": "An image upload is already in progress.",
