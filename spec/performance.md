@@ -1259,3 +1259,28 @@ Linux container, release build, headless `perf_baseline::perf_baseline`
 
 No difference beyond run-to-run noise (the occasional ~13 ms batch run
 appears on both builds).
+
+## Notified-line queue (2026-10-14)
+
+`AppState` keeps at most 200 `(conversation, sequence)` pairs of lines the
+user was notified about, for `Command::NextNotifiedMessage`. Per message the
+cost is the notification decision that already existed plus, for a notified
+line only, one conversation lookup and one `VecDeque` push (the lookup is
+the same one `note_attention` does for the newest line). A trimmed log scans
+the queue (at most 200 entries) once per trim, and removing a network or a
+private conversation filters it. No timer, thread or per-frame work was
+added; the 2-second highlight is a single one-shot timer started by a jump.
+Same Linux container, release build, headless
+`perf_baseline::perf_baseline` (10 channels × 2,000 lines), three runs each
+alternated, medians in µs; parent `f722f6f` built from `git archive` in a
+separate target directory.
+
+| Build | Typing | Channel switch | Scroll 20 rows | 256-event batch | Typing after |
+| --- | --- | --- | --- | --- | --- |
+| Parent | 251 / 255 / 249 | 1,531 / 1,606 / 1,603 | 1,137 / 1,206 / 1,211 | 1,626 / 1,651 / 1,619 | 271 / 262 / 262 |
+| This branch | 259 / 252 / 251 | 1,572 / 1,600 / 1,696 | 1,178 / 1,210 / 1,189 | 1,644 / 1,605 / 1,606 | 261 / 264 / 263 |
+
+No difference beyond run-to-run noise. Limits: the headless test's lines do
+not trigger notifications, so it does not exercise the queue push; that path
+is one lookup and push per notified line, bounded at 200 entries. The
+process-level scenarios (`run_baseline.py`) were not run.

@@ -2340,3 +2340,43 @@ fn trimmed_lines_and_closed_conversations_leave_the_list() {
     assert!(state.close_private(query));
     assert!(!state.has_attention());
 }
+
+#[test]
+fn resetting_or_removing_a_network_drops_its_notified_lines() {
+    let mut state = two_networks();
+    let one = state.channel_id(NetworkId(1), "#a").unwrap();
+    let two = state.channel_id(NetworkId(2), "#a").unwrap();
+    for (network, name, text) in [
+        (NetworkId(1), "#a", "first"),
+        (NetworkId(2), "#a", "second"),
+        (NetworkId(1), "#a", "third"),
+    ] {
+        state.append_channel_message(network, name, "bob", text, Kind::Message, Provenance::Live);
+        let id = state.channel_id(network, name).unwrap();
+        state.note_attention(id);
+    }
+    assert_eq!(state.attention.len(), 3);
+
+    state.reset_network(NetworkId(1), vec!["#a".into()]);
+    assert_eq!(state.attention.len(), 1);
+    state.dispatch(Command::NextNotifiedMessage);
+    assert_eq!(state.selection(), Selection::Channel(two));
+    assert!(state.take_reveal().is_some());
+    assert!(!state.has_attention());
+    assert_ne!(one, state.channel_id(NetworkId(1), "#a").unwrap());
+
+    let two_id = state.channel_id(NetworkId(2), "#a").unwrap();
+    state.append_channel_message(
+        NetworkId(2),
+        "#a",
+        "bob",
+        "later",
+        Kind::Message,
+        Provenance::Live,
+    );
+    state.note_attention(two_id);
+    state.sync_networks(&[]);
+    assert!(!state.has_attention());
+    state.dispatch(Command::NextNotifiedMessage);
+    assert_eq!(state.take_reveal(), None);
+}

@@ -607,6 +607,7 @@ impl AppState {
             .retain(|channel| channel.network != network);
         self.channel_ids.retain(|(owner, _), _| *owner != network);
         self.casemappings.remove(&network);
+        self.attention.retain(|(id, _)| !removed.contains(id));
         for id in &removed {
             self.duplicates.remove(id);
             self.pending_history.remove(id);
