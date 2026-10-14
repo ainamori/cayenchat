@@ -14,6 +14,33 @@ const HOVER_POLL: Duration = Duration::from_millis(150);
 const HOVER_SLACK: f32 = 12.;
 const REVEAL_ANIMATION: Duration = Duration::from_millis(140);
 
+/// Access keys of the top-level menus, in menu order (Alt+key opens one).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AccessKeys {
+    /// Lower-case key of each menu; `None` for a menu without one.
+    pub keys: Vec<Option<char>>,
+    /// Show the key as "Name(K)" always (Japanese convention) instead of
+    /// underlining it while Alt or the bar is in use.
+    pub suffix: bool,
+}
+
+impl AccessKeys {
+    fn menu_for(&self, key: &Keystroke) -> Option<usize> {
+        let modifiers = key.modifiers;
+        // Exactly Alt: Ctrl+Alt is AltGr on Windows and Shift+Alt is a layout
+        // switch, neither is a menu key.
+        if !modifiers.alt || modifiers.control || modifiers.shift || modifiers.platform {
+            return None;
+        }
+        let mut chars = key.key.chars();
+        let (Some(pressed), None) = (chars.next(), chars.next()) else {
+            return None;
+        };
+        let pressed = pressed.to_ascii_lowercase();
+        self.keys.iter().position(|k| *k == Some(pressed))
+    }
+}
+
 #[derive(Default)]
 pub struct MenuBar {
     /// The bar is on screen all the time (the default). `visible` then only
@@ -166,6 +193,34 @@ impl MenuBar {
         self.reveals += 1;
     }
 
+    /// Alt held together with a menu's letter opens that menu. Only reached
+    /// by keys no shortcut took. Releasing Alt first does not count: an IME
+    /// toggle can look like a lone Alt, and typed letters must not open menus.
+    fn access_key(
+        &mut self,
+        key: &Keystroke,
+        keys: &AccessKeys,
+        menu_count: usize,
+        composing: bool,
+    ) -> bool {
+        let Some(index) = keys.menu_for(key).filter(|index| *index < menu_count) else {
+            return false;
+        };
+        if composing {
+            return false;
+        }
+        self.alt_candidate = false;
+        self.hover_reveal = false;
+        self.hover_generation += 1;
+        if !self.visible {
+            self.reveal(false);
+        }
+        self.active = index;
+        self.open = true;
+        self.selected = None;
+        true
+    }
+
     fn modifiers_changed(&mut self, modifiers: Modifiers) {
         let other =
             modifiers.control || modifiers.shift || modifiers.platform || modifiers.function;
@@ -232,26 +287,66 @@ fn enabled_items(menus: &[OwnedMenu], window: &Window, cx: &mut App) -> Vec<Vec<
 
 /// Keep focus in the original text field so Edit actions use its selection.
 /// MenuBar::new intercepts menu keys before that field handles them.
+#[allow(clippy::too_many_arguments)] // Each is one independent hook of the caller's view.
 pub fn wrap<V: 'static>(
     state: &MenuBar,
     menus: Vec<OwnedMenu>,
+    access_keys: AccessKeys,
     content: AnyElement,
     access: fn(&mut V) -> &mut MenuBar,
+    composing: fn(&V, &App) -> bool,
     window: &mut Window,
     cx: &mut Context<V>,
 ) -> AnyElement {
     if cfg!(target_os = "macos") {
         return content;
     }
-    wrap_in_window(state, menus, content, access, window, cx)
+    wrap_in_window(
+        state,
+        menus,
+        access_keys,
+        content,
+        access,
+        composing,
+        window,
+        cx,
+    )
+}
+
+/// The heading text: the name with its access key as a "(K)" suffix, or with
+/// the key underlined while Alt or the bar is in use.
+fn heading(name: &str, key: Option<char>, suffix: bool, underline: bool) -> Div {
+    let label = div().flex().whitespace_nowrap();
+    let Some(key) = key else {
+        return label.child(name.to_owned());
+    };
+    if suffix {
+        return label.child(format!("{name}({})", key.to_ascii_uppercase()));
+    }
+    let found = name
+        .char_indices()
+        .find(|(_, c)| c.to_ascii_lowercase() == key);
+    match found {
+        Some((at, c)) if underline => {
+            let end = at + c.len_utf8();
+            label
+                .child(name[..at].to_owned())
+                .child(div().underline().child(name[at..end].to_owned()))
+                .child(name[end..].to_owned())
+        }
+        _ => label.child(name.to_owned()),
+    }
 }
 
 // Kept platform-independent so first-frame rendering is tested on macOS too.
+#[allow(clippy::too_many_arguments)]
 fn wrap_in_window<V: 'static>(
     state: &MenuBar,
     menus: Vec<OwnedMenu>,
+    access_keys: AccessKeys,
     content: AnyElement,
     access: fn(&mut V) -> &mut MenuBar,
+    composing: fn(&V, &App) -> bool,
     window: &mut Window,
     cx: &mut Context<V>,
 ) -> AnyElement {
@@ -285,7 +380,12 @@ fn wrap_in_window<V: 'static>(
                 .when(state.visible && state.active == index, |d| {
                     d.bg(theme.selected)
                 })
-                .child(menu.name.clone())
+                .child(heading(
+                    &menu.name,
+                    access_keys.keys.get(index).copied().flatten(),
+                    access_keys.suffix,
+                    state.alt_down || state.visible,
+                ))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, _, cx| {
@@ -381,8 +481,21 @@ fn wrap_in_window<V: 'static>(
         )
         .into_any_element()
     };
+    let menu_count = menus.len();
     div()
         .id("window-menu-root")
+        // Bubble phase: a key that a shortcut took never gets here, so a
+        // user's Alt+letter shortcut wins over the access key.
+        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+            if event.is_held {
+                return;
+            }
+            let composing = composing(this, cx);
+            if access(this).access_key(&event.keystroke, &access_keys, menu_count, composing) {
+                cx.stop_propagation();
+                cx.notify();
+            }
+        }))
         .relative()
         .size_full()
         .flex()
@@ -509,8 +622,13 @@ mod tests {
                         }
                         .owned(),
                     ],
+                    super::AccessKeys {
+                        keys: vec![Some('v')],
+                        suffix: false,
+                    },
                     content,
                     |this| &mut this.menu,
+                    |_, _| false,
                     window,
                     cx,
                 )
@@ -599,8 +717,13 @@ mod tests {
                         }
                         .owned(),
                     ],
+                    super::AccessKeys {
+                        keys: vec![Some('v')],
+                        suffix: false,
+                    },
                     content,
                     |this| &mut this.menu,
+                    |_, _| false,
                     window,
                     cx,
                 )
@@ -658,6 +781,27 @@ mod tests {
         cx.simulate_keystrokes("enter");
         assert!(view.read_with(cx, |view, _| !view.menu.visible && !view.menu.open));
 
+        // Alt+letter opens that menu and shows the bar; releasing Alt first and
+        // then typing the letter does not.
+        cx.simulate_keystrokes("alt-v");
+        assert!(view.read_with(cx, |view, _| view.menu.visible && view.menu.open));
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(cx, |view, _| !view.menu.visible && !view.menu.open));
+        cx.simulate_modifiers_change(alt);
+        cx.simulate_modifiers_change(Modifiers::default());
+        cx.simulate_keystrokes("v");
+        assert!(view.read_with(cx, |view, _| !view.menu.visible && !view.menu.open));
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.input.read(cx).text().to_owned()),
+            "v"
+        );
+        // A shortcut on the same chord is used instead of the menu.
+        cx.update(|_, cx| {
+            cx.bind_keys([gpui::KeyBinding::new("alt-v", crate::CopyDiagnostics, None)])
+        });
+        cx.simulate_keystrokes("alt-v");
+        assert!(view.read_with(cx, |view, _| !view.menu.open));
+
         // Resting in the hot zone reveals it; moving away hides it again.
         cx.simulate_mouse_move(gpui::point(px(40.), px(80.)), None, Modifiers::default());
         cx.simulate_mouse_move(gpui::point(px(40.), px(2.)), None, Modifiers::default());
@@ -677,6 +821,25 @@ mod tests {
         cx.simulate_mouse_move(gpui::point(px(40.), px(80.)), None, Modifiers::default());
         cx.executor().advance_clock(super::HOVER_REVEAL_DELAY * 2);
         assert!(!view.read_with(cx, |view, _| view.menu.visible));
+    }
+
+    #[test]
+    fn access_keys_need_exactly_alt_and_no_composition() {
+        let keys = super::AccessKeys {
+            keys: vec![Some('f'), None, Some('e')],
+            suffix: false,
+        };
+        let press = |text: &str| gpui::Keystroke::parse(text).unwrap();
+        let mut state = MenuBar::default();
+        assert!(!state.access_key(&press("e"), &keys, 3, false));
+        assert!(!state.access_key(&press("ctrl-alt-e"), &keys, 3, false));
+        assert!(!state.access_key(&press("alt-shift-e"), &keys, 3, false));
+        assert!(!state.access_key(&press("alt-x"), &keys, 3, false));
+        assert!(!state.access_key(&press("alt-e"), &keys, 3, true));
+        assert!(!state.access_key(&press("alt-e"), &keys, 2, false));
+        assert!(!state.visible);
+        assert!(state.access_key(&press("alt-e"), &keys, 3, false));
+        assert!((state.visible, state.open, state.active) == (true, true, 2));
     }
 
     #[test]
