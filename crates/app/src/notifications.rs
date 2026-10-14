@@ -62,8 +62,19 @@ impl NotificationRules {
     /// never notify; channel NOTICEs notify on mentions and keywords only
     /// when `channel_notices` is on. Replayed history never notifies.
     pub fn trigger(&self, message: IncomingMessage) -> Option<Trigger> {
-        if !self.enabled
-            || message.from_self
+        if self.enabled {
+            self.attention(message)
+        } else {
+            None
+        }
+    }
+
+    /// [`trigger`](Self::trigger) without the master switch: what a
+    /// notification would be for, whether or not desktop notifications are
+    /// on. The jump to notified lines uses it, so highlighted lines and
+    /// private messages can be visited with notifications off.
+    pub fn attention(&self, message: IncomingMessage) -> Option<Trigger> {
+        if message.from_self
             || message.replayed
             || (message.channel && message.notice && !self.channel_notices)
         {

@@ -1259,3 +1259,71 @@ Linux container, release build, headless `perf_baseline::perf_baseline`
 
 No difference beyond run-to-run noise (the occasional ~13 ms batch run
 appears on both builds).
+
+## Notified-line queue (2026-10-14)
+
+`AppState` keeps at most 200 `(conversation, sequence)` pairs of lines the
+user was notified about, for `Command::NextNotifiedMessage`. Per message the
+cost is the notification decision that already existed plus, for a notified
+line only, one conversation lookup and one `VecDeque` push (the lookup is
+the same one `note_attention` does for the newest line). A trimmed log scans
+the queue (at most 200 entries) once per trim, and removing a network or a
+private conversation filters it. No timer, thread or per-frame work was
+added; the 2-second highlight is a single one-shot timer started by a jump.
+Same Linux container, release build, headless
+`perf_baseline::perf_baseline` (10 channels × 2,000 lines), three runs each
+alternated, medians in µs; parent `f722f6f` built from `git archive` in a
+separate target directory.
+
+| Build | Typing | Channel switch | Scroll 20 rows | 256-event batch | Typing after |
+| --- | --- | --- | --- | --- | --- |
+| Parent | 251 / 255 / 249 | 1,531 / 1,606 / 1,603 | 1,137 / 1,206 / 1,211 | 1,626 / 1,651 / 1,619 | 271 / 262 / 262 |
+| This branch | 259 / 252 / 251 | 1,572 / 1,600 / 1,696 | 1,178 / 1,210 / 1,189 | 1,644 / 1,605 / 1,606 | 261 / 264 / 263 |
+
+No difference beyond run-to-run noise.
+
+The headless test's lines do not trigger notifications, so the queue was
+also measured at process level. `run_baseline.py --load-only --runs 1
+--notify-every 5` (the fixture prefixes every 5th line with the client's nick,
+so a fifth of the lines are mentions; the queue fills to its 200-entry cap
+during the history phase and stays full, dropping its oldest entry on each
+further push) was run
+twice per build, alternating parent and branch, against release builds of
+`f722f6f` and this branch in the same container under Xvfb. Per run (parent
+1 / parent 2 / branch 1 / branch 2):
+
+| Scenario | CPU % | RSS MiB |
+| --- | --- | --- |
+| S2 connected, idle | 0.03 / 0.00 / 0.00 / 0.07 | 117.0 / 116.4 / 116.7 / 116.6 |
+| S3 20,000 lines (4,000 notified) | 0.00 / 0.00 / 0.03 / 0.00 | 123.0 / 123.0 / 123.1 / 122.8 |
+| S4a 200 lines/s | 4.27 / 4.24 / 4.31 / 4.27 | 123.0 / 123.0 / 123.1 / 122.8 |
+| S4b as fast as read | 186.4 / 187.1 / 185.7 / 186.0 | 124.0 / 123.6 / 123.8 / 124.2 |
+
+The connection stayed up in every run (one connection, no reconnect). Lines
+consumed during S4b: 4.53 M / 4.57 M / 4.51 M / 4.54 M (151.1 / 152.5 / 150.2 /
+151.5 k lines/s); the 0.5 % lower average on the branch is inside the spread
+between the two parent runs. PING round trip during S4b was 15 s median in
+all four runs, the same fixture artifact as in the baseline above (the
+client reads only while its event queue has room), and 0.6–0.7 ms median at
+200 lines/s. No sustained growth: RSS moved by under 1.5 MiB between
+scenarios in every run.
+
+What this measures: the registration path (notification decision, conversation
+lookup, push) and the 200-entry cap. It does not measure the removal of queue
+entries when a log is trimmed: the fixture spreads the lines round-robin over
+all channels and every 5th line is notified, so when a channel trims its
+oldest lines the queue entries still held are on the newer side, and the
+trim-time scan found nothing to remove. That scan is bounded by the cap
+(at most 200 entries once per trim) and is covered by the unit tests, not by
+a performance measurement. Removal on network or private-conversation close is
+likewise not measured.
+
+Limits: one run per build and order (two per build), Linux/Xvfb only; no
+`phys_footprint`, wakeup or window-visibility data (`visible` is 0/1 on this
+platform, as the check is macOS only). The headless UI numbers measure the UI
+side (state, list and pane work) but not formatting, rasterizing or
+presenting, so the drawing cost of a visible window is not verified. The
+unmodified fixture (no `--notify-every`) was not rerun; its lines never reach
+the queue. `--notify-every` prefixes the fixed nick `perfclient`, which is
+what `run_baseline.py` sets; a client with another nick would not be
+mentioned.

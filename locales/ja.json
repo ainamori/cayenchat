@@ -170,6 +170,7 @@
   "shortcut_next_active_server": "次のアクティブなサーバー",
   "shortcut_previous_unread_channel": "前の未読チャンネル",
   "shortcut_next_unread_channel": "次の未読チャンネル",
+  "shortcut_next_notified_message": "次の通知された発言",
   "shortcut_previous_selected_channel": "直前に選択したチャンネル",
   "shortcut_change": "変更",
   "shortcut_reset": "元に戻す",
