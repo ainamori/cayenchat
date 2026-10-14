@@ -1280,7 +1280,35 @@ separate target directory.
 | Parent | 251 / 255 / 249 | 1,531 / 1,606 / 1,603 | 1,137 / 1,206 / 1,211 | 1,626 / 1,651 / 1,619 | 271 / 262 / 262 |
 | This branch | 259 / 252 / 251 | 1,572 / 1,600 / 1,696 | 1,178 / 1,210 / 1,189 | 1,644 / 1,605 / 1,606 | 261 / 264 / 263 |
 
-No difference beyond run-to-run noise. Limits: the headless test's lines do
-not trigger notifications, so it does not exercise the queue push; that path
-is one lookup and push per notified line, bounded at 200 entries. The
-process-level scenarios (`run_baseline.py`) were not run.
+No difference beyond run-to-run noise.
+
+The headless test's lines do not trigger notifications, so the queue was
+also measured at process level. `run_baseline.py --load-only --runs 1
+--notify-every 5` (the fixture prefixes every 5th line with the client's nick,
+so a fifth of the lines are mentions; the queue fills to its 200-entry cap
+during the history phase and is trimmed and refilled for the rest) was run
+twice per build, alternating parent and branch, against release builds of
+`f722f6f` and this branch in the same container under Xvfb. Per run (parent
+1 / parent 2 / branch 1 / branch 2):
+
+| Scenario | CPU % | RSS MiB |
+| --- | --- | --- |
+| S2 connected, idle | 0.03 / 0.00 / 0.00 / 0.07 | 117.0 / 116.4 / 116.7 / 116.6 |
+| S3 20,000 lines (4,000 notified) | 0.00 / 0.00 / 0.03 / 0.00 | 123.0 / 123.0 / 123.1 / 122.8 |
+| S4a 200 lines/s | 4.27 / 4.24 / 4.31 / 4.27 | 123.0 / 123.0 / 123.1 / 122.8 |
+| S4b as fast as read | 186.4 / 187.1 / 185.7 / 186.0 | 124.0 / 123.6 / 123.8 / 124.2 |
+
+The connection stayed up in every run (one connection, no reconnect). Lines
+consumed during S4b: 4.53 M / 4.57 M / 4.51 M / 4.54 M (151.1 / 152.5 / 150.2 /
+151.5 k lines/s); the 0.5 % lower average on the branch is inside the spread
+between the two parent runs. PING round trip during S4b was 15 s median in
+all four runs, the same fixture artifact as in the baseline above (the
+client reads only while its event queue has room), and 0.6–0.7 ms median at
+200 lines/s. No sustained growth: RSS moved by under 1.5 MiB between
+scenarios in every run.
+
+Limits: one run per build and order (two per build), Linux/Xvfb only; no
+`phys_footprint`, wakeup or window-visibility data (`visible` is 0/1 on this
+platform, as the check is macOS only), so drawing cost of a visible window
+is covered only by the headless UI numbers above. The unmodified fixture
+(no `--notify-every`) was not rerun; its lines never reach the queue.

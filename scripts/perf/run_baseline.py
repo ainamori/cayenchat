@@ -243,6 +243,8 @@ def start_fixture(args, port, control_port, seed):
             str(args.image_every if args.previews else 0),
             "--image-links",
             str(args.image_links),
+            "--notify-every",
+            str(args.notify_every),
         ],
         stderr=subprocess.DEVNULL if not args.verbose else None,
     )
@@ -437,6 +439,8 @@ def main():
     parser.add_argument("--previews", action="store_true",
                         help="image previews on, with image links (preview-fixture build)")
     parser.add_argument("--image-every", type=int, default=20)
+    parser.add_argument("--notify-every", type=int, default=0,
+                        help="every Nth fixture line mentions the client's nick")
     parser.add_argument("--image-links", type=int, default=120)
     args = parser.parse_args()
     args.image_dir = None
@@ -456,7 +460,7 @@ def main():
             for key in [
                 "servers", "channels", "members", "history", "flood_rate", "flood_seconds",
                 "churn_rate", "window", "settle", "load_only", "previews", "image_every",
-                "image_links",
+                "image_links", "notify_every",
             ]
         },
         "runs": [],
