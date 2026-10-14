@@ -417,7 +417,8 @@ async def main():
                         help="every Nth message carries an image link (0: none)")
     parser.add_argument("--image-links", type=int, default=120, help="distinct image links")
     parser.add_argument("--notify-every", type=int, default=0,
-                        help="every Nth message addresses the client's nick (0: none)")
+                        help="every Nth message addresses the nick 'perfclient', "
+                        "the one run_baseline.py sets (0: none)")
     args = parser.parse_args()
     server = Server(args)
     irc = await asyncio.start_server(server.handle_client, "127.0.0.1", args.port)

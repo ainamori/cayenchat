@@ -1286,7 +1286,8 @@ The headless test's lines do not trigger notifications, so the queue was
 also measured at process level. `run_baseline.py --load-only --runs 1
 --notify-every 5` (the fixture prefixes every 5th line with the client's nick,
 so a fifth of the lines are mentions; the queue fills to its 200-entry cap
-during the history phase and is trimmed and refilled for the rest) was run
+during the history phase and stays full, dropping its oldest entry on each
+further push) was run
 twice per build, alternating parent and branch, against release builds of
 `f722f6f` and this branch in the same container under Xvfb. Per run (parent
 1 / parent 2 / branch 1 / branch 2):
@@ -1307,8 +1308,22 @@ client reads only while its event queue has room), and 0.6–0.7 ms median at
 200 lines/s. No sustained growth: RSS moved by under 1.5 MiB between
 scenarios in every run.
 
+What this measures: the registration path (notification decision, conversation
+lookup, push) and the 200-entry cap. It does not measure the removal of queue
+entries when a log is trimmed: the fixture spreads the lines round-robin over
+all channels and every 5th line is notified, so when a channel trims its
+oldest lines the queue entries still held are on the newer side, and the
+trim-time scan found nothing to remove. That scan is bounded by the cap
+(at most 200 entries once per trim) and is covered by the unit tests, not by
+a performance measurement. Removal on network or private-conversation close is
+likewise not measured.
+
 Limits: one run per build and order (two per build), Linux/Xvfb only; no
 `phys_footprint`, wakeup or window-visibility data (`visible` is 0/1 on this
-platform, as the check is macOS only), so drawing cost of a visible window
-is covered only by the headless UI numbers above. The unmodified fixture
-(no `--notify-every`) was not rerun; its lines never reach the queue.
+platform, as the check is macOS only). The headless UI numbers measure the UI
+side (state, list and pane work) but not formatting, rasterizing or
+presenting, so the drawing cost of a visible window is not verified. The
+unmodified fixture (no `--notify-every`) was not rerun; its lines never reach
+the queue. `--notify-every` prefixes the fixed nick `perfclient`, which is
+what `run_baseline.py` sets; a client with another nick would not be
+mentioned.
