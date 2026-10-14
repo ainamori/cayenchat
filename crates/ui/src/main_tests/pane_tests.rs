@@ -2961,8 +2961,10 @@ fn highlights_and_private_messages_notify_unless_visible(cx: &mut TestAppContext
         assert!(highlights(0).is_empty());
         assert_eq!(highlights(1), [(1, "alice")]);
         assert_eq!(highlights(2), [(0, "Deploy")]);
-        // Only the action is searched, not the CTCP verb around it.
-        assert_eq!(highlights(3), [(8, "deploy")]);
+        // The line holds the action's own text, which is what is searched.
+        assert!(b.messages[3].action);
+        assert_eq!(b.messages[3].text, "deploys");
+        assert_eq!(highlights(3), [(0, "deploy")]);
         assert!(b.messages[4].is_history());
         assert!(highlights(4).is_empty());
 
@@ -3609,4 +3611,114 @@ fn switching_settings_tabs_resets_only_the_pane_scroll(cx: &mut TestAppContext) 
         );
         assert_eq!(form.read_with(cx, |f, _| f.nav_scroll.offset()), scrolled);
     }
+}
+
+#[gpui::test]
+fn actions_are_kept_as_their_own_text_on_every_path(cx: &mut TestAppContext) {
+    use cayenchat_irc_core::{Event, HistoryMessage};
+
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(crate::settings_with_channels("#a"), None, window, cx)
+    });
+    let channel_message = |text: &str, notice: bool| Event::ChannelMessage {
+        channel: "#a".into(),
+        sender: "bob".into(),
+        text: text.into(),
+        notice,
+        server_time: None,
+        msgid: None,
+        account: None,
+        replayed: false,
+    };
+    chat.update(cx, |chat, cx| {
+        chat.handle_events(
+            NetworkId(1),
+            vec![
+                Event::Registered {
+                    nickname: "alice".into(),
+                },
+                Event::Joined {
+                    channel: "#a".into(),
+                },
+                Event::HistoryRequested {
+                    channel: "#a".into(),
+                    resumed: false,
+                },
+                channel_message("\u{1}ACTION waves\u{1}", false),
+                // No closing U+0001 is still an action.
+                channel_message("\u{1}ACTION nods", false),
+                // These are not, and keep being shown as they are.
+                channel_message("\u{1}ACTION\u{1}", false),
+                channel_message("\u{1}ACTIONwaves\u{1}", false),
+                channel_message("\u{1}ACTION waves\u{1}", true),
+                Event::PrivateMessage {
+                    sender: "carol".into(),
+                    text: "\u{1}ACTION sighs\u{1}".into(),
+                    notice: false,
+                    server_time: None,
+                    msgid: None,
+                    account: None,
+                    replayed: false,
+                },
+                Event::OutgoingAccepted {
+                    local_id: Some(1),
+                    channel: "#a".into(),
+                    text: "* dances".into(),
+                    notice: false,
+                    action: Some("dances".into()),
+                },
+                Event::OutgoingConfirmed {
+                    local_id: 1,
+                    text: None,
+                    action: Some("dances!".into()),
+                    msgid: None,
+                    server_time: None,
+                },
+                Event::ChannelHistory {
+                    channel: "#a".into(),
+                    messages: vec![HistoryMessage {
+                        sender: "bob".into(),
+                        text: "\u{1}ACTION left\u{1}".into(),
+                        notice: false,
+                        server_time: None,
+                        msgid: None,
+                        account: None,
+                    }],
+                    incomplete: false,
+                },
+            ],
+            Worker::Running,
+            cx,
+        );
+        let shown = |conversation: usize| -> Vec<(bool, bool, String)> {
+            chat.state.conversations()[conversation]
+                .messages
+                .iter()
+                .filter(|message| !message.activity)
+                .map(|message| (message.action, message.notice, message.text.clone()))
+                .collect()
+        };
+        assert_eq!(
+            shown(0),
+            [
+                (true, false, "left".to_owned()),
+                (true, false, "waves".to_owned()),
+                (true, false, "nods".to_owned()),
+                (false, false, "\u{1}ACTION\u{1}".to_owned()),
+                (false, false, "\u{1}ACTIONwaves\u{1}".to_owned()),
+                (false, true, "[NOTICE] \u{1}ACTION waves\u{1}".to_owned()),
+                (true, false, "dances!".to_owned()),
+            ]
+        );
+        let private = chat.state.conversations().len() - 1;
+        assert_eq!(shown(private), [(true, false, "sighs".to_owned())]);
+    });
 }

@@ -1000,6 +1000,7 @@ fn line(text: &str, millis: Option<u64>, msgid: Option<&str>) -> timeline::Timel
         sender: "bob".into(),
         text: text.into(),
         notice: false,
+        action: false,
         meta: meta(millis, msgid, Provenance::Live),
     }
 }
@@ -2157,4 +2158,52 @@ fn a_refused_join_of_a_new_channel_opens_it_with_the_alert() {
     assert_eq!(messages.len(), 1);
     assert!(messages[0].alert);
     assert_eq!(messages[0].text, "Cannot join: banned");
+}
+
+#[test]
+fn actions_keep_their_own_text_and_kind_on_every_path() {
+    let (mut state, network, id) = paging_channel();
+    state.append_channel_message(
+        network,
+        "#a",
+        "bob",
+        "waves",
+        Kind::Action,
+        Provenance::Live,
+    );
+    let last = |state: &AppState| state.conversations()[0].messages.last().unwrap().clone();
+    let shown = last(&state);
+    assert!(shown.action && !shown.notice);
+    assert_eq!(shown.text, "waves");
+    // The server's echo of our own action replaces its text, still an action.
+    state.append_channel_message(
+        network,
+        "#a",
+        "me",
+        "dances",
+        Kind::Action,
+        Provenance::Live,
+    );
+    let sequence = state.latest_sequence();
+    assert!(state.confirm_message(
+        id,
+        sequence,
+        Some("dances!".into()),
+        Kind::Action,
+        MessageMeta::live()
+    ));
+    let confirmed = last(&state);
+    assert!(confirmed.action);
+    assert_eq!(confirmed.text, "dances!");
+    // Not in a conversation: the server log shows it as `* nick action`.
+    state.append_channel_message(
+        network,
+        "#elsewhere",
+        "bob",
+        "waves",
+        Kind::Action,
+        Provenance::Live,
+    );
+    let log = state.server_messages(network);
+    assert_eq!(log.last().unwrap().text, "#elsewhere * bob waves");
 }

@@ -1450,6 +1450,14 @@ ui::notifier worker thread -> notify-rust
         +-- Windows: WinRT toast via tauri-winrt-notification
 ```
 
+Events carry the wire text; the UI tells a PRIVMSG's CTCP ACTION (`/me`) apart
+once when the event arrives (`received_kind`) and adds it as `Kind::Action`
+with only the action's own text, so `Message::action` is set and nothing
+searches for `\x01ACTION` again when drawing. Mentions, keywords, links and
+the conversation log then see the action's text; the log draws `* alice waves`
+for such a line (`sender_prefix`), our own `/me` included. A NOTICE is never
+an action.
+
 `irc-core` reports a PRIVMSG or NOTICE from a user mask to our nickname as
 `PrivateMessage`; server notices stay server lines, and CTCP other than
 ACTION becomes a readable server line (D029). Private messages notify only as PRIVMSG, because private NOTICEs

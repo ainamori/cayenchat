@@ -11,7 +11,7 @@ use std::{
     time::Instant,
 };
 
-use cayenchat_app::own_avatar::OwnAvatar;
+use cayenchat_app::{Kind, own_avatar::OwnAvatar};
 use cayenchat_irc_core::{Connection, ConnectionConfig};
 use cayenchat_model::ConversationId;
 
@@ -55,9 +55,9 @@ pub struct ServerSession {
     /// CTCP AVATAR on the current connection.
     pub peer_avatars: PeerAvatarConnection,
     /// Our messages waiting for the server's echo (`echo-message`), by the
-    /// connection's id: the conversation, the line's sequence and whether
-    /// it is a NOTICE. The connection bounds what it tracks.
-    pub pending_sends: HashMap<u64, (ConversationId, u64, bool)>,
+    /// connection's id: the conversation, the line's sequence and
+    /// its kind. The connection bounds what it tracks.
+    pub pending_sends: HashMap<u64, (ConversationId, u64, Kind)>,
     /// Services account and real name of the users we share a channel with,
     /// as the connection reports them (`Event::UserAccount`), by
     /// casemapped nickname. The connection bounds it and reports removals.

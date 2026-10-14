@@ -1242,3 +1242,20 @@ after a warm-up run, medians in µs. Command: `cargo test --release --locked
 No difference beyond run-to-run noise. A refused join opens a conversation
 only for a channel this client just asked to join (at most 32 remembered per
 network, within the conversation limit), never for a bare server notice.
+
+## Action lines (2026-10-14)
+
+A retained `model::Message` gained a `bool` (`action`). A `/me` is told apart
+once when the event arrives; drawing, copying and the duplicate fingerprint
+only read the flag, and no timer, thread or render path was added. Same
+Linux container, release build, headless `perf_baseline::perf_baseline`
+(10 channels × 2,000 lines), five runs each of the first server, medians in
+µs, run with `--test-threads=1`.
+
+| Build | Typing | Channel switch | Scroll 20 rows | 256-event batch |
+| --- | --- | --- | --- | --- |
+| Parent `717cf0b` | 200–270 | 1,564–1,949 | 1,181–1,624 | 1,547–1,905 |
+| This branch | 201–270 | 1,518–1,940 | 1,125–1,623 | 1,587–1,905 |
+
+No difference beyond run-to-run noise (the occasional ~13 ms batch run
+appears on both builds).
