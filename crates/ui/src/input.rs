@@ -89,6 +89,7 @@ pub struct TextInput {
     attachments: bool,
     /// A message draft, the only input that shortens pasted Amazon links.
     draft: bool,
+    double_click_selects_all: bool,
     native_settings_style: bool,
 }
 
@@ -151,6 +152,11 @@ impl TextInput {
         &self.content
     }
 
+    #[cfg(test)]
+    pub fn selection(&self) -> Range<usize> {
+        self.selected_range.clone()
+    }
+
     /// Where the input was last painted.
     #[cfg(test)]
     pub fn last_bounds(&self) -> Option<Bounds<Pixels>> {
@@ -161,6 +167,12 @@ impl TextInput {
     /// handler instead of being ignored.
     pub fn accept_pasted_images(&mut self) {
         self.attachments = true;
+    }
+
+    /// A double click selects the whole text. Meant for short codes such as
+    /// `#RRGGBB`; other inputs keep the plain click behavior.
+    pub fn select_all_on_double_click(&mut self) {
+        self.double_click_selects_all = true;
     }
 
     pub fn set_placeholder(&mut self, placeholder: &str, cx: &mut Context<Self>) {
@@ -418,13 +430,19 @@ impl TextInput {
         self.replace_text_in_range(None, "", window, cx)
     }
 
-    fn on_mouse_down(
+    pub(crate) fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle);
+        if self.double_click_selects_all && event.click_count >= 2 && !event.modifiers.shift {
+            // Not a drag start, so moving the mouse keeps the selection.
+            self.is_selecting = false;
+            self.select_everything(cx);
+            return;
+        }
         self.is_selecting = true;
 
         if event.modifiers.shift {
@@ -1136,6 +1154,7 @@ impl TextInput {
             secret: false,
             attachments: false,
             draft: false,
+            double_click_selects_all: false,
             native_settings_style: false,
         }
     }

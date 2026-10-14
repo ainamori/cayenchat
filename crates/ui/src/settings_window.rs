@@ -98,7 +98,7 @@ impl SettingsForm {
         let field = |placeholder: &str, value: &str, secret: bool, cx: &mut App| {
             cx.new(|cx| TextInput::new_settings_field(placeholder, value, secret, cx))
         };
-        Self {
+        let form = Self {
             custom_host: field(
                 &i18n.text("server_host_placeholder"),
                 &profile.host,
@@ -330,7 +330,41 @@ impl SettingsForm {
             language_list_open: false,
             ircv3_server_list_open: false,
             values,
+        };
+        for input in form.color_inputs() {
+            input.update(cx, |input, _| input.select_all_on_double_click());
         }
+        form
+    }
+
+    /// The `#RRGGBB` code fields shown in the colors tab.
+    fn color_inputs(&self) -> [&Entity<TextInput>; 24] {
+        [
+            &self.member_list_background,
+            &self.dark_member_list_background,
+            &self.main_log_background,
+            &self.dark_main_log_background,
+            &self.main_log_alternate,
+            &self.dark_main_log_alternate,
+            &self.channel_event_color,
+            &self.dark_channel_event_color,
+            &self.notice_color,
+            &self.dark_notice_color,
+            &self.highlight_color,
+            &self.dark_highlight_color,
+            &self.sub_log_background,
+            &self.dark_sub_log_background,
+            &self.sub_log_alternate,
+            &self.dark_sub_log_alternate,
+            &self.link_color,
+            &self.dark_link_color,
+            &self.link_background,
+            &self.dark_link_background,
+            &self.url_tooltip_color,
+            &self.dark_url_tooltip_color,
+            &self.url_tooltip_link_color,
+            &self.dark_url_tooltip_link_color,
+        ]
     }
 
     /// Writes the shown server's host, port and display name back to the
@@ -3526,6 +3560,48 @@ mod server_settings_tests {
     fn form(settings: Settings, store: &CredentialStore, cx: &mut TestAppContext) -> SettingsForm {
         let i18n = Localizer::new(Language::English);
         cx.update(|cx| SettingsForm::new(settings, &i18n, store, cx))
+    }
+
+    fn click(field: &Entity<TextInput>, click_count: usize, cx: &mut gpui::VisualTestContext) {
+        let event = gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position: gpui::point(gpui::px(0.), gpui::px(0.)),
+            modifiers: gpui::Modifiers::default(),
+            click_count,
+            first_mouse: false,
+        };
+        field.update_in(cx, |field, window, cx| {
+            field.on_mouse_down(&event, window, cx)
+        });
+    }
+
+    #[gpui::test]
+    fn double_click_selects_a_whole_color_code_only(cx: &mut TestAppContext) {
+        let store = memory_store();
+        let form = form(configured_a(), &store, cx);
+        let (color, other) = (form.dark_link_color.clone(), form.nickname.clone());
+        let (_, cx) = cx.add_window_view(|_, _| gpui::Empty);
+        for field in [&color, &other] {
+            field.update(cx, |field, cx| field.set_text("#AABBCC", cx));
+        }
+        click(&color, 1, cx);
+        assert!(color.read_with(cx, |f, _| f.selection().is_empty()));
+        click(&color, 2, cx);
+        assert_eq!(color.read_with(cx, |f, _| f.selection()), 0..7);
+        click(&other, 2, cx);
+        assert!(other.read_with(cx, |f, _| f.selection().is_empty()));
+    }
+
+    #[gpui::test]
+    fn every_color_field_selects_on_double_click(cx: &mut TestAppContext) {
+        let store = memory_store();
+        let form = form(configured_a(), &store, cx);
+        let (_, cx) = cx.add_window_view(|_, _| gpui::Empty);
+        for field in form.color_inputs() {
+            field.update(cx, |field, cx| field.set_text("#12", cx));
+            click(field, 2, cx);
+            assert_eq!(field.read_with(cx, |f, _| f.selection()), 0..3);
+        }
     }
 
     fn switch(
