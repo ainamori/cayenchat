@@ -1224,11 +1224,28 @@ impl ChatWindow {
     /// written, since the process ends right after the window closes. The
     /// wait is bounded and only happens on the way out.
     fn quit_connections(&mut self) {
-        let closing: Vec<_> = self
-            .sessions
-            .values_mut()
-            .filter_map(ServerSession::close)
-            .collect();
+        let networks: Vec<_> = self.sessions.keys().copied().collect();
+        let mut closing = Vec::new();
+        for network in networks {
+            // Logged before the channels are left, with the QUIT text sent.
+            let reason = self.sessions.get(&network).and_then(|session| {
+                session
+                    .active_config
+                    .as_ref()
+                    .map(ConnectionConfig::wire_quit_message)
+            });
+            let registered = self.state.is_registered(network);
+            if let Some(connection) = self
+                .sessions
+                .get_mut(&network)
+                .and_then(ServerSession::close)
+            {
+                if registered && let Some(reason) = reason {
+                    self.log_own_quit(network, &reason);
+                }
+                closing.push(connection);
+            }
+        }
         // The UI no longer drains events and the queues may be full, so ask
         // the workers directly.
         for connection in &closing {
@@ -2140,6 +2157,9 @@ impl ChatWindow {
         // Only a lost registered connection marks the conversations; failed
         // retries would repeat the line in every log.
         let was_registered = self.state.is_registered(network);
+        if was_registered {
+            self.log_own_quit(network, &reason);
+        }
         self.state
             .set_status(network, ConnectionStatus::Disconnected(reason.clone()));
         let message = self

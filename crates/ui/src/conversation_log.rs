@@ -233,6 +233,34 @@ impl ChatWindow {
         self.write_log(record);
     }
 
+    /// Our own quit from every channel we are in, with `reason` (the QUIT
+    /// text we sent, or why the connection ended). Call it before the
+    /// connection state is reset, while the channels still count as joined.
+    pub(crate) fn log_own_quit(&self, network: NetworkId, reason: &str) {
+        if !self.conversation_logs.wants(Scope::Channel) {
+            return;
+        }
+        let Some(own) = self.own_nickname(network) else {
+            return;
+        };
+        for conversation in self.state.conversations() {
+            if conversation.network == network
+                && !conversation.is_private()
+                && self.state.is_active_channel(conversation.id)
+            {
+                self.log_event(
+                    network,
+                    Scope::Channel,
+                    &conversation.name,
+                    Kind::Quit,
+                    own,
+                    reason,
+                    None,
+                );
+            }
+        }
+    }
+
     /// Someone joined, left, was kicked… in a channel we have, or had a
     /// operator or voice (`+o`, `-v`) changed. Other modes, replayed ones and
     /// refused joins are not logged.
