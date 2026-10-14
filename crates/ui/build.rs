@@ -1,6 +1,48 @@
 // SPDX-License-Identifier: GPL-3.0-only
-#[cfg(windows)]
+use std::process::Command;
+
 fn main() {
+    emit_commit();
+    #[cfg(windows)]
+    windows_resources();
+}
+
+/// Hands the commit being built to the About window as `CAYENCHAT_COMMIT`.
+/// `CAYENCHAT_COMMIT` in the environment wins (builds from a source archive
+/// have no repository); with neither, nothing is set and the About window
+/// shows no commit.
+fn emit_commit() {
+    println!("cargo:rerun-if-env-changed=CAYENCHAT_COMMIT");
+    let git = |args: &[&str]| {
+        let output = Command::new("git").args(args).output().ok()?;
+        let text = String::from_utf8(output.stdout).ok()?;
+        let text = text.trim();
+        (output.status.success() && !text.is_empty()).then(|| text.to_owned())
+    };
+    // The checked-out ref moves without HEAD changing, so watch it as well.
+    if let Some(head) = git(&["rev-parse", "--git-path", "HEAD"]) {
+        println!("cargo:rerun-if-changed={head}");
+    }
+    if let Some(reference) = git(&["symbolic-ref", "-q", "HEAD"])
+        && let Some(path) = git(&["rev-parse", "--git-path", &reference])
+    {
+        println!("cargo:rerun-if-changed={path}");
+    }
+    if let Some(packed) = git(&["rev-parse", "--git-path", "packed-refs"]) {
+        println!("cargo:rerun-if-changed={packed}");
+    }
+    let commit = std::env::var("CAYENCHAT_COMMIT")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .or_else(|| git(&["rev-parse", "--short=12", "HEAD"]));
+    if let Some(commit) = commit.filter(|c| c.chars().all(|c| c.is_ascii_alphanumeric())) {
+        println!("cargo:rustc-env=CAYENCHAT_COMMIT={commit}");
+    }
+}
+
+#[cfg(windows)]
+fn windows_resources() {
     use std::{env, fs, path::PathBuf};
 
     println!("cargo:rerun-if-changed=resources/windows/cayenchat.rc");
@@ -55,6 +97,3 @@ FILETYPE 0x1
         .manifest_required()
         .expect("could not embed CayenChat icon and version");
 }
-
-#[cfg(not(windows))]
-fn main() {}

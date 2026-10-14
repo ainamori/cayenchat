@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
-
+mod about;
 mod account_settings;
 mod application_settings;
 mod autostart;
@@ -191,6 +191,7 @@ actions!(
         HistoryPrevious,
         HistoryNext,
         OpenSettings,
+        About,
         Connect,
         Disconnect,
         Reconnect,
@@ -897,6 +898,7 @@ impl ChatWindow {
             let i18n = self.i18n.clone();
             let _ = handle.update(cx, |view, _, cx| view.set_localizer(i18n, cx));
         }
+        about::set_localizer(&self.i18n, cx);
         cx.notify();
         window.refresh();
     }
@@ -6137,6 +6139,9 @@ impl ChatWindow {
             .on_action(cx.listener(Self::toggle_toolbar))
             .on_action(cx.listener(Self::copy_diagnostics))
             .on_action(cx.listener(|this, _: &Quit, window, cx| this.request_quit(window, cx)))
+            // The menu bar greys out an action no window handles, so the chat
+            // window handles About itself; `open_about` covers other windows.
+            .on_action(cx.listener(|this, _: &About, _, cx| about::open(&this.i18n, cx)))
             .on_action(cx.listener(Self::paste_image))
             .child(left)
             .child(right_split)
@@ -7223,8 +7228,22 @@ fn request_quit_in_chat_window(cx: &mut App, retry: bool) {
     }
 }
 
+/// Opens the About window in the chat window's language, or raises it.
+fn open_about(cx: &mut App) {
+    let Some(chat) = cx
+        .windows()
+        .into_iter()
+        .find_map(|w| w.downcast::<ChatWindow>())
+    else {
+        return;
+    };
+    if let Ok(i18n) = chat.read_with(cx, |chat, _| chat.i18n.clone()) {
+        about::open(&i18n, cx);
+    }
+}
+
 /// Access keys for the menus of `app_menus` on Windows and Linux (File,
-/// Connection, Edit, View), taken from the locale.
+/// Connection, Edit, View, Help), taken from the locale.
 fn menu_access_keys(i18n: &Localizer) -> menu_bar::AccessKeys {
     let key = |id: &str| i18n.text(id).chars().next().map(|c| c.to_ascii_lowercase());
     menu_bar::AccessKeys {
@@ -7233,6 +7252,7 @@ fn menu_access_keys(i18n: &Localizer) -> menu_bar::AccessKeys {
             "menu_connection_key",
             "menu_edit_key",
             "menu_view_key",
+            "menu_help_key",
         ]
         .into_iter()
         .map(key)
@@ -7244,10 +7264,19 @@ fn menu_access_keys(i18n: &Localizer) -> menu_bar::AccessKeys {
 fn app_menus(debug_enabled: bool, toolbar_shown: bool, i18n: &Localizer) -> Vec<Menu> {
     // macOS keeps Settings and Quit in the application menu; Windows and Linux
     // put them in File, with no application-named menu.
-    let mut app_items = vec![
+    // macOS also puts About first in the application menu; elsewhere it is
+    // in the Help menu below.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut app_items = Vec::new();
+    #[cfg(target_os = "macos")]
+    app_items.extend([
+        MenuItem::action(i18n.text("menu_about"), About),
+        MenuItem::separator(),
+    ]);
+    app_items.extend([
         MenuItem::action(i18n.text("menu_settings"), OpenSettings),
         MenuItem::separator(),
-    ];
+    ]);
     #[cfg(target_os = "macos")]
     app_items.extend([
         MenuItem::os_submenu(i18n.text("menu_services"), SystemMenuType::Services),
@@ -7313,6 +7342,12 @@ fn app_menus(debug_enabled: bool, toolbar_shown: bool, i18n: &Localizer) -> Vec<
             menu_type: None,
         },
     ];
+    #[cfg(not(target_os = "macos"))]
+    menus.push(Menu {
+        name: i18n.text("menu_help").into(),
+        items: vec![MenuItem::action(i18n.text("menu_about"), About)],
+        menu_type: None,
+    });
     // Only macOS has a Window menu; AppKit adds the window list, full screen
     // and the like to it, so it holds just Minimize and Zoom.
     #[cfg(target_os = "macos")]
@@ -7544,6 +7579,9 @@ fn main() {
             // Reached when no chat window handles it, e.g. from the settings
             // window or the menu bar on macOS.
             cx.on_action(|_: &Quit, cx| request_quit_anywhere(cx));
+            // About belongs to no window: the menu bar of any window, or the
+            // macOS application menu, reaches it here.
+            cx.on_action(|_: &About, cx| open_about(cx));
             // macOS Dock "Quit" is the user's request too; the system's own
             // shutdown and `cx.quit()` never reach this handler.
             cx.on_quit_request(|cx| {
