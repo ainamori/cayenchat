@@ -23,6 +23,12 @@ class Settings(unittest.TestCase):
             self.assertEqual(server["channels"].split(","),
                              [channel["name"] for channel in script["channels"]])
 
+    def test_the_shown_channel_has_a_me_line(self):
+        for language, script in demo.SCRIPTS.items():
+            lines = script["channels"][0]["lines"]
+            self.assertTrue(any(text.startswith("\x01ACTION ") and text.endswith("\x01")
+                                for _, text in lines), language)
+
 
 if __name__ == "__main__":
     unittest.main()

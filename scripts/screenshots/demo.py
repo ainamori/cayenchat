@@ -44,10 +44,14 @@ PHOTO = "lake.png"
 
 # ---------------------------------------------------------------- the script
 # Per language: our nickname, the network's name, channels (first one is
-# shown) and private messages. Lines are (nickname, text). Received CTCP
-# ACTION is not rendered yet (spec/feature-parity.md), so the script has no
-# `/me`. Nicknames prefixed with @ or + are operators or voiced
-# in the member list. Users in NO_AVATAR show the app's own default avatar.
+# shown) and private messages. Lines are (nickname, text); `action(text)`
+# makes a `/me` line (CTCP ACTION). Nicknames prefixed with @ or + are
+# operators or voiced in the member list. Users in NO_AVATAR show the app's own
+# default avatar.
+def action(text):
+    return "\x01ACTION " + text + "\x01"
+
+
 SCRIPTS = {
     "english": {
         "nick": "sam",
@@ -69,6 +73,7 @@ SCRIPTS = {
                               "https://github.com/koshian/cayenchat/releases/tag/v1.0.0"),
                     ("grace", "Long links are shortened in the log, but copying keeps the full URL."),
                     ("alice", "Nice. I switched to the dark theme last night and kept it."),
+                    ("bob", action("raises a glass to the new release")),
                 ],
             },
             {
@@ -111,6 +116,7 @@ SCRIPTS = {
                              "https://github.com/koshian/cayenchat/releases/tag/v1.0.0"),
                     ("sora", "長い URL はログでは短く表示されて、コピーすると元の URL になります"),
                     ("akira", "昨夜ダークテーマに切り替えて、そのまま使ってます"),
+                    ("yui", action("新しいリリースに乾杯")),
                 ],
             },
             {

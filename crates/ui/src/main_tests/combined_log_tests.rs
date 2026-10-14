@@ -59,6 +59,7 @@ fn merged_tails_match_collecting_and_sorting() {
             activity: sequence % 5 == 0,
             alert: false,
             notice: false,
+            action: false,
             provenance: if sequence % 11 == 0 {
                 cayenchat_model::Provenance::Requested
             } else {

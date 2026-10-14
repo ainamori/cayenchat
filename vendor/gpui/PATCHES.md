@@ -149,6 +149,15 @@ sends a private message to the platform window, which runs the quit callback
 shutdown and restart killed the process without running any quit handler.
 CayenChat uses this to send IRC QUIT (issue #284).
 
+In `src/platform/app_menu.rs` and `src/platform/mac/platform.rs`, `Menu` and
+`OwnedMenu` gain a `menu_type: Option<SystemMenuType>` field and
+`SystemMenuType` gains `Window`. macOS hands a top-level menu marked
+`SystemMenuType::Window` to AppKit as the Window menu (`setWindowsMenu:`), so
+AppKit adds the window list and other window items. Upstream did this only for
+a menu whose name was exactly `"Window"`, so translating the title (CayenChat's
+Japanese "ウインドウ") lost the system items. A nested `os_submenu` of type
+`Window` is registered the same way. Other platforms ignore the field.
+
 In `src/platform/windows/window.rs`, `activate` does not send the simulated
 Alt press when a window of this process is already the foreground window
 (`GetForegroundWindow` + `GetWindowThreadProcessId`): `SetForegroundWindow`

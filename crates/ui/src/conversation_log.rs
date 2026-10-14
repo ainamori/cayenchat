@@ -12,10 +12,8 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use cayenchat_irc_core::{
-    ChannelActivityKind,
-    text::{action_text, strip_formatting},
-};
+use cayenchat_app::Kind as MessageKind;
+use cayenchat_irc_core::{ChannelActivityKind, text::strip_formatting};
 use cayenchat_model::NetworkId;
 use cayenchat_storage::{
     ConversationLog,
@@ -270,8 +268,9 @@ impl ChatWindow {
         self.log_event(network, Scope::Channel, channel, kind, nick, &body, time);
     }
 
-    /// The record for a message, an ACTION or a NOTICE. CTCP other than
-    /// ACTION is not a message.
+    /// The record for a message, an ACTION or a NOTICE; `text` is what the
+    /// conversation shows (an ACTION's own text). CTCP other than ACTION is
+    /// not a message.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn message_record(
         &self,
@@ -280,16 +279,16 @@ impl ChatWindow {
         conversation: &str,
         sender: &str,
         text: &str,
-        notice: bool,
+        kind: MessageKind,
         time: Option<SystemTime>,
     ) -> Option<Record> {
-        let (kind, body) = match action_text(text) {
-            Some(action) => (Kind::Action, action),
-            None if text.starts_with('\u{1}') => return None,
-            None if notice => (Kind::Notice, text),
-            None => (Kind::Msg, text),
+        let kind = match kind {
+            MessageKind::Action => Kind::Action,
+            _ if text.starts_with('\u{1}') => return None,
+            MessageKind::Notice => Kind::Notice,
+            MessageKind::Message => Kind::Msg,
         };
-        self.log_record(network, scope, conversation, kind, sender, body, time)
+        self.log_record(network, scope, conversation, kind, sender, text, time)
     }
 
     /// The record for a message we sent. `text` is what the conversation
@@ -323,10 +322,10 @@ impl ChatWindow {
         conversation: &str,
         sender: &str,
         text: &str,
-        notice: bool,
+        kind: MessageKind,
         time: Option<SystemTime>,
     ) {
-        let record = self.message_record(network, scope, conversation, sender, text, notice, time);
+        let record = self.message_record(network, scope, conversation, sender, text, kind, time);
         self.write_log(record);
     }
 
