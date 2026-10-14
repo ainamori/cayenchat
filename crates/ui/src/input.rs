@@ -90,6 +90,7 @@ pub struct TextInput {
     /// A message draft, the only input that shortens pasted Amazon links.
     draft: bool,
     double_click_selects_all: bool,
+    prefers_direct_input: bool,
     native_settings_style: bool,
 }
 
@@ -173,6 +174,13 @@ impl TextInput {
     /// `#RRGGBB`; other inputs keep the plain click behavior.
     pub fn select_all_on_double_click(&mut self) {
         self.double_click_selects_all = true;
+    }
+
+    /// Detaches the platform IME while this input has focus, for fields that
+    /// mostly take ASCII (nicknames, hosts, color codes). It only helps typing:
+    /// pasted or existing text is never restricted. Off by default.
+    pub fn prefer_direct_input(&mut self) {
+        self.prefers_direct_input = true;
     }
 
     pub fn set_placeholder(&mut self, placeholder: &str, cx: &mut Context<Self>) {
@@ -666,6 +674,10 @@ fn nickname_matches(prefix: &str, members: &[String]) -> Vec<String> {
 }
 
 impl EntityInputHandler for TextInput {
+    fn prefers_direct_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
+        self.prefers_direct_input
+    }
+
     fn text_for_range(
         &mut self,
         range_utf16: Range<usize>,
@@ -1155,6 +1167,7 @@ impl TextInput {
             attachments: false,
             draft: false,
             double_click_selects_all: false,
+            prefers_direct_input: false,
             native_settings_style: false,
         }
     }
