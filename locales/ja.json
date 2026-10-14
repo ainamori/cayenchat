@@ -207,6 +207,7 @@
   "char_ref_origin": "HTML 数値文字参照から変換",
   "reiwa_mode": "チャンネルログを令和モードで表示",
   "restore_window_layout": "起動時にウィンドウの位置とサイズを復元する",
+  "always_on_top": "CayenChat のウィンドウを常に最前面に表示する",
   "confirm_quit": "終了時に確認する",
   "quit_title": "CayenChat を終了しますか？",
   "quit_detail_connected": "接続中の IRC サーバーから切断して、アプリケーションを終了します。",
