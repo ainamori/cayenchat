@@ -88,6 +88,27 @@ impl SettingsWindow {
                     .child(self.i18n.text("language_hint")),
             )
             .child(autostart_toggle)
+            .when(cfg!(target_os = "windows"), |d| {
+                d.child(
+                    div()
+                        .id("always-on-top")
+                        .ml(px(158.))
+                        .flex()
+                        .gap_2()
+                        .cursor_pointer()
+                        .child(settings_theme::checkbox(
+                            self.settings.values.always_on_top,
+                            true,
+                            cx,
+                        ))
+                        .child(self.i18n.text("always_on_top"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings.values.always_on_top =
+                                !this.settings.values.always_on_top;
+                            cx.notify();
+                        })),
+                )
+            })
             .child(
                 div()
                     .id("restore-window-layout")

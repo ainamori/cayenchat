@@ -1153,10 +1153,14 @@ impl SettingsWindow {
             let settings = self.commit_settings(&previous, settings, true, cx)?;
             self.saved = settings.clone();
             self.settings.values = settings.clone();
-            Ok::<_, String>((config, settings))
+            Ok::<_, String>((config, settings, previous))
         })();
         self.feedback = match result {
-            Ok((config, settings)) => {
+            Ok((config, settings, previous)) => {
+                // Connecting may have taken over a pending autosave, so what
+                // it saved, such as always-on-top, is applied here whether or
+                // not the connection succeeds.
+                self.apply_to_chat_window(&previous, settings.clone(), false, cx);
                 let (appearance, mode, language) = (
                     settings.appearance.clone(),
                     settings.theme,
@@ -1299,6 +1303,8 @@ impl SettingsWindow {
             previous.appearance != saved.appearance || previous.theme != saved.theme;
         let language_changed = previous.language != saved.language;
         let layout_changed = previous.restore_window_layout != saved.restore_window_layout;
+        #[cfg(target_os = "windows")]
+        let topmost_changed = previous.always_on_top != saved.always_on_top;
         let restore_layout = saved.restore_window_layout;
         let confirm_quit = saved.confirm_quit;
         let shortcuts = ShortcutPrefs::from(&saved);
@@ -1314,6 +1320,10 @@ impl SettingsWindow {
             owner.apply_conversation_log(&saved.conversation_log);
             cx.set_global(crate::input::ShortenPastedAmazon(shorten_amazon_urls));
             owner.notification_rules = rules;
+            #[cfg(target_os = "windows")]
+            if topmost_changed {
+                owner.apply_always_on_top(saved.always_on_top, window, cx);
+            }
             if shortcuts_changed {
                 apply_shortcuts(shortcuts, cx);
             }

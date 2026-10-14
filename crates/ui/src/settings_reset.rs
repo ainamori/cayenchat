@@ -23,6 +23,8 @@ impl SettingsWindow {
             SettingsTab::Application => {
                 current.language == defaults.language
                     && current.restore_window_layout == defaults.restore_window_layout
+                    && (!cfg!(target_os = "windows")
+                        || current.always_on_top == defaults.always_on_top)
                     && current.confirm_quit == defaults.confirm_quit
                     && current.shorten_amazon_urls == defaults.shorten_amazon_urls
                     && current.conversation_log == defaults.conversation_log
@@ -82,6 +84,9 @@ impl SettingsWindow {
                 self.settings.language_list_open = false;
                 let values = &mut self.settings.values;
                 values.restore_window_layout = defaults.restore_window_layout;
+                if cfg!(target_os = "windows") {
+                    values.always_on_top = defaults.always_on_top;
+                }
                 values.confirm_quit = defaults.confirm_quit;
                 values.shorten_amazon_urls = defaults.shorten_amazon_urls;
                 values.conversation_log = defaults.conversation_log;
@@ -364,6 +369,9 @@ mod tests {
             (SettingsTab::Application, |values| {
                 values.language = Language::English;
                 values.restore_window_layout = !values.restore_window_layout;
+                if cfg!(target_os = "windows") {
+                    values.always_on_top = !values.always_on_top;
+                }
                 values.confirm_quit = !values.confirm_quit;
                 values.shorten_amazon_urls = !values.shorten_amazon_urls;
                 values.conversation_log.channels = !values.conversation_log.channels;
