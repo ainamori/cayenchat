@@ -44,7 +44,7 @@ Server history is limited to channel history on opt-in IRCv3 servers (recent lin
 
 - PARTIAL — receive/send channel and private PRIVMSG; no delivery receipt
 - PARTIAL — receive/send channel and private NOTICE
-- PARTIAL — `/me` sends CTCP ACTION; received ACTION is not specially rendered
+- DONE — `/me` sends CTCP ACTION; a received or echoed ACTION (live, requested history, bouncer replay) and our own `/me` are one `action` line (`model::Message::action`, decided once on arrival, text = the action's own text) drawn `* alice waves` in the main and combined logs, Reiwa mode (second line), notifications and copies of a whole line; a PRIVMSG with `\x01ACTION text` without the closing `\x01` is an action, while `\x01ACTION`, `\x01ACTIONtext` and a NOTICE's ACTION are shown as before
 - DONE — CTCP PING, VERSION, TIME and CLIENTINFO answered by NOTICE to private requests only, rate-limited (five per ten seconds, two per user); USERINFO, DCC and channel requests are not answered; requests and replies appear as readable server lines (`CTCP VERSION request from bob`), never as chat rows (D029)
 - TODO — sending CTCP requests (`/ctcp`, `/ping` with lag display)
 - PARTIAL — CTCP AVATAR (KVIrc protocol, experimental, per-server opt-in): realname mark when sharing, answers to private queries with an explicitly shared URL, bounded WHO/realname discovery and queries to marked users; URL only (no DCC); checked against wire fixtures from KVIrc's source, not a running KVIrc
