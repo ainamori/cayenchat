@@ -1296,18 +1296,22 @@ The maintainer approved this specification on the issue (2026-10-13).
   | `nick` | old nick | new nick |
   | `kick` | who kicked | `<target> <reason>` (just the target without a reason) |
   | `topic` | who changed it | the new topic or empty |
-  | `mode` | who changed it (`server` when the server did) | `+o <nick>` or `-o <nick>`; likewise `v`, `h`, `a`, `q` |
+  | `mode` | who changed it (`server` when the server did) | `+o <nick>` or `-o <nick>`; likewise `v` |
 
   Joins, parts, kicks, quits and nick changes are logged per channel the
   client has; a quit or nick change of a peer is logged in their private
-  conversation. Of live channel `MODE` changes (#357) only privilege changes
-  (`o`, `v`, `h`, `a`, `q`) are logged, one `mode` line per changed nick; a
-  `MODE` with several of them gives several lines. Every other mode and its
-  argument (keys, bans, exceptions, invites, limits, flags, unknown modes) is
-  left out, so no key or host mask reaches a file, and a privilege change
-  whose target is missing or hidden is left out too. Channel mode queries
-  and replies (`324`) are not events and are not logged, nor is replayed
-  history. Refused joins are not logged.
+  conversation. Of live channel `MODE` changes (#357) only `o` and `v`
+  changes are logged, one `mode` line per changed nick; a `MODE` with several
+  of them gives several lines. Every other mode and its argument (keys, bans,
+  exceptions, invites, limits, flags) is left out, so no key or host mask
+  reaches a file. The arguments are paired with the modes again in irc-core
+  (the parser's table is wrong for `-l`); a `MODE` with a letter whose
+  argument count is not universal (unknown modes, and `h`, `a`, `q`, whose
+  meaning depends on the server's `PREFIX`), a missing or a surplus argument
+  is not logged at all, which is an accepted limitation. Server-originated
+  live `MODE` lines are logged with actor `server`; `MODE` inside a history
+  batch, channel mode queries and replies (`324`) are not logged. Refused
+  joins are not logged.
 - **Writing.** `ChatLogger` (storage) has one thread. `log` is `try_send`
   into a 4096-record queue; a full queue drops the record and counts it
   (`Status::dropped`). The thread keeps up to 32 files open, flushes and

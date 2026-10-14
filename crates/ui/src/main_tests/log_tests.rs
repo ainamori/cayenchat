@@ -39,6 +39,8 @@ fn channel_activity_uses_english_phrases_with_optional_details() {
             "tepeu",
             ChannelActivityKind::ModeChanged {
                 modes: "+o kaeru".into(),
+                privileges: Vec::new(),
+                replayed: false,
             },
         ),
         "tepeu has changed mode: +o kaeru"

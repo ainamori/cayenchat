@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use super::{ChatWindow, Worker};
-use cayenchat_irc_core::{ChannelActivityKind, Event};
+use cayenchat_irc_core::{ChannelActivityKind, Event, PrivilegeChange};
 use cayenchat_model::NetworkId;
 use gpui::TestAppContext;
 
@@ -78,6 +78,43 @@ fn enabled_logs_save_live_lines_only(cx: &mut TestAppContext) {
                     actor: "dave".into(),
                     kind: ChannelActivityKind::ModeChanged {
                         modes: "+o frank +b *!*@example.invalid -v gina +l 5".into(),
+                        privileges: vec![
+                            PrivilegeChange {
+                                granted: true,
+                                mode: 'o',
+                                target: "frank".into(),
+                            },
+                            PrivilegeChange {
+                                granted: false,
+                                mode: 'v',
+                                target: "gina".into(),
+                            },
+                        ],
+                        replayed: false,
+                    },
+                    server_time: None,
+                },
+                Event::ChannelActivity {
+                    channel: "#rust".into(),
+                    actor: "dave".into(),
+                    kind: ChannelActivityKind::ModeChanged {
+                        modes: "+o hank".into(),
+                        privileges: vec![PrivilegeChange {
+                            granted: true,
+                            mode: 'o',
+                            target: "hank".into(),
+                        }],
+                        replayed: true,
+                    },
+                    server_time: None,
+                },
+                Event::ChannelActivity {
+                    channel: "#rust".into(),
+                    actor: "dave".into(),
+                    kind: ChannelActivityKind::ModeChanged {
+                        modes: "+k [redacted]".into(),
+                        privileges: Vec::new(),
+                        replayed: false,
                     },
                     server_time: None,
                 },
