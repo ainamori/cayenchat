@@ -556,9 +556,12 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);
 
     /// Attach (`true`) or detach (`false`) the platform's IME for this window.
-    /// Only called when the wanted state changes. Platforms that cannot do this
+    /// Only called when the wanted state changes. Returns whether it was
+    /// applied; `false` makes the next frame ask again. Platforms that cannot do this
     /// per window keep the default no-op.
-    fn update_ime_enabled(&self, _enabled: bool) {}
+    fn update_ime_enabled(&self, _enabled: bool) -> bool {
+        true
+    }
 
     #[cfg(any(test, feature = "test-support"))]
     fn as_test(&mut self) -> Option<&mut TestWindow> {

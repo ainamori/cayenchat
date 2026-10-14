@@ -659,6 +659,10 @@ impl WaylandWindowStatePtr {
         }
     }
 
+    pub fn surface_id(&self) -> wayland_backend::client::ObjectId {
+        self.state.borrow().surface.id()
+    }
+
     pub fn ime_wanted(&self) -> bool {
         self.state.borrow().ime_wanted
     }
@@ -1104,17 +1108,17 @@ impl PlatformWindow for WaylandWindow {
         state.client.update_ime_position(bounds);
     }
 
-    fn update_ime_enabled(&self, enabled: bool) {
-        let client = {
+    fn update_ime_enabled(&self, enabled: bool) -> bool {
+        let (client, surface) = {
             let mut state = self.borrow_mut();
             state.ime_wanted = enabled;
-            state.client.clone()
+            (state.client.clone(), state.surface.id())
         };
-        if enabled {
-            client.enable_ime();
-        } else {
-            client.disable_ime();
-        }
+        // The text-input is shared by the seat: only the window that has the
+        // keyboard focus may switch it. Any other window just records its
+        // wish, which `enable_ime` honors when that window gets the focus.
+        client.set_ime_for_window(&surface, enabled);
+        true
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {

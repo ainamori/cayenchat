@@ -692,6 +692,9 @@ impl WindowsWindowInner {
     }
 
     fn handle_ime_composition(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
+        if self.state.borrow().discarding_ime_commit {
+            return Some(0);
+        }
         let ctx = unsafe { ImmGetContext(handle) };
         let result = self.handle_ime_composition_inner(ctx, lparam);
         unsafe { ImmReleaseContext(handle, ctx).ok().log_err() };
@@ -1255,12 +1258,19 @@ impl WindowsWindowInner {
                     .ok()
                     .log_err();
             } else {
-                // Commit any composition before the context goes away.
+                // End any composition before the context goes away. The
+                // handler registered by now is the field that just took focus,
+                // so the committed string must not be delivered to it (it
+                // could come from a password field and would replace the new
+                // field's selection). The old field keeps the text it already
+                // shows as marked text and drops the mark when it loses focus.
                 let ctx = ImmGetContext(handle);
                 if !ctx.is_invalid() {
+                    self.state.borrow_mut().discarding_ime_commit = true;
                     ImmNotifyIME(ctx, NI_COMPOSITIONSTR, CPS_COMPLETE, 0)
                         .ok()
                         .log_err();
+                    self.state.borrow_mut().discarding_ime_commit = false;
                     ImmReleaseContext(handle, ctx).ok().log_err();
                 }
                 ImmAssociateContextEx(handle, HIMC::default(), 0)

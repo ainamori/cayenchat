@@ -1958,9 +1958,8 @@ impl Window {
             self.platform_window.set_input_handler(input_handler);
         }
         // Only call into the OS when the wanted state changes.
-        if wants_ime != self.ime_enabled {
+        if wants_ime != self.ime_enabled && self.platform_window.update_ime_enabled(wants_ime) {
             self.ime_enabled = wants_ime;
-            self.platform_window.update_ime_enabled(wants_ime);
         }
 
         self.layout_engine.as_mut().unwrap().clear();

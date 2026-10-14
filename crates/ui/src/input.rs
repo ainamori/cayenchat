@@ -1065,6 +1065,11 @@ impl Element for TextElement {
 
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The platform ends a composition when focus moves to another field
+        // and does not deliver the commit here; keep the text, drop the mark.
+        if self.marked_range.is_some() && !self.focus_handle.is_focused(window) {
+            self.marked_range = None;
+        }
         let theme = self.palette(cx);
         let native = self
             .native_settings_style
@@ -1317,6 +1322,29 @@ fn caret_color(dark: bool, native: Option<gpui::Hsla>, text: gpui::Hsla) -> gpui
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn composition_mark_is_dropped_when_the_field_is_not_focused(cx: &mut gpui::TestAppContext) {
+        use gpui::EntityInputHandler as _;
+        cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::new(
+                cayenchat_storage::ThemeMode::Light,
+                gpui::WindowAppearance::Light,
+                &cayenchat_storage::Appearance::default(),
+            ));
+        });
+        let (input, cx) = cx.add_window_view(|_, cx| TextInput::new(cx));
+        input.update_in(cx, |input, window, cx| {
+            input.replace_and_mark_text_in_range(None, "かな", None, window, cx);
+            assert!(input.is_composing());
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        input.read_with(cx, |input, _| {
+            assert!(!input.is_composing());
+            assert_eq!(input.content.as_ref(), "かな");
+        });
+    }
 
     #[test]
     fn caret_uses_text_color_in_dark_inputs_only() {

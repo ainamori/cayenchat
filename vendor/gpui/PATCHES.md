@@ -34,9 +34,13 @@ the per-window IME switch is ported from upstream Zed (`update_ime_enabled` in
 the CayenChat-only `InputHandler::prefers_direct_input` (default false) and
 `PlatformWindow::update_ime_enabled`. `Window::draw` calls the latter only when
 `accepts_text_input && !prefers_direct_input` changes. Windows detaches the IME
-with `ImmAssociateContextEx` after the frame; Wayland skips `enable` on
-text-input enter while off; macOS limits `allowedInputSourceLocales` to Roman
-input sources. X11 keeps the default no-op.
+with `ImmAssociateContextEx` after the frame and discards the composition commit
+that ends it (it would reach the newly focused field); Wayland skips `enable` on
+text-input enter while off and switches the shared text-input only for the
+keyboard-focused window; macOS limits the window's own view's
+`allowedInputSourceLocales` to Roman input sources. `update_ime_enabled` returns
+whether it was applied; `Window` retries on the next frame otherwise. X11 keeps
+the default no-op.
 
 In `src/platform/linux/wayland/window.rs`:
 

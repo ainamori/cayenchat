@@ -1208,11 +1208,17 @@ OS-wide settings stay untouched.
 - Windows: `ImmAssociateContextEx(hwnd, NULL, 0)` after completing a
   composition; `IACE_DEFAULT` to attach again. It runs after the frame, because
   completing the composition needs the window. Wayland: text-input
-  disable/enable (`enable` on focus is skipped while the window wants it off).
-  macOS: `allowedInputSourceLocales` limited to Roman input sources, as for a
-  password field. X11/XIM: no per-field switch; typing works as before.
-- A composition still open when focus moves to such a field is completed into
-  that field (Windows); it is not lost.
+  disable/enable, applied only while that window has the keyboard focus (the
+  text-input is shared by the seat; another window only records its wish, and
+  `enable` on focus enter honors it). macOS: `allowedInputSourceLocales` of the
+  window's own view limited to Roman input sources, as for a password field;
+  applied at once, and a missing input context is not cached as done, so the
+  next frame asks again. X11/XIM: no per-field switch; typing works as before.
+- A composition still open when focus moves to such a field (Windows) is ended
+  without delivering the commit: the handler registered by then belongs to the
+  new field, and a password composition must never land there. The old field
+  already shows the preedit text as marked text; `TextInput` drops the mark
+  when it renders unfocused, so the text stays in the field it was typed in.
 
 ## D048 — Confirm/Cancel button order per OS (#378)
 

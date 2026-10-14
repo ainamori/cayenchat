@@ -322,6 +322,24 @@ impl WaylandClientStatePtr {
         state.text_input = Some(text_input);
     }
 
+    /// Applies a window's IME wish when that window has the keyboard focus.
+    pub fn set_ime_for_window(&self, surface: &ObjectId, enabled: bool) {
+        let focused = self
+            .get_client()
+            .borrow()
+            .keyboard_focused_window
+            .as_ref()
+            .map(|window| window.surface_id());
+        if focused.as_ref() != Some(surface) {
+            return;
+        }
+        if enabled {
+            self.enable_ime();
+        } else {
+            self.disable_ime();
+        }
+    }
+
     pub fn disable_ime(&self) {
         let client = self.get_client();
         let mut state = client.borrow_mut();
