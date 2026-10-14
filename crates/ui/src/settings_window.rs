@@ -2,12 +2,12 @@
 //! The settings window and the form it edits.
 
 use crate::{
-    ChatWindow, CopyDiagnostics, Disconnect, FocusNextField, FocusPreviousField, OpenSettings,
-    Quit, Reconnect, ShortcutPrefs, ToggleDebug, account_settings, apply_shortcuts, autostart,
-    avatar_editor, color_picker, connection_config, decorations, diagnostics, field_traversal,
-    forget_removed_profiles, i18n_error, input::TextInput, ircv3_settings, localization::Localizer,
-    notification_rules, saved_connection_secrets, scrollbar, secrets, settings_file,
-    settings_theme, shortcut_settings, theme,
+    ChatWindow, Connect, CopyDiagnostics, Disconnect, FocusNextField, FocusPreviousField,
+    OpenSettings, Reconnect, ShortcutPrefs, ToggleDebug, account_settings, apply_shortcuts,
+    autostart, avatar_editor, color_picker, connection_config, decorations, diagnostics,
+    field_traversal, forget_removed_profiles, i18n_error, input::TextInput, ircv3_settings,
+    localization::Localizer, notification_rules, saved_connection_secrets, scrollbar, secrets,
+    settings_file, settings_theme, shortcut_settings, theme,
 };
 use cayenchat_app::{attachments::AttachmentFlow, notifications};
 use cayenchat_irc_core::ConnectionConfig;
@@ -330,6 +330,22 @@ impl SettingsForm {
             language_list_open: false,
             ircv3_server_list_open: false,
             values,
+        }
+    }
+
+    /// Writes the shown server's host, port and display name back to the
+    /// values, so tabs that list servers show what was typed before saving.
+    /// Nothing else is read, and an unusable port is left as it was.
+    pub(crate) fn sync_shown_server(&mut self, cx: &App) {
+        let value = |field: &Entity<TextInput>| field.read(cx).text().trim().to_owned();
+        let port = self.port.read(cx).text().trim().parse().ok();
+        let (host, display_name) = (value(&self.custom_host), value(&self.display_name));
+        if let Some(profile) = self.values.selected_profile_mut() {
+            profile.host = host;
+            profile.display_name = display_name;
+            if let Some(port) = port.filter(|port| *port != 0) {
+                profile.port = port;
+            }
         }
     }
 
@@ -1010,6 +1026,11 @@ impl SettingsWindow {
             autostart_generation: 0,
             _subscriptions: subscriptions,
         };
+        // Without a server the form shows no fields, so the focus waits on
+        // the page itself and Escape still reaches the window.
+        if this.settings.values.servers.is_empty() {
+            window.focus(&this.nav_focus);
+        }
         this.refresh_autostart(cx);
         this.probe_system_store(cx);
         this.refresh_upload_account(cx);
@@ -1281,6 +1302,7 @@ impl SettingsWindow {
         #[cfg(target_os = "windows")]
         let topmost_changed = previous.always_on_top != saved.always_on_top;
         let restore_layout = saved.restore_window_layout;
+        let confirm_quit = saved.confirm_quit;
         let shortcuts = ShortcutPrefs::from(&saved);
         let shortcuts_changed = ShortcutPrefs::from(previous) != shortcuts;
         let menu_bar_changed = previous.menu_bar_auto_hide != saved.menu_bar_auto_hide;
@@ -1290,14 +1312,13 @@ impl SettingsWindow {
         let rules = notification_rules(&saved.notifications);
         let _ = self.owner.update(cx, |owner, window, cx| {
             owner.image_provider = provider;
+            owner.confirm_quit = confirm_quit;
             owner.apply_conversation_log(&saved.conversation_log);
             cx.set_global(crate::input::ShortenPastedAmazon(shorten_amazon_urls));
             owner.notification_rules = rules;
             #[cfg(target_os = "windows")]
-            if topmost_changed
-                && let Err(error) = crate::set_main_window_always_on_top(window, saved.always_on_top)
-            {
-                owner.set_feedback(Some(error));
+            if topmost_changed {
+                owner.apply_always_on_top(saved.always_on_top, window, cx);
             }
             if shortcuts_changed {
                 apply_shortcuts(shortcuts, cx);
@@ -1330,6 +1351,71 @@ impl SettingsWindow {
         window.remove_window();
     }
 
+    /// Whether any field holds uncommitted IME text. GPUI never marks an
+    /// Escape keystroke as IME input, so the fields are asked directly.
+    fn is_composing(&self, cx: &App) -> bool {
+        self.settings
+            .text_fields()
+            .into_iter()
+            .chain([&self.upload_token])
+            .chain(
+                self.auto_join
+                    .iter()
+                    .flat_map(|d| d.rows.iter().map(|r| &r.name)),
+            )
+            .any(|field| field.read(cx).is_composing())
+    }
+
+    /// Escape closes what is open inside the window, one layer per press
+    /// (a dialog, the avatar editor, a picker, a server list), and only
+    /// then the window itself, saved like the close button. A key that is
+    /// part of an IME composition, or a recording of a shortcut, is theirs.
+    fn escape_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let keystroke = &event.keystroke;
+        if keystroke.key != "escape"
+            || keystroke.modifiers.modified()
+            || keystroke.is_ime_in_progress()
+            || self.shortcut_recording.is_some()
+            || self.is_composing(cx)
+        {
+            return;
+        }
+        cx.stop_propagation();
+        if self.auto_join.is_some() {
+            self.close_auto_join(window, cx);
+        } else if self.avatar_editor.is_some() {
+            self.avatar_editor = None;
+            cx.notify();
+        } else if self.color_picker.is_some() {
+            self.color_picker = None;
+            cx.notify();
+        } else if self.font_picker.is_some() {
+            self.font_picker = None;
+            cx.notify();
+        } else if self.settings.server_list_open
+            || self.settings.ircv3_server_list_open
+            || self.settings.encoding_list_open
+            || self.settings.language_list_open
+        {
+            self.settings.server_list_open = false;
+            self.settings.ircv3_server_list_open = false;
+            self.settings.encoding_list_open = false;
+            self.settings.language_list_open = false;
+            cx.notify();
+        } else {
+            self.close_settings(window, cx);
+            // The chat window takes the keyboard back.
+            let _ = self
+                .owner
+                .update(cx, |_, chat_window, _| chat_window.activate_window());
+        }
+    }
+
     fn open_settings_action(
         &mut self,
         _: &OpenSettings,
@@ -1343,6 +1429,15 @@ impl SettingsWindow {
         let _ = self.owner.update(cx, |owner, _, cx| {
             if let Some(network) = owner.selected_network_id() {
                 owner.disconnect(network, cx)
+            }
+        });
+        cx.notify();
+    }
+
+    fn connect_action(&mut self, _: &Connect, _: &mut Window, cx: &mut Context<Self>) {
+        let _ = self.owner.update(cx, |owner, window, cx| {
+            if let Some(network) = owner.selected_network_id() {
+                owner.reconnect(network, window, cx)
             }
         });
         cx.notify();
@@ -1930,7 +2025,7 @@ impl SettingsWindow {
             } else {
                 for (index, server) in self.saved.ordered_servers().enumerate() {
                     let id = server.id.clone();
-                    let label = format!("{}:{}", server.host, server.port);
+                    let label = ircv3_settings::server_label(server, &self.i18n);
                     menu = menu.child(
                         div()
                             .id(("server-option", index))
@@ -2943,6 +3038,14 @@ impl SettingsWindow {
                 enabled,
                 cx,
             ))
+            .child(self.notification_toggle(
+                "notify-channel-notices",
+                "notify_channel_notices",
+                |n| n.channel_notices,
+                |n| n.channel_notices = !n.channel_notices,
+                enabled,
+                cx,
+            ))
             .child(settings_field(
                 &self.i18n.text("keywords"),
                 self.settings.keywords.clone(),
@@ -3092,6 +3195,8 @@ impl SettingsWindow {
             let offset = self.pane_scroll.offset();
             self.pane_scroll.set_offset(point(offset.x, px(0.)));
         }
+        // Server names on other tabs follow the connection tab's fields.
+        self.settings.sync_shown_server(cx);
         // The system may have changed the registration since it was read.
         self.refresh_autostart(cx);
         self.tab = tab;
@@ -3266,6 +3371,9 @@ impl SettingsWindow {
         let auto_join = self.render_auto_join_dialog(cx);
         field_traversal(div().id("settings-screen"))
             .key_context("SettingsWindow")
+            .on_key_down(
+                cx.listener(|this, event, window, cx| this.escape_key_down(event, window, cx)),
+            )
             .relative()
             .size_full()
             .flex()
@@ -3307,10 +3415,20 @@ impl SettingsWindow {
                     .is_ok_and(ChatWindow::can_disconnect_selected),
                 |d| d.on_action(cx.listener(Self::disconnect_action)),
             )
-            .on_action(cx.listener(Self::reconnect_action))
+            .when(
+                self.owner
+                    .read(cx)
+                    .is_ok_and(ChatWindow::can_connect_selected),
+                |d| d.on_action(cx.listener(Self::connect_action)),
+            )
+            .when(
+                self.owner
+                    .read(cx)
+                    .is_ok_and(ChatWindow::can_reconnect_selected),
+                |d| d.on_action(cx.listener(Self::reconnect_action)),
+            )
             .on_action(cx.listener(Self::toggle_debug_action))
             .on_action(cx.listener(Self::copy_diagnostics_action))
-            .on_action(|_: &Quit, _, cx| cx.quit())
     }
 }
 
@@ -3455,6 +3573,24 @@ mod server_settings_tests {
         let preset = settings.selected_profile().unwrap();
         assert!(preset.nickname.is_empty() && preset.channels.is_empty());
         assert_eq!(preset.ircv3, Ircv3Preferences::default());
+    }
+
+    #[gpui::test]
+    fn typed_host_and_display_name_reach_the_values_before_saving(cx: &mut TestAppContext) {
+        let store = memory_store();
+        let mut form = form(Settings::default(), &store, cx);
+        switch(&mut form, &store, cx, |settings| {
+            settings.add_server(cayenchat_storage::PRESETS[0].host);
+        });
+        type_into(&form.custom_host, "tiarra.example", cx);
+        type_into(&form.display_name, "Tiarra", cx);
+        type_into(&form.port, "bad", cx);
+        cx.read(|cx| form.sync_shown_server(cx));
+        let profile = form.values.selected_profile().unwrap();
+        assert_eq!(profile.host, "tiarra.example");
+        assert_eq!(profile.display_name, "Tiarra");
+        // An unfinished port keeps the earlier one.
+        assert_eq!(profile.port, 6667);
     }
 
     #[gpui::test]
@@ -3699,5 +3835,131 @@ mod server_settings_tests {
         for lines in [&lines_a, &lines_b] {
             assert!(pick(lines, "PASS").is_empty() && pick(lines, "AUTHENTICATE").is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::SettingsWindow;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn escape_closes_layers_first_then_the_window(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            crate::secrets::install_memory(cx);
+            cx.set_global(crate::theme::Theme::new(
+                cayenchat_storage::ThemeMode::Light,
+                gpui::WindowAppearance::Light,
+                &cayenchat_storage::Appearance::default(),
+            ));
+        });
+        let settings = crate::settings_with_channels("#a");
+        let owner = cx.add_window(|window, cx| {
+            crate::ChatWindow::with_settings(settings.clone(), None, window, cx)
+        });
+        let mut app = cx.clone();
+        let (form, cx) = cx
+            .add_window_view(|window, cx| SettingsWindow::new(owner, settings.clone(), window, cx));
+        cx.run_until_parked();
+
+        // An open server list takes the first Escape; the window stays.
+        form.update(cx, |form, cx| {
+            form.settings.server_list_open = true;
+            cx.notify();
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(form.read_with(cx, |form, _| !form.settings.server_list_open));
+        let windows = |app: &mut TestAppContext| app.update(|app| app.windows().len());
+        assert_eq!(windows(&mut app), 2);
+
+        // A shortcut being recorded keeps Escape for itself.
+        form.update(cx, |form, cx| {
+            form.toggle_shortcut_recording("next_channel", cx)
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(form.read_with(cx, |form, _| form.shortcut_recording.is_none()));
+        assert_eq!(windows(&mut app), 2);
+
+        // Nothing open: Escape closes the settings window only.
+        cx.simulate_keystrokes("escape");
+        assert_eq!(windows(&mut app), 1);
+        assert!(
+            owner.read_with(&app, |_, _| true).is_ok(),
+            "the chat remains"
+        );
+    }
+
+    fn open(
+        cx: &mut TestAppContext,
+        settings: cayenchat_storage::Settings,
+    ) -> (
+        gpui::Entity<SettingsWindow>,
+        &mut gpui::VisualTestContext,
+        TestAppContext,
+    ) {
+        cx.update(|cx| {
+            crate::secrets::install_memory(cx);
+            cx.set_global(crate::theme::Theme::new(
+                cayenchat_storage::ThemeMode::Light,
+                gpui::WindowAppearance::Light,
+                &cayenchat_storage::Appearance::default(),
+            ));
+        });
+        let owner = cx.add_window({
+            let settings = settings.clone();
+            move |window, cx| crate::ChatWindow::with_settings(settings, None, window, cx)
+        });
+        let app = cx.clone();
+        let (form, vcx) = cx
+            .add_window_view(|window, cx| SettingsWindow::new(owner, settings.clone(), window, cx));
+        vcx.run_until_parked();
+        (form, vcx, app)
+    }
+
+    #[gpui::test]
+    fn escape_closes_language_and_encoding_lists_first(cx: &mut TestAppContext) {
+        let (form, cx, mut app) = open(cx, crate::settings_with_channels("#a"));
+        let windows = |app: &mut TestAppContext| app.update(|app| app.windows().len());
+        form.update(cx, |form, cx| {
+            form.settings.language_list_open = true;
+            cx.notify();
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(form.read_with(cx, |form, _| !form.settings.language_list_open));
+        assert_eq!(windows(&mut app), 2);
+        form.update(cx, |form, cx| {
+            form.settings.encoding_list_open = true;
+            cx.notify();
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(form.read_with(cx, |form, _| !form.settings.encoding_list_open));
+        assert_eq!(windows(&mut app), 2);
+    }
+
+    #[gpui::test]
+    fn escape_during_composition_keeps_the_window(cx: &mut TestAppContext) {
+        use gpui::EntityInputHandler;
+        let (form, cx, mut app) = open(cx, crate::settings_with_channels("#a"));
+        let nickname = form.read_with(cx, |form, _| form.settings.nickname.clone());
+        cx.update(|window, cx| {
+            nickname.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "あ", None, window, cx)
+            })
+        });
+        cx.simulate_keystrokes("escape");
+        let windows = |app: &mut TestAppContext| app.update(|app| app.windows().len());
+        assert_eq!(windows(&mut app), 2);
+        cx.update(|window, cx| nickname.update(cx, |input, cx| input.unmark_text(window, cx)));
+        cx.simulate_keystrokes("escape");
+        assert_eq!(windows(&mut app), 1);
+    }
+
+    #[gpui::test]
+    fn escape_closes_settings_without_servers(cx: &mut TestAppContext) {
+        let mut settings = crate::settings_with_channels("#a");
+        settings.servers.clear();
+        let (_form, cx, app) = open(cx, settings);
+        cx.simulate_keystrokes("escape");
+        assert_eq!(app.clone().update(|app| app.windows().len()), 1);
     }
 }

@@ -833,6 +833,9 @@ pub struct Notifications {
     pub keyword_alerts: bool,
     pub keywords: Vec<String>,
     pub private_messages: bool,
+    /// Let channel NOTICEs trigger mention and keyword notifications.
+    /// Off by default: NOTICEs are mostly bots and services.
+    pub channel_notices: bool,
     /// Beep and flash the taskbar button (Windows) when a notification
     /// fires. Off by default.
     pub sound: bool,
@@ -846,6 +849,7 @@ impl Default for Notifications {
             keyword_alerts: true,
             keywords: Vec::new(),
             private_messages: true,
+            channel_notices: false,
             sound: false,
         }
     }
@@ -907,10 +911,15 @@ pub struct Settings {
     /// Reopen the main window where it was left, with its pane sizes (see
     /// [`layout`]). On by default, also for files saved before it existed.
     pub restore_window_layout: bool,
-    /// Keep the main chat window above ordinary windows on Windows.
+    /// Keep every CayenChat window (chat, settings, WHOIS) above ordinary
+    /// windows on Windows.
     /// Off by default, including settings files written before this existed.
     /// Ignored on other platforms.
     pub always_on_top: bool,
+    /// Ask before the user quits the application. Off by default, also for
+    /// files saved before it existed. Quits by the system or by a signal
+    /// never ask.
+    pub confirm_quit: bool,
     /// Shorten long Amazon product links to `/dp/<ASIN>` in the text a send
     /// puts on the wire; the draft keeps what was typed. On by default, also
     /// for files saved before it existed.
@@ -961,6 +970,7 @@ impl Default for Settings {
             appearance: Appearance::default(),
             restore_window_layout: true,
             always_on_top: false,
+            confirm_quit: false,
             shorten_amazon_urls: true,
             credential_backend: CredentialBackendKind::System,
             image_upload: ImageUpload::default(),
@@ -1668,6 +1678,7 @@ mod tests {
             assert!(profile.sasl_enabled);
             assert_eq!(profile.sasl_username, "account");
             assert_eq!(settings.notifications, Notifications::default());
+            assert!(!settings.notifications.channel_notices);
             assert_eq!(fs::read(&path).unwrap(), bytes);
             save_to(&path, &settings).unwrap();
             assert_eq!(load_from(&path).unwrap(), Some(settings));
@@ -2903,6 +2914,18 @@ mod tests {
         settings.restore_window_layout = false;
         save_to(&path, &settings).unwrap();
         assert!(!load_from(&path).unwrap().unwrap().restore_window_layout);
+    }
+
+    #[test]
+    fn quitting_is_confirmed_only_when_switched_on() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        fs::write(&path, r#"{"version":15,"selected_server":"","servers":[]}"#).unwrap();
+        let mut settings = load_from(&path).unwrap().unwrap();
+        assert!(!settings.confirm_quit, "absent reads as off");
+        settings.confirm_quit = true;
+        save_to(&path, &settings).unwrap();
+        assert!(load_from(&path).unwrap().unwrap().confirm_quit);
     }
 
     #[test]

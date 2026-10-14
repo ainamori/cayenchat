@@ -188,8 +188,11 @@ actions!(
         HistoryPrevious,
         HistoryNext,
         OpenSettings,
+        Connect,
         Disconnect,
         Reconnect,
+        MinimizeWindow,
+        ZoomWindow,
         ToggleDebug,
         CopyDiagnostics,
         CopyLogSelection,
@@ -391,24 +394,53 @@ fn event_provenance(replayed: bool) -> Provenance {
     }
 }
 
+/// What leads a message's text in the log: `alice: ` before a message,
+/// `* alice ` before the text of a `/me` action.
+fn sender_prefix(message: &cayenchat_model::Message) -> String {
+    let sender = display::neutralize_bidi(&message.sender);
+    if message.action {
+        format!("* {sender} ")
+    } else {
+        format!("{sender}: ")
+    }
+}
+
+/// The kind of a received PRIVMSG or NOTICE and the text it shows: a
+/// PRIVMSG that is a CTCP ACTION (`/me`) is told apart here, once, and shown
+/// by its action text. A NOTICE is never an action.
+fn received_kind(text: &str, notice: bool) -> (Kind, &str) {
+    if notice {
+        return (Kind::Notice, text);
+    }
+    match cayenchat_irc_core::text::action_text(text) {
+        Some(action) => (Kind::Action, action),
+        None => (Kind::Message, text),
+    }
+}
+
 /// Requested history lines as timeline items: history, never news.
 fn history_lines(messages: Vec<HistoryMessage>) -> Vec<TimelineLine> {
     messages
         .into_iter()
-        .map(|message| TimelineLine {
-            sender: message.sender,
-            text: if message.notice {
-                format!("[NOTICE] {}", message.text)
-            } else {
-                message.text
-            },
-            notice: message.notice,
-            meta: irc_message_meta(
-                message.server_time,
-                message.msgid.as_deref(),
-                message.account.as_deref(),
-                Provenance::Replayed,
-            ),
+        .map(|message| {
+            let (kind, shown) = received_kind(&message.text, message.notice);
+            let action = kind.is_action().then(|| shown.to_owned());
+            TimelineLine {
+                action: action.is_some(),
+                text: match action {
+                    Some(action) => action,
+                    None if message.notice => format!("[NOTICE] {}", message.text),
+                    None => message.text,
+                },
+                sender: message.sender,
+                notice: message.notice,
+                meta: irc_message_meta(
+                    message.server_time,
+                    message.msgid.as_deref(),
+                    message.account.as_deref(),
+                    Provenance::Replayed,
+                ),
+            }
         })
         .collect()
 }
@@ -519,6 +551,8 @@ struct ChatWindow {
     server_menu: Option<ServerMenu>,
     member_menu: Option<MemberMenu>,
     channel_menu: Option<ChannelMenu>,
+    /// The menu of a right click in the channel log.
+    log_menu: Option<LogMenu>,
     member_prompt: Option<MemberPrompt>,
     /// Members chosen in the member list of the selected channel.
     member_selection: member_selection::MemberSelection,
@@ -534,6 +568,10 @@ struct ChatWindow {
     /// the file that is written to. `None` writes nothing: tests, and the
     /// moment before startup supplies the path.
     restore_layout: bool,
+    /// Ask before the user quits (a setting), and whether that question is
+    /// on screen, so a second quit request does not open another.
+    confirm_quit: bool,
+    quit_prompt_open: bool,
     layout_file: Option<std::path::PathBuf>,
     /// The channel order chosen by dragging or the menu, and the file it is
     /// written to (`None` writes nothing, as for `layout_file`).
@@ -552,6 +590,11 @@ struct ChatWindow {
     window_bounds: Option<WindowBounds>,
     /// The native window title last set from `render`.
     shown_title: String,
+    /// Keep every CayenChat window above ordinary windows (Windows only).
+    /// Applied to the windows opened later; the native state is set by
+    /// `apply_always_on_top`, never while building a window.
+    #[cfg(target_os = "windows")]
+    always_on_top: bool,
     /// Open WHOIS windows by network and lowercase nickname.
     whois_windows: HashMap<(NetworkId, String), WindowHandle<WhoisWindow>>,
     whois_replies: Vec<(NetworkId, WhoisInfo, bool)>,
@@ -611,8 +654,9 @@ struct ReceivedMessage<'a> {
     /// Where it was added; `None` for the server log.
     conversation: Option<ConversationId>,
     sender: &'a str,
+    /// The text the conversation shows: an action's own text for a `/me`.
     text: &'a str,
-    notice: bool,
+    kind: Kind,
     found: &'a Found,
     replayed: bool,
 }
@@ -681,6 +725,30 @@ struct ChannelMenu {
     private: bool,
 }
 
+/// The menu of a right click in the log of a channel or private
+/// conversation. `sender` is the speaker of the clicked message row, only
+/// when that row names one peer we can open a conversation with.
+struct LogMenu {
+    position: Point<Pixels>,
+    network: NetworkId,
+    conversation: ConversationId,
+    channel: String,
+    private: bool,
+    sender: Option<String>,
+    /// The clipboard held text when the menu opened.
+    can_paste: bool,
+}
+
+#[derive(Clone, Copy)]
+enum LogMenuChoice {
+    Copy,
+    Paste,
+    Mode,
+    Topic,
+    Nick,
+    Private,
+}
+
 struct MemberMenu {
     position: Point<Pixels>,
     network: NetworkId,
@@ -703,6 +771,10 @@ enum MemberPromptKind {
     Join,
     /// Change our own nickname on the server.
     Nick,
+    /// Change the modes of the channel named by the prompt's nickname.
+    Mode,
+    /// Change the topic of the channel named by the prompt's nickname.
+    Topic,
 }
 
 /// The dialog heading, with the nickname as drawn.
@@ -713,6 +785,8 @@ fn member_prompt_title(i18n: &Localizer, kind: MemberPromptKind, nickname: &str)
             MemberPromptKind::Invite => "member_invite_title",
             MemberPromptKind::Join => "channel_join_title",
             MemberPromptKind::Nick => "nickname_change_title",
+            MemberPromptKind::Mode => "channel_mode_title",
+            MemberPromptKind::Topic => "channel_topic_title",
         },
         nickname,
     )
@@ -883,10 +957,6 @@ impl ChatWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        #[cfg(target_os = "windows")]
-        if let Err(error) = set_main_window_always_on_top(window, saved.always_on_top) {
-            log::warn!("Could not set the chat window's always-on-top state: {error}");
-        }
         cx.set_global(input::ShortenPastedAmazon(saved.shorten_amazon_urls));
         let i18n = Localizer::new(saved.language);
         // Every configured server is a network in the tree, connected or not.
@@ -957,14 +1027,19 @@ impl ChatWindow {
             server_menu: None,
             member_menu: None,
             channel_menu: None,
+            log_menu: None,
             member_prompt: None,
             member_selection: Default::default(),
             input_history: Default::default(),
             nick_prompts: Vec::new(),
             startup_connections,
             settings_window: None,
+            #[cfg(target_os = "windows")]
+            always_on_top: saved.always_on_top,
             window_handle: window.window_handle().downcast::<ChatWindow>(),
             restore_layout: saved.restore_window_layout,
+            confirm_quit: saved.confirm_quit,
+            quit_prompt_open: false,
             layout_file: None,
             channel_orders: Default::default(),
             order_file: None,
@@ -1063,6 +1138,16 @@ impl ChatWindow {
         .detach();
         let view = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
+            // Closing the main window quits the application. With the
+            // question on, nothing is touched until it is answered: asking
+            // keeps the window open, and "Quit" goes through `cx.quit()`,
+            // which runs the usual shutdown in `on_app_quit`.
+            if view
+                .update(cx, |this, cx| this.ask_before_quit(window, cx))
+                .unwrap_or(false)
+            {
+                return false;
+            }
             let _ = view.update(cx, |this, _| {
                 this.note_window_bounds(window);
                 this.save_layout_now();
@@ -1081,6 +1166,63 @@ impl ChatWindow {
         .detach();
         this.note_window_bounds(window);
         this
+    }
+
+    /// The user asked to quit the application (menu, shortcut, closing the
+    /// main window). Quits at once unless the confirmation is on. Quits by
+    /// the system or a signal call `cx.quit()` directly and never ask.
+    fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.ask_before_quit(window, cx) {
+            cx.quit();
+        }
+    }
+
+    /// Opens the quit question when it is on and not yet open. Returns
+    /// whether the question applies, so the caller must not quit now. No
+    /// connection, window or draft is touched here; QUIT is only sent after
+    /// "Quit" is chosen.
+    fn ask_before_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.confirm_quit {
+            return false;
+        }
+        if self.quit_prompt_open {
+            return true;
+        }
+        self.quit_prompt_open = true;
+        // The request may come from the settings window or the Dock; show
+        // the question in front.
+        window.activate_window();
+        let focused = window.focused(cx);
+        let connected = self.sessions.values().any(|session| session.irc.is_some());
+        let detail = self.i18n.text(if connected {
+            "quit_detail_connected"
+        } else {
+            "quit_detail"
+        });
+        let answer = window.prompt(
+            PromptLevel::Info,
+            &self.i18n.text("quit_title"),
+            Some(&detail),
+            &[
+                PromptButton::cancel(self.i18n.text("cancel")),
+                PromptButton::ok(self.i18n.text("quit_confirm")),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let quit = answer.await == Ok(1);
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.quit_prompt_open = false;
+                if quit {
+                    cx.quit();
+                } else if let Some(handle) = focused {
+                    // Back to where the user was typing.
+                    window.focus(&handle);
+                }
+            });
+        })
+        .detach();
+        true
     }
 
     /// Sends QUIT on every connection and waits briefly for it to be
@@ -1240,19 +1382,14 @@ impl ChatWindow {
     }
 
     /// Mentions of our nickname and keywords in an incoming message, looked
-    /// for in its text (the action of a `/me`) without formatting codes. Our
-    /// own lines and replayed history have none.
-    fn find_mentions(&self, network: NetworkId, sender: &str, text: &str, replayed: bool) -> Found {
-        use cayenchat_irc_core::text::{action_text, mention_ranges, plain_ranges};
+    /// for in its text (the action's own text for a `/me`) without formatting
+    /// codes. Our own lines and replayed history have none.
+    fn find_mentions(&self, network: NetworkId, sender: &str, body: &str, replayed: bool) -> Found {
+        use cayenchat_irc_core::text::{mention_ranges, plain_ranges};
 
         if replayed || self.is_own_nickname(network, sender) {
             return Found::default();
         }
-        let (offset, body) = match action_text(text) {
-            // The prefix `action_text` removes.
-            Some(action) => ("\u{1}ACTION ".len(), action),
-            None => (0, text),
-        };
         let own = self.own_nickname(network);
         let keywords = &self.notification_rules.keywords;
         let (mut mentioned, mut keyword) = (false, false);
@@ -1281,35 +1418,31 @@ impl ChatWindow {
             ranges.sort_by_key(|range| range.start);
             ranges
         });
-        let mut found = Found {
+        Found {
             mentioned,
             keyword,
             ranges,
-        };
-        for range in &mut found.ranges {
-            *range = range.start + offset..range.end + offset;
         }
-        found
     }
 
     /// Shows a desktop notification for an incoming IRC message when the
     /// rules ask for one and the message is not already in front of the user.
     fn notify_message(&mut self, network: NetworkId, message: ReceivedMessage) {
-        use cayenchat_irc_core::text::{action_text, strip_formatting};
+        use cayenchat_irc_core::text::strip_formatting;
 
         let ReceivedMessage {
             channel,
             conversation,
             sender,
             text,
-            notice,
+            kind,
             found,
             replayed,
         } = message;
 
         let Some(trigger) = self.notification_rules.trigger(IncomingMessage {
             channel: channel.is_some(),
-            notice,
+            notice: kind.is_notice(),
             from_self: self.is_own_nickname(network, sender),
             mentioned: found.mentioned,
             keyword: found.keyword,
@@ -1317,9 +1450,10 @@ impl ChatWindow {
         }) else {
             return;
         };
-        let plain = display::neutralize_bidi_owned(match action_text(text) {
-            Some(action) => format!("* {sender} {}", strip_formatting(action)),
-            None => strip_formatting(text),
+        let plain = display::neutralize_bidi_owned(if kind.is_action() {
+            format!("* {sender} {}", strip_formatting(text))
+        } else {
+            strip_formatting(text)
         });
         let visible = self.window_active
             && self.state.selection()
@@ -1740,6 +1874,7 @@ impl ChatWindow {
         if self.menus_for(network) {
             self.member_menu = None;
             self.channel_menu = None;
+            self.log_menu = None;
         }
         if self
             .member_prompt
@@ -1785,6 +1920,10 @@ impl ChatWindow {
                 .channel_menu
                 .as_ref()
                 .is_some_and(|menu| menu.network == network)
+            || self
+                .log_menu
+                .as_ref()
+                .is_some_and(|menu| menu.network == network)
     }
 
     /// Whether Disconnect has something to stop on `network`: a connection
@@ -1825,10 +1964,35 @@ impl ChatWindow {
         }
     }
 
-    fn reconnect_action(&mut self, _: &Reconnect, window: &mut Window, cx: &mut Context<Self>) {
+    /// Whether Connect applies: the selected server has not been connected in
+    /// this run, or there is no server yet (it then opens settings).
+    fn can_connect_selected(&self) -> bool {
+        match self.selected_network_id() {
+            Some(network) => self
+                .sessions
+                .get(&network)
+                .is_some_and(|session| !session.used()),
+            None => true,
+        }
+    }
+
+    /// Whether Reconnect applies: the selected server has been connected in
+    /// this run.
+    fn can_reconnect_selected(&self) -> bool {
+        self.selected_network_id()
+            .is_some_and(|network| self.sessions.get(&network).is_some_and(ServerSession::used))
+    }
+
+    fn connect_action(&mut self, _: &Connect, window: &mut Window, cx: &mut Context<Self>) {
         match self.selected_network_id() {
             Some(network) => self.reconnect(network, window, cx),
             None => self.open_settings_for(None, window, cx),
+        }
+    }
+
+    fn reconnect_action(&mut self, _: &Reconnect, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(network) = self.selected_network_id() {
+            self.reconnect(network, window, cx);
         }
     }
 
@@ -2102,7 +2266,158 @@ impl ChatWindow {
         let server = self.server_menu.take().is_some();
         let member = self.member_menu.take().is_some();
         let channel = self.channel_menu.take().is_some();
-        server || member || channel
+        let log = self.log_menu.take().is_some();
+        server || member || channel || log
+    }
+
+    /// Whether `conversation` has a non-empty text selection in its log.
+    fn has_log_selection(&self, conversation: ConversationId) -> bool {
+        self.log_selection.is_some_and(|selection| {
+            let (start, end) = selection.bounds();
+            selection.channel == conversation && start != end
+        })
+    }
+
+    /// Opens the log menu at `position` for the selected conversation.
+    /// `sender` is the speaker of the clicked row, if it has one: it must be
+    /// a plain nickname and not ourselves. The log selection is untouched.
+    fn open_log_menu(
+        &mut self,
+        position: Point<Pixels>,
+        sender: Option<&str>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(conversation) = self.state.selected_channel() else {
+            return;
+        };
+        let (id, network, channel, private) = (
+            conversation.id,
+            conversation.network,
+            conversation.name.clone(),
+            conversation.is_private(),
+        );
+        let sender = sender
+            .filter(|sender| cayenchat_irc_core::valid_nickname(sender))
+            .filter(|sender| !self.is_own_nickname(network, sender))
+            .map(str::to_owned);
+        let viewport = window.viewport_size();
+        self.server_menu = None;
+        self.member_menu = None;
+        self.channel_menu = None;
+        self.member_prompt = None;
+        self.log_menu = Some(LogMenu {
+            position: point(
+                position.x.min((viewport.width - px(230.)).max(px(0.))),
+                position.y.min((viewport.height - px(190.)).max(px(0.))),
+            ),
+            network,
+            conversation: id,
+            channel,
+            private,
+            sender,
+            can_paste: self.can_paste_into_input(cx),
+        });
+        cx.notify();
+    }
+
+    /// Whether the clipboard has text and the selected conversation's input
+    /// is not composing (a paste would replace the composition).
+    fn can_paste_into_input(&self, cx: &App) -> bool {
+        cx.read_from_clipboard()
+            .is_some_and(|item| item.text().is_some())
+            && self
+                .inputs
+                .get(&self.state.selection())
+                .is_some_and(|input| !input.read(cx).is_composing())
+    }
+
+    fn log_menu_choice(
+        &mut self,
+        choice: LogMenuChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(menu) = self.log_menu.take() else {
+            return;
+        };
+        // A menu left over from another conversation does nothing.
+        if self.state.selection() != Selection::Channel(menu.conversation) {
+            cx.notify();
+            return;
+        }
+        match choice {
+            LogMenuChoice::Copy => self.copy_selected_log(cx),
+            LogMenuChoice::Paste if !self.can_paste_into_input(cx) => cx.notify(),
+            LogMenuChoice::Paste => {
+                if let Some(input) = self.inputs.get(&self.state.selection()).cloned() {
+                    window.focus(&input.focus_handle(cx));
+                    input.update(cx, |input, cx| input.paste_clipboard(window, cx));
+                }
+            }
+            LogMenuChoice::Mode | LogMenuChoice::Topic => {
+                let topic = matches!(choice, LogMenuChoice::Topic);
+                let initial = if topic {
+                    self.state
+                        .selected_channel()
+                        .map(|channel| channel.topic.clone())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                let kind = if topic {
+                    MemberPromptKind::Topic
+                } else {
+                    MemberPromptKind::Mode
+                };
+                self.show_member_prompt(
+                    menu.network,
+                    menu.channel.clone(),
+                    kind,
+                    menu.position,
+                    window,
+                    cx,
+                );
+                if let Some(prompt) = self.member_prompt.as_ref().filter(|_| !initial.is_empty()) {
+                    prompt.input.update(cx, |input, cx| {
+                        input.set_text(&initial, cx);
+                        input.select_everything(cx);
+                    });
+                }
+            }
+            LogMenuChoice::Nick => {
+                let nickname = self
+                    .own_nickname(menu.network)
+                    .unwrap_or_default()
+                    .to_owned();
+                self.show_member_prompt(
+                    menu.network,
+                    nickname,
+                    MemberPromptKind::Nick,
+                    menu.position,
+                    window,
+                    cx,
+                );
+            }
+            LogMenuChoice::Private => {
+                // Opens the conversation without sending anything.
+                if let Some(sender) = menu.sender {
+                    let key = cayenchat_irc_core::text::nickname_key(&sender);
+                    if let Some(id) = self.state.private_conversation(
+                        menu.network,
+                        &key,
+                        &sender,
+                        Missing::Create,
+                    ) {
+                        self.ensure_inputs(cx);
+                        self.dispatch(Command::SelectChannel(id), window, cx);
+                    } else {
+                        self.set_feedback(Some(self.i18n.text("private_conversation_limit")));
+                    }
+                }
+            }
+        }
+        cx.notify();
     }
 
     fn channel_menu_command(&mut self, join: bool, cx: &mut Context<Self>) {
@@ -2290,6 +2605,14 @@ impl ChatWindow {
         let joined = self.joined_channels(network);
         match WhoisWindow::open(owner, network, info, joined, self.i18n.clone(), cx) {
             Ok(handle) => {
+                #[cfg(target_os = "windows")]
+                if self.always_on_top {
+                    let _ = handle.update(cx, |_, window, _| {
+                        if let Err(error) = set_window_always_on_top(window, true) {
+                            log::warn!("Could not keep the WHOIS window on top: {error}");
+                        }
+                    });
+                }
                 self.whois_windows.insert(key, handle);
                 cx.activate(true);
             }
@@ -2372,6 +2695,8 @@ impl ChatWindow {
             MemberPromptKind::PrivateMessage => "member_message_placeholder",
             MemberPromptKind::Invite | MemberPromptKind::Join => "member_channel_placeholder",
             MemberPromptKind::Nick => "nickname",
+            MemberPromptKind::Mode => "channel_mode_placeholder",
+            MemberPromptKind::Topic => "channel_topic_placeholder",
         });
         // A new nickname starts from the current one, all selected, so a
         // small change is a small edit and typing replaces it.
@@ -2408,6 +2733,7 @@ impl ChatWindow {
         self.server_menu = None;
         self.member_menu = None;
         self.channel_menu = None;
+        self.log_menu = None;
         if let Some(prompt) = self
             .nick_prompts
             .iter_mut()
@@ -2585,6 +2911,20 @@ impl ChatWindow {
                     Err(self.i18n.text("nickname_change_required"))
                 }
                 MemberPromptKind::Nick => connection.change_nickname(value.trim()),
+                // The prompt's nickname is the channel. The value is not
+                // echoed anywhere: a mode may carry a channel key.
+                MemberPromptKind::Mode if value.trim().is_empty() => {
+                    Err(self.i18n.text("channel_mode_required"))
+                }
+                MemberPromptKind::Mode => connection
+                    .send_command(&format!("/mode {} {}", prompt.nickname, value.trim()), None),
+                MemberPromptKind::Topic if value.trim().is_empty() => {
+                    Err(self.i18n.text("channel_topic_required"))
+                }
+                MemberPromptKind::Topic => connection.send_command(
+                    &format!("/topic {} :{}", prompt.nickname, value.trim()),
+                    None,
+                ),
             },
             Err(error) => Err(error),
         };
@@ -2695,7 +3035,17 @@ impl ChatWindow {
                 })
             },
         ) {
-            Ok(handle) => self.settings_window = Some(handle),
+            Ok(handle) => {
+                #[cfg(target_os = "windows")]
+                if self.always_on_top {
+                    let _ = handle.update(cx, |_, window, _| {
+                        if let Err(error) = set_window_always_on_top(window, true) {
+                            log::warn!("Could not keep the settings window on top: {error}");
+                        }
+                    });
+                }
+                self.settings_window = Some(handle)
+            }
             Err(error) => {
                 let message = self
                     .i18n
@@ -2860,12 +3210,28 @@ impl ChatWindow {
             .filter_map(|row| {
                 channel.messages.get(row).map(|message| {
                     let range = selection.range(row, message.text.len()).unwrap_or(0..0);
+                    // An action copied whole keeps the `* alice` that makes it
+                    // a `/me`; a part of it is copied as selected.
+                    let lead = if message.action
+                        && range.start == 0
+                        && range.end == message.text.len()
+                        && !range.is_empty()
+                    {
+                        sender_prefix(message)
+                    } else {
+                        String::new()
+                    };
                     if !decode {
-                        return message.text[range].to_owned();
+                        return lead + &message.text[range];
                     }
                     // Decoded references are copied as the characters shown.
-                    compact_urls::Compact::new(&message.text, message.links.as_slice(), false, true)
-                        .copy_text(&message.text, range)
+                    lead + &compact_urls::Compact::new(
+                        &message.text,
+                        message.links.as_slice(),
+                        false,
+                        true,
+                    )
+                    .copy_text(&message.text, range)
                 })
             })
             .collect();
@@ -3037,6 +3403,7 @@ impl ChatWindow {
         self.server_menu = None;
         self.member_menu = None;
         self.channel_menu = None;
+        self.log_menu = None;
         self.state.dispatch(command);
         self.log_selection = None;
         self.set_feedback(None);
@@ -3276,7 +3643,8 @@ impl ChatWindow {
                 account,
                 replayed,
             } => {
-                let found = self.find_mentions(network, &sender, &text, replayed);
+                let (kind, text) = received_kind(&text, notice);
+                let found = self.find_mentions(network, &sender, text, replayed);
                 let meta = MessageMeta {
                     highlights: found.ranges.clone(),
                     ..irc_message_meta(
@@ -3288,14 +3656,10 @@ impl ChatWindow {
                 };
                 // A copy of a message the conversation already has (overlapping
                 // history) neither notifies nor highlights again.
-                if !self.state.append_channel_message_at(
-                    network,
-                    &channel,
-                    &sender,
-                    &text,
-                    Kind::from_notice(notice),
-                    meta,
-                ) {
+                if !self
+                    .state
+                    .append_channel_message_at(network, &channel, &sender, text, kind, meta)
+                {
                     return;
                 }
                 let conversation = self.state.channel_id(network, &channel);
@@ -3305,8 +3669,8 @@ impl ChatWindow {
                         Scope::Channel,
                         &channel,
                         &sender,
-                        &text,
-                        notice,
+                        text,
+                        kind,
                         server_time,
                     );
                 }
@@ -3316,8 +3680,8 @@ impl ChatWindow {
                         channel: Some(&channel),
                         conversation,
                         sender: &sender,
-                        text: &text,
-                        notice,
+                        text,
+                        kind,
                         found: &found,
                         replayed,
                     },
@@ -3363,7 +3727,8 @@ impl ChatWindow {
                 account,
                 replayed,
             } => {
-                let found = self.find_mentions(network, &sender, &text, replayed);
+                let (kind, text) = received_kind(&text, notice);
+                let found = self.find_mentions(network, &sender, text, replayed);
                 let meta = MessageMeta {
                     highlights: found.ranges.clone(),
                     ..irc_message_meta(
@@ -3390,8 +3755,8 @@ impl ChatWindow {
                         if !self.state.append_conversation_message(
                             id,
                             &sender,
-                            &text,
-                            Kind::from_notice(notice),
+                            text,
+                            kind,
                             meta,
                             Unread::Mark,
                         ) {
@@ -3403,8 +3768,8 @@ impl ChatWindow {
                                 Scope::Private,
                                 &sender,
                                 &sender,
-                                &text,
-                                notice,
+                                text,
+                                kind,
                                 server_time,
                             );
                         }
@@ -3415,12 +3780,14 @@ impl ChatWindow {
                     None => {
                         let prefix = if notice {
                             format!("-{sender}- ")
+                        } else if kind.is_action() {
+                            format!("* {sender} ")
                         } else {
                             format!("<{sender}> ")
                         };
                         let meta = meta.after_prefix(prefix.len());
                         self.state
-                            .append_server_message_at(network, prefix + &text, meta);
+                            .append_server_message_at(network, prefix + text, meta);
                     }
                 }
                 self.notify_message(
@@ -3429,8 +3796,8 @@ impl ChatWindow {
                         channel: None,
                         conversation,
                         sender: &sender,
-                        text: &text,
-                        notice,
+                        text,
+                        kind,
                         found: &found,
                         replayed,
                     },
@@ -3444,6 +3811,7 @@ impl ChatWindow {
                 msgid,
                 replayed,
             } => {
+                let (kind, text) = received_kind(&text, notice);
                 let meta = irc_message_meta(
                     server_time,
                     msgid.as_deref(),
@@ -3457,12 +3825,12 @@ impl ChatWindow {
                         Scope::Private,
                         &target,
                         own,
-                        &text,
-                        notice,
+                        text,
+                        kind,
                         server_time,
                     );
                 }
-                self.append_own_private(network, &target, &text, notice, meta);
+                self.append_own_private(network, &target, text, kind, meta);
             }
             Event::UserNickChanged { from, to } => {
                 let from_key = cayenchat_irc_core::text::nickname_key(&from);
@@ -3667,6 +4035,11 @@ impl ChatWindow {
                 action,
             } => {
                 let before = self.state.latest_sequence();
+                // A `/me` is shown by its own text like a received one.
+                let (kind, shown) = match action.as_deref() {
+                    Some(action) => (Kind::Action, action),
+                    None => (Kind::from_notice(notice), text.as_str()),
+                };
                 if valid_channel(&channel) {
                     let nickname = self
                         .sessions
@@ -3677,12 +4050,12 @@ impl ChatWindow {
                         network,
                         &channel,
                         nickname,
-                        &text,
-                        Kind::from_notice(notice),
+                        shown,
+                        kind,
                         Provenance::Live,
                     );
                 } else if cayenchat_irc_core::valid_nickname(&channel) {
-                    self.append_own_private(network, &channel, &text, notice, MessageMeta::live());
+                    self.append_own_private(network, &channel, shown, kind, MessageMeta::live());
                 } else {
                     self.state.append_server_message(
                         network,
@@ -3732,7 +4105,7 @@ impl ChatWindow {
                     {
                         session
                             .pending_sends
-                            .insert(local_id, (id, self.state.latest_sequence(), notice));
+                            .insert(local_id, (id, self.state.latest_sequence(), kind));
                     }
                 }
             }
@@ -3754,11 +4127,12 @@ impl ChatWindow {
                     .sessions
                     .get_mut(&network)
                     .and_then(|session| session.pending_sends.remove(&local_id));
-                if let Some((id, sequence, notice)) = pending {
+                if let Some((id, sequence, kind)) = pending {
                     let meta =
                         irc_message_meta(server_time, msgid.as_deref(), None, Provenance::Live);
-                    self.state
-                        .confirm_message(id, sequence, text, Kind::from_notice(notice), meta);
+                    // The final text of an ACTION is its own text.
+                    let text = if kind.is_action() { action } else { text };
+                    self.state.confirm_message(id, sequence, text, kind, meta);
                 }
             }
             Event::OutgoingFailed { local_id, reason } => {
@@ -3834,7 +4208,7 @@ impl ChatWindow {
         network: NetworkId,
         target: &str,
         text: &str,
-        notice: bool,
+        kind: Kind,
         meta: MessageMeta,
     ) {
         let own = self.own_nickname(network).unwrap_or("me").to_owned();
@@ -3844,18 +4218,16 @@ impl ChatWindow {
             .private_conversation(network, &key, target, Missing::Create)
         {
             Some(id) => {
-                self.state.append_conversation_message(
-                    id,
-                    &own,
-                    text,
-                    Kind::from_notice(notice),
-                    meta,
-                    Unread::Leave,
-                );
+                self.state
+                    .append_conversation_message(id, &own, text, kind, meta, Unread::Leave);
             }
             None => self.state.append_server_message_at(
                 network,
-                format!("→ {target} <{own}> {text}"),
+                if kind.is_action() {
+                    format!("→ {target} * {own} {text}")
+                } else {
+                    format!("→ {target} <{own}> {text}")
+                },
                 meta,
             ),
         }
@@ -3996,14 +4368,44 @@ fn notification_rules(settings: &Notifications) -> NotificationRules {
         keyword_alerts: settings.keyword_alerts,
         keywords: settings.keywords.clone(),
         private_messages: settings.private_messages,
+        channel_notices: settings.channel_notices,
         sound: settings.sound,
     }
 }
 
-/// Applies the Windows-only preference to the main chat window.
+#[cfg(target_os = "windows")]
+impl ChatWindow {
+    /// Applies the Windows-only preference to the chat window and to the open
+    /// settings and WHOIS windows, and remembers it for windows opened later.
+    /// Dialogs follow their parent window. Must not run for test windows,
+    /// whose native handle is unimplemented, so callers apply it only when
+    /// the preference is on at startup or changes.
+    fn apply_always_on_top(&mut self, enabled: bool, window: &Window, cx: &mut Context<Self>) {
+        self.always_on_top = enabled;
+        if let Err(error) = set_window_always_on_top(window, enabled) {
+            self.set_feedback(Some(error));
+        }
+        for handle in self.whois_windows.values() {
+            let _ = handle.update(cx, |_, window, _| {
+                let _ = set_window_always_on_top(window, enabled);
+            });
+        }
+        // The settings window is mid-update when it saves, so reach it after.
+        if let Some(handle) = self.settings_window {
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, _| {
+                    let _ = set_window_always_on_top(window, enabled);
+                });
+            });
+        }
+        cx.notify();
+    }
+}
+
+/// Puts a CayenChat window above (or back among) ordinary windows.
 /// Uses the native handle without changing vendored GPUI.
 #[cfg(target_os = "windows")]
-fn set_main_window_always_on_top(window: &Window, enabled: bool) -> Result<(), String> {
+fn set_window_always_on_top(window: &Window, enabled: bool) -> Result<(), String> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
@@ -4014,14 +4416,18 @@ fn set_main_window_always_on_top(window: &Window, enabled: bool) -> Result<(), S
     // explicitly call the raw-window-handle trait for the native HWND.
     let handle = HasWindowHandle::window_handle(window).map_err(|error| error.to_string())?;
     let RawWindowHandle::Win32(native) = handle.as_raw() else {
-        return Err("The main window does not have a Win32 handle".into());
+        return Err("The window does not have a Win32 handle".into());
     };
     let hwnd = native.hwnd.get() as windows_sys::Win32::Foundation::HWND;
-    let order = if enabled { HWND_TOPMOST } else { HWND_NOTOPMOST };
+    let order = if enabled {
+        HWND_TOPMOST
+    } else {
+        HWND_NOTOPMOST
+    };
     let flags = SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER;
     if unsafe { SetWindowPos(hwnd, order, 0, 0, 0, 0, flags) } == 0 {
         return Err(format!(
-            "Could not change the chat window's Z-order: {}",
+            "Could not change the window's Z-order: {}",
             std::io::Error::last_os_error()
         ));
     }
@@ -4464,6 +4870,7 @@ impl ChatWindow {
                             });
                             this.member_menu = None;
                             this.channel_menu = None;
+                            this.log_menu = None;
                             this.member_prompt = None;
                             cx.stop_propagation();
                             cx.notify();
@@ -4604,6 +5011,7 @@ impl ChatWindow {
                             });
                             this.server_menu = None;
                             this.member_menu = None;
+                            this.log_menu = None;
                             this.member_prompt = None;
                             cx.stop_propagation();
                             cx.notify();
@@ -4720,6 +5128,15 @@ impl ChatWindow {
             .track_focus(&self.log_focus)
             .on_action(cx.listener(Self::copy_log_selection))
             .on_action(cx.listener(Self::copy_log_selection_menu))
+            // A right click off the message rows (blank space or a log
+            // without rows) offers the menu without a speaker.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.open_log_menu(event.position, None, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| this.finish_log_selection()),
@@ -5176,6 +5593,79 @@ impl ChatWindow {
                 .child(div().my_1().border_t_1().border_color(theme.separator))
                 .children(moves)
         });
+        let log_menu = self.log_menu.as_ref().map(|menu| {
+            let registered = self.registered_connection(menu.network).is_ok();
+            let mut groups = vec![vec![
+                (
+                    LogMenuChoice::Copy,
+                    self.i18n.text("log_menu_copy"),
+                    self.has_log_selection(menu.conversation),
+                ),
+                (
+                    LogMenuChoice::Paste,
+                    self.i18n.text("log_menu_paste"),
+                    menu.can_paste,
+                ),
+            ]];
+            if !menu.private {
+                groups.push(vec![
+                    (
+                        LogMenuChoice::Mode,
+                        self.i18n.text("log_menu_mode"),
+                        registered,
+                    ),
+                    (
+                        LogMenuChoice::Topic,
+                        self.i18n.text("log_menu_topic"),
+                        registered,
+                    ),
+                ]);
+            }
+            groups.push(vec![(
+                LogMenuChoice::Nick,
+                self.i18n.text("log_menu_nick"),
+                registered,
+            )]);
+            if let Some(sender) = &menu.sender {
+                groups.push(vec![(
+                    LogMenuChoice::Private,
+                    self.i18n.format_nickname("log_menu_private", sender),
+                    true,
+                )]);
+            }
+            let mut popup = div()
+                .id("log-context-menu")
+                .occlude()
+                .w(px(230.))
+                .p_1()
+                .bg(theme.surface)
+                .border_1()
+                .border_color(border)
+                .shadow_md();
+            for (group, entries) in groups.into_iter().enumerate() {
+                if group > 0 {
+                    popup = popup.child(div().my_1().border_t_1().border_color(theme.separator));
+                }
+                for (index, (choice, label, enabled)) in entries.into_iter().enumerate() {
+                    popup = popup.child(
+                        div()
+                            .id(("log-menu-item", group * 8 + index))
+                            .px_2()
+                            .py_1()
+                            .child(label)
+                            .when(enabled, |d| {
+                                d.cursor_pointer()
+                                    .hover(|d| d.bg(theme.hover_strong))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.log_menu_choice(choice, window, cx)
+                                    }))
+                            })
+                            .when(!enabled, |d| d.text_color(theme.text_muted)),
+                    );
+                }
+            }
+            popup
+        });
         let member_menu = self.member_menu.as_ref().map(|menu| {
             let mut popup = div()
                 .id("member-context-menu")
@@ -5296,11 +5786,16 @@ impl ChatWindow {
             });
             let submit = self.i18n.text(match prompt.kind {
                 MemberPromptKind::Join => "channel_join",
-                MemberPromptKind::Nick => "nickname_change_submit",
+                MemberPromptKind::Nick | MemberPromptKind::Mode | MemberPromptKind::Topic => {
+                    "nickname_change_submit"
+                }
                 MemberPromptKind::PrivateMessage | MemberPromptKind::Invite => "member_submit",
             });
             div()
                 .id("member-prompt")
+                .debug_selector(|| "member-prompt".into())
+                // Clicks on the dialog must not reach the message input behind it.
+                .occlude()
                 .absolute()
                 .left(position.x - origin.x)
                 .top(position.y - origin.y)
@@ -5367,6 +5862,14 @@ impl ChatWindow {
                     }
                 }),
             )
+            // Whatever has the focus (the message input, the log, the
+            // member list), Escape closes the log menu first.
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && this.log_menu.take().is_some() {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .size_full()
             .flex()
             .text_size(px(13.))
@@ -5383,10 +5886,15 @@ impl ChatWindow {
             .when(self.can_disconnect_selected(), |d| {
                 d.on_action(cx.listener(Self::disconnect_action))
             })
-            .on_action(cx.listener(Self::reconnect_action))
+            .when(self.can_connect_selected(), |d| {
+                d.on_action(cx.listener(Self::connect_action))
+            })
+            .when(self.can_reconnect_selected(), |d| {
+                d.on_action(cx.listener(Self::reconnect_action))
+            })
             .on_action(cx.listener(Self::toggle_debug))
             .on_action(cx.listener(Self::copy_diagnostics))
-            .on_action(|_: &Quit, _, cx| cx.quit())
+            .on_action(cx.listener(|this, _: &Quit, window, cx| this.request_quit(window, cx)))
             .on_action(cx.listener(Self::paste_image))
             .child(left)
             .child(right_split)
@@ -5403,6 +5911,9 @@ impl ChatWindow {
                 self.channel_menu.as_ref().zip(channel_menu),
                 |d, (at, menu)| d.child(snapped_menu(at.position, menu)),
             )
+            .when_some(self.log_menu.as_ref().zip(log_menu), |d, (at, menu)| {
+                d.child(snapped_menu(at.position, menu))
+            })
             .when_some(member_prompt, |d, prompt| d.child(prompt))
             .when_some(nick_prompts, |d, prompts| d.child(prompts))
             .into_any_element()
@@ -5909,10 +6420,10 @@ impl ChatWindow {
         // wrapped lines return to the left edge of the text column. Reiwa
         // mode shows it on its own first line instead.
         let reiwa = style.reiwa_mode && !message.activity;
-        let prefix = if message.activity || reiwa {
+        let prefix = if message.activity || (reiwa && !message.action) {
             String::new()
         } else {
-            format!("{}: ", display::neutralize_bidi(&message.sender))
+            sender_prefix(message)
         };
         let prefix_len = prefix.len();
         let styled = styled_log_text(
@@ -6008,6 +6519,9 @@ impl ChatWindow {
         });
         // One element for the whole message, so both lines of Reiwa mode
         // share the row's alternating background.
+        // Only a message line names a speaker to open a conversation with;
+        // activity lines (JOIN, MODE, ...) offer the rest of the menu only.
+        let speaker = (!message.activity).then(|| message.sender.clone());
         let row = div()
             .w_full()
             .flex()
@@ -6016,7 +6530,14 @@ impl ChatWindow {
             .py(px(1.))
             .when(style.alternate_rows && index % 2 == 1, |d| {
                 d.bg(style.main_alt)
-            });
+            })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.open_log_menu(event.position, speaker.as_deref(), window, cx);
+                    cx.stop_propagation();
+                }),
+            );
         let row = if reiwa {
             row.children(avatar)
         } else {
@@ -6194,9 +6715,9 @@ impl ChatWindow {
             )
         } else {
             format!(
-                "{} [{network}] {}: ",
+                "{} [{network}] {}",
                 display::neutralize_bidi(&conversation.name),
-                display::neutralize_bidi(&message.sender)
+                sender_prefix(message)
             )
         };
         // Long URLs and character references are drawn as in the channel
@@ -6377,6 +6898,7 @@ impl ChatWindow {
                             let viewport = window.viewport_size();
                             this.server_menu = None;
                             this.channel_menu = None;
+                            this.log_menu = None;
                             this.member_prompt = None;
                             this.member_menu = Some(MemberMenu {
                                 position: point(
@@ -6418,29 +6940,71 @@ fn navigation_binding(key: &str, command: Command) -> KeyBinding {
     KeyBinding::new(key, Navigate { command }, Some("ChatWindow"))
 }
 
+/// The user's quit request from any window (the settings window has no
+/// handler of its own) or the macOS menu bar: asks first when switched on.
+/// The question always opens in the chat window, which is brought to the
+/// front and lives until the application quits, so the question cannot
+/// vanish with an auxiliary window that was closed before it was answered.
+fn request_quit_anywhere(cx: &mut App) {
+    request_quit_in_chat_window(cx, true);
+}
+
+/// The chat window cannot be updated while it is handling an event, which is
+/// the case when the action reached the global handler from the focused
+/// fallback prompt. That is not a reason to skip the question, so the request
+/// is retried once after the current event; if the window still cannot be
+/// updated the request is dropped rather than quitting unasked.
+fn request_quit_in_chat_window(cx: &mut App, retry: bool) {
+    let chat = cx
+        .windows()
+        .into_iter()
+        .find_map(|w| w.downcast::<ChatWindow>());
+    let Some(chat) = chat else {
+        cx.quit();
+        return;
+    };
+    if chat
+        .update(cx, |this, window, cx| this.request_quit(window, cx))
+        .is_err()
+        && retry
+    {
+        cx.defer(|cx| request_quit_in_chat_window(cx, false));
+    }
+}
+
 fn app_menus(debug_enabled: bool, i18n: &Localizer) -> Vec<Menu> {
+    // macOS keeps Settings and Quit in the application menu; Windows and Linux
+    // put them in File, with no application-named menu.
     let mut app_items = vec![
         MenuItem::action(i18n.text("menu_settings"), OpenSettings),
         MenuItem::separator(),
     ];
     #[cfg(target_os = "macos")]
-    app_items.push(MenuItem::os_submenu(
-        i18n.text("menu_services"),
-        SystemMenuType::Services,
-    ));
-    app_items.push(MenuItem::action(i18n.text("menu_quit"), Quit));
-    vec![
+    app_items.extend([
+        MenuItem::os_submenu(i18n.text("menu_services"), SystemMenuType::Services),
+        MenuItem::separator(),
+    ]);
+    let (app_menu_name, quit_label) = if cfg!(target_os = "macos") {
+        ("CayenChat".to_owned(), "menu_quit")
+    } else {
+        (i18n.text("menu_file"), "menu_exit")
+    };
+    app_items.push(MenuItem::action(i18n.text(quit_label), Quit));
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut menus = vec![
         Menu {
-            name: "CayenChat".into(),
+            name: app_menu_name.into(),
             items: app_items,
+            menu_type: None,
         },
         Menu {
             name: i18n.text("menu_connection").into(),
             items: vec![
-                MenuItem::action(i18n.text("menu_settings"), OpenSettings),
+                MenuItem::action(i18n.text("connect"), Connect),
                 MenuItem::action(i18n.text("disconnect"), Disconnect),
                 MenuItem::action(i18n.text("reconnect"), Reconnect),
             ],
+            menu_type: None,
         },
         Menu {
             name: i18n.text("menu_edit").into(),
@@ -6453,6 +7017,7 @@ fn app_menus(debug_enabled: bool, i18n: &Localizer) -> Vec<Menu> {
                 MenuItem::action(i18n.text("menu_paste"), input::Paste),
                 MenuItem::action(i18n.text("menu_select_all"), input::SelectAll),
             ],
+            menu_type: None,
         },
         Menu {
             name: i18n.text("menu_view").into(),
@@ -6467,12 +7032,21 @@ fn app_menus(debug_enabled: bool, i18n: &Localizer) -> Vec<Menu> {
                 ),
                 MenuItem::action(i18n.text("menu_copy_diagnostics"), CopyDiagnostics),
             ],
+            menu_type: None,
         },
-        Menu {
-            name: i18n.text("menu_window").into(),
-            items: vec![MenuItem::action(i18n.text("menu_settings"), OpenSettings)],
-        },
-    ]
+    ];
+    // Only macOS has a Window menu; AppKit adds the window list, full screen
+    // and the like to it, so it holds just Minimize and Zoom.
+    #[cfg(target_os = "macos")]
+    menus.push(Menu {
+        name: i18n.text("menu_window").into(),
+        items: vec![
+            MenuItem::action(i18n.text("menu_minimize"), MinimizeWindow),
+            MenuItem::action(i18n.text("menu_zoom"), ZoomWindow),
+        ],
+        menu_type: Some(SystemMenuType::Window),
+    });
+    menus
 }
 
 /// Saved key preferences, kept so a desktop key-theme change can rebind
@@ -6569,6 +7143,8 @@ fn fixed_bindings(channel_modifier: ChannelNumberModifier) -> Vec<KeyBinding> {
         KeyBinding::new("secondary-c", CopyLogSelection, Some("MainLog")),
         KeyBinding::new("secondary-q", Quit, None),
     ];
+    #[cfg(target_os = "macos")]
+    bindings.push(KeyBinding::new("secondary-m", MinimizeWindow, None));
 
     for index in 0..10 {
         let digit = (index + 1) % 10;
@@ -6681,7 +7257,39 @@ fn main() {
         desktop::watch(cx);
         apply_shortcuts(ShortcutPrefs::from(&saved), cx);
         cx.set_menus(app_menus(false, &Localizer::new(Language::System)));
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        // Reached when no chat window handles it, e.g. from the settings
+        // window or the menu bar on macOS.
+        cx.on_action(|_: &Quit, cx| request_quit_anywhere(cx));
+        // macOS Dock "Quit" is the user's request too; the system's own
+        // shutdown and `cx.quit()` never reach this handler.
+        cx.on_quit_request(|cx| {
+            let Some(chat) = cx
+                .windows()
+                .into_iter()
+                .find_map(|w| w.downcast::<ChatWindow>())
+            else {
+                return true;
+            };
+            !chat
+                .update(cx, |this, window, cx| this.ask_before_quit(window, cx))
+                .unwrap_or(false)
+        });
+        // Global actions run inside the active window's update, so updating
+        // that window again here fails; do it once the dispatch has finished.
+        cx.on_action(|_: &MinimizeWindow, cx| {
+            cx.defer(|cx| {
+                if let Some(window) = cx.active_window() {
+                    let _ = window.update(cx, |_, window, _| window.minimize_window());
+                }
+            });
+        });
+        cx.on_action(|_: &ZoomWindow, cx| {
+            cx.defer(|cx| {
+                if let Some(window) = cx.active_window() {
+                    let _ = window.update(cx, |_, window, _| window.zoom_window());
+                }
+            });
+        });
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -6711,6 +7319,8 @@ fn main() {
         let window_bounds = restored.map(|restored| restored.bounds).unwrap_or_else(|| {
             WindowBounds::Windowed(Bounds::centered(None, size(px(960.), px(600.)), cx))
         });
+        #[cfg(target_os = "windows")]
+        let always_on_top = saved.always_on_top;
         let chat_window = cx
             .open_window(
                 WindowOptions {
@@ -6727,6 +7337,14 @@ fn main() {
             )
             .expect("could not open CayenChat window");
         cx.activate(true);
+        // Off is the default state, so only an enabled preference touches the
+        // native window; the settings window below follows it.
+        #[cfg(target_os = "windows")]
+        if always_on_top {
+            let _ = chat_window.update(cx, |chat, window, cx| {
+                chat.apply_always_on_top(true, window, cx)
+            });
+        }
         // Settings open when nothing connects at startup or a saved server
         // cannot start, showing the first such server; valid servers still
         // connect.
@@ -6772,22 +7390,27 @@ fn main() {
         // GPUI's `activate` does nothing on Windows, so a window opened by
         // hand can land behind others (#259). `activate_window` is queued and
         // runs after this callback, so it goes last and to the topmost window;
-        // a login launch stays out of the user's way.
+        // a login launch stays out of the user's way. The chat window is
+        // fronted even when settings open on top of it (#354), or it would
+        // stay behind other apps.
         #[cfg(target_os = "windows")]
-        match autostart::startup_front(autostart::launched_by_registration(), settings_opened) {
-            Some(autostart::StartupFront::Settings) => {
-                let settings = chat_window
-                    .update(cx, |chat, _, _| chat.settings_window)
-                    .ok()
-                    .flatten();
-                if let Some(settings) = settings {
-                    let _ = settings.update(cx, |_, window, _| window.activate_window());
+        for front in
+            autostart::startup_front(autostart::launched_by_registration(), settings_opened)
+        {
+            match front {
+                autostart::StartupFront::Settings => {
+                    let settings = chat_window
+                        .update(cx, |chat, _, _| chat.settings_window)
+                        .ok()
+                        .flatten();
+                    if let Some(settings) = settings {
+                        let _ = settings.update(cx, |_, window, _| window.activate_window());
+                    }
+                }
+                autostart::StartupFront::Chat => {
+                    let _ = chat_window.update(cx, |_, window, _| window.activate_window());
                 }
             }
-            Some(autostart::StartupFront::Chat) => {
-                let _ = chat_window.update(cx, |_, window, _| window.activate_window());
-            }
-            None => {}
         }
         #[cfg(not(target_os = "windows"))]
         let _ = settings_opened;
@@ -6890,3 +7513,11 @@ mod navigation_binding_tests;
 #[cfg(test)]
 #[path = "main_tests/bidi_display_tests.rs"]
 mod bidi_display_tests;
+
+#[cfg(test)]
+#[path = "main_tests/log_menu_tests.rs"]
+mod log_menu_tests;
+
+#[cfg(test)]
+#[path = "main_tests/menu_tests.rs"]
+mod menu_tests;

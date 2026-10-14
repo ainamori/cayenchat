@@ -27,11 +27,13 @@ pub const DUPLICATE_KEYS_PER_CONVERSATION: usize = 512;
 /// length is hashed as well.
 const FINGERPRINT_TEXT_BYTES: usize = 512;
 
-/// Whether a line of text was sent as a message or as a NOTICE.
+/// Whether a line of text was sent as a message, as a NOTICE or as a `/me`
+/// action (the text is then the action's own text).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Message,
     Notice,
+    Action,
 }
 
 impl Kind {
@@ -42,6 +44,10 @@ impl Kind {
 
     pub fn is_notice(self) -> bool {
         self == Self::Notice
+    }
+
+    pub fn is_action(self) -> bool {
+        self == Self::Action
     }
 }
 
@@ -99,6 +105,8 @@ pub struct TimelineLine {
     /// As shown, including any notice marker.
     pub text: String,
     pub notice: bool,
+    /// A `/me` action; `text` is the action's own text.
+    pub action: bool,
     pub meta: MessageMeta,
 }
 
@@ -184,6 +192,7 @@ impl DuplicateFilter {
         1u8.hash(&mut hasher);
         timestamp.hash(&mut hasher);
         message.activity.hash(&mut hasher);
+        message.action.hash(&mut hasher);
         message.sender.hash(&mut hasher);
         let text = message.text.as_bytes();
         text.len().hash(&mut hasher);
@@ -216,6 +225,7 @@ mod tests {
             activity: false,
             alert: false,
             notice: false,
+            action: false,
             provenance,
             delivery_failed: false,
         }

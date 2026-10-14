@@ -260,6 +260,10 @@ pub struct Message {
     /// Received as a NOTICE (the text also carries a `[NOTICE]` marker); drawn
     /// in the notice color.
     pub notice: bool,
+    /// A `/me` action (IRC: CTCP ACTION). `text` holds only the action's own
+    /// text (`waves`); the log draws it as `* alice waves`. Decided once when
+    /// the message arrives.
+    pub action: bool,
     pub provenance: Provenance,
     /// Our own message the server rejected or never confirmed. Only set
     /// when the source confirms sends (IRC: `echo-message`).

@@ -57,10 +57,17 @@ use std::{
     ptr,
     rc::Rc,
     slice, str,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use strum::IntoEnumIterator;
 use util::ResultExt;
+
+/// Set by `Platform::quit`: the application itself asked to terminate, so
+/// `applicationShouldTerminate:` must not ask the quit-request callback again.
+static APP_INITIATED_QUIT: AtomicBool = AtomicBool::new(false);
 
 #[allow(non_upper_case_globals)]
 const NSUTF8StringEncoding: NSUInteger = 4;
@@ -93,6 +100,10 @@ unsafe fn build_classes() {
             decl.add_method(
                 sel!(applicationShouldHandleReopen:hasVisibleWindows:),
                 should_handle_reopen as extern "C" fn(&mut Object, Sel, id, bool),
+            );
+            decl.add_method(
+                sel!(applicationShouldTerminate:),
+                should_terminate as extern "C" fn(&mut Object, Sel, id) -> NSUInteger,
             );
             decl.add_method(
                 sel!(applicationWillTerminate:),
@@ -168,6 +179,7 @@ pub(crate) struct MacPlatformState {
     reopen: Option<Box<dyn FnMut()>>,
     on_keyboard_layout_change: Option<Box<dyn FnMut()>>,
     quit: Option<Box<dyn FnMut()>>,
+    quit_request: Option<Box<dyn FnMut() -> bool>>,
     menu_command: Option<Box<dyn FnMut(&dyn Action)>>,
     validate_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
     will_open_menu: Option<Box<dyn FnMut()>>,
@@ -209,6 +221,7 @@ impl MacPlatform {
             metadata_pasteboard_type: unsafe { ns_string("zed-metadata") },
             reopen: None,
             quit: None,
+            quit_request: None,
             menu_command: None,
             validate_menu_command: None,
             will_open_menu: None,
@@ -267,7 +280,7 @@ impl MacPlatform {
                 menu_item.setSubmenu_(menu);
                 application_menu.addItem_(menu_item);
 
-                if menu_config.name == "Window" {
+                if menu_config.menu_type == Some(SystemMenuType::Window) {
                     let app: id = msg_send![APP_CLASS, sharedApplication];
                     app.setWindowsMenu_(menu);
                 }
@@ -414,7 +427,7 @@ impl MacPlatform {
                     actions.push(action.boxed_clone());
                     item
                 }
-                MenuItem::Submenu(Menu { name, items }) => {
+                MenuItem::Submenu(Menu { name, items, .. }) => {
                     let item = NSMenuItem::new(nil).autorelease();
                     let submenu = NSMenu::new(nil).autorelease();
                     submenu.setDelegate_(delegate);
@@ -436,6 +449,10 @@ impl MacPlatform {
                         SystemMenuType::Services => {
                             let app: id = msg_send![APP_CLASS, sharedApplication];
                             app.setServicesMenu_(item);
+                        }
+                        SystemMenuType::Window => {
+                            let app: id = msg_send![APP_CLASS, sharedApplication];
+                            app.setWindowsMenu_(submenu);
                         }
                     }
 
@@ -510,6 +527,7 @@ impl Platform for MacPlatform {
 
         use super::dispatcher::{dispatch_get_main_queue, dispatch_sys::dispatch_async_f};
 
+        APP_INITIATED_QUIT.store(true, Ordering::SeqCst);
         unsafe {
             dispatch_async_f(dispatch_get_main_queue(), ptr::null_mut(), Some(quit));
         }
@@ -873,6 +891,10 @@ impl Platform for MacPlatform {
 
     fn on_quit(&self, callback: Box<dyn FnMut()>) {
         self.0.lock().quit = Some(callback);
+    }
+
+    fn on_quit_request(&self, callback: Box<dyn FnMut() -> bool>) {
+        self.0.lock().quit_request = Some(callback);
     }
 
     fn on_reopen(&self, callback: Box<dyn FnMut()>) {
@@ -1415,6 +1437,51 @@ extern "C" fn should_handle_reopen(this: &mut Object, _: Sel, _: id, has_open_wi
             callback();
             platform.0.lock().reopen.get_or_insert(callback);
         }
+    }
+}
+
+/// Whether the pending terminate request comes from the system: a shutdown,
+/// restart or log out arrives as a quit Apple event carrying a reason other
+/// than the plain "quit". A Dock "Quit" carries none (or the plain one).
+unsafe fn terminate_is_from_system() -> bool {
+    unsafe {
+        let manager: id = msg_send![class!(NSAppleEventManager), sharedAppleEventManager];
+        let event: id = msg_send![manager, currentAppleEvent];
+        if event == nil {
+            return false;
+        }
+        // `kAEQuitReason` is 'why?'.
+        let reason: id = msg_send![event, attributeDescriptorForKeyword: 0x7768793fu32];
+        if reason == nil {
+            return false;
+        }
+        let code: u32 = msg_send![reason, enumCodeValue];
+        // 'quit' is kAEQuitAll; 0 is no reason.
+        code != 0 && code != 0x7175_6974
+    }
+}
+
+/// `applicationShouldTerminate:`. A Dock "Quit" is a user request and may be
+/// cancelled by the quit-request callback; quits started by the application
+/// itself and by the system are never held back.
+extern "C" fn should_terminate(this: &mut Object, _: Sel, _: id) -> NSUInteger {
+    const TERMINATE_CANCEL: NSUInteger = 0;
+    const TERMINATE_NOW: NSUInteger = 1;
+    if APP_INITIATED_QUIT.load(Ordering::SeqCst) || unsafe { terminate_is_from_system() } {
+        return TERMINATE_NOW;
+    }
+    let platform = unsafe { get_mac_platform(this) };
+    let mut lock = platform.0.lock();
+    let Some(mut callback) = lock.quit_request.take() else {
+        return TERMINATE_NOW;
+    };
+    drop(lock);
+    let allowed = callback();
+    platform.0.lock().quit_request.get_or_insert(callback);
+    if allowed {
+        TERMINATE_NOW
+    } else {
+        TERMINATE_CANCEL
     }
 }
 

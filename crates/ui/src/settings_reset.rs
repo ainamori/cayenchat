@@ -25,6 +25,7 @@ impl SettingsWindow {
                     && current.restore_window_layout == defaults.restore_window_layout
                     && (!cfg!(target_os = "windows")
                         || current.always_on_top == defaults.always_on_top)
+                    && current.confirm_quit == defaults.confirm_quit
                     && current.shorten_amazon_urls == defaults.shorten_amazon_urls
                     && current.conversation_log == defaults.conversation_log
                     && (cfg!(target_os = "macos")
@@ -86,6 +87,7 @@ impl SettingsWindow {
                 if cfg!(target_os = "windows") {
                     values.always_on_top = defaults.always_on_top;
                 }
+                values.confirm_quit = defaults.confirm_quit;
                 values.shorten_amazon_urls = defaults.shorten_amazon_urls;
                 values.conversation_log = defaults.conversation_log;
                 // Settings hidden on this platform keep their saved values.
@@ -343,9 +345,11 @@ mod tests {
             form.settings
                 .keywords
                 .update(cx, |field, cx| field.set_text("cat", cx));
+            form.settings.values.notifications.channel_notices = true;
             form.reset_tab(SettingsTab::Notifications, window, cx);
         });
         form.read_with(cx, |form, cx| {
+            assert!(!form.settings.values.notifications.channel_notices);
             assert_eq!(form.settings.values.notifications, Notifications::default());
             assert_eq!(form.settings.keywords.read(cx).text(), "");
         });
@@ -368,6 +372,7 @@ mod tests {
                 if cfg!(target_os = "windows") {
                     values.always_on_top = !values.always_on_top;
                 }
+                values.confirm_quit = !values.confirm_quit;
                 values.shorten_amazon_urls = !values.shorten_amazon_urls;
                 values.conversation_log.channels = !values.conversation_log.channels;
                 values.menu_bar_auto_hide = !values.menu_bar_auto_hide;

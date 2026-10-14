@@ -2961,8 +2961,10 @@ fn highlights_and_private_messages_notify_unless_visible(cx: &mut TestAppContext
         assert!(highlights(0).is_empty());
         assert_eq!(highlights(1), [(1, "alice")]);
         assert_eq!(highlights(2), [(0, "Deploy")]);
-        // Only the action is searched, not the CTCP verb around it.
-        assert_eq!(highlights(3), [(8, "deploy")]);
+        // The line holds the action's own text, which is what is searched.
+        assert!(b.messages[3].action);
+        assert_eq!(b.messages[3].text, "deploys");
+        assert_eq!(highlights(3), [(0, "deploy")]);
         assert!(b.messages[4].is_history());
         assert!(highlights(4).is_empty());
 
@@ -3609,4 +3611,290 @@ fn switching_settings_tabs_resets_only_the_pane_scroll(cx: &mut TestAppContext) 
         );
         assert_eq!(form.read_with(cx, |f, _| f.nav_scroll.offset()), scrolled);
     }
+}
+
+#[gpui::test]
+fn quitting_asks_first_only_when_switched_on(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        crate::apply_shortcuts(crate::ShortcutPrefs::default(), cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let mut settings = crate::settings_with_channels("#a");
+    settings.language = cayenchat_storage::Language::English;
+    assert!(!settings.confirm_quit);
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    cx.run_until_parked();
+
+    // Off: closing the window goes straight on, with no question.
+    assert!(cx.simulate_close());
+    assert!(!cx.has_pending_prompt());
+
+    chat.update(cx, |chat, _| chat.confirm_quit = true);
+    let input = chat.read_with(cx, |chat, _| chat.inputs[&chat.state.selection()].clone());
+    cx.update(|window, cx| window.focus(&input.focus_handle(cx)));
+    cx.simulate_input("unsent");
+
+    // On: the window stays and one question opens, however often asked.
+    assert!(!cx.simulate_close());
+    assert!(cx.has_pending_prompt());
+    let (title, detail) = cx.pending_prompt().unwrap();
+    assert_eq!(title, "Quit CayenChat?");
+    assert!(detail.contains("quits the application"), "{detail}");
+    assert!(!cx.simulate_close());
+    cx.dispatch_action(super::Quit);
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(!cx.has_pending_prompt(), "asked once");
+
+    // Cancelled: the draft and the focus are where they were, and the next
+    // request asks again.
+    input.read_with(cx, |input, _| assert_eq!(input.text(), "unsent"));
+    cx.update(|window, cx| assert!(input.focus_handle(cx).is_focused(window)));
+    chat.read_with(cx, |chat, _| assert!(!chat.quit_prompt_open));
+    cx.dispatch_action(super::Quit);
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn quit_from_another_window_asks_in_the_chat_window(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        crate::apply_shortcuts(crate::ShortcutPrefs::default(), cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let mut settings = crate::settings_with_channels("#a");
+    settings.language = cayenchat_storage::Language::English;
+    settings.confirm_quit = true;
+    let app = cx.clone();
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    cx.run_until_parked();
+
+    // The settings window has no Quit handler, so the action ends up here.
+    app.update(crate::request_quit_anywhere);
+    assert!(cx.has_pending_prompt());
+    chat.read_with(cx, |chat, _| assert!(chat.quit_prompt_open));
+    app.update(crate::request_quit_anywhere);
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(!cx.has_pending_prompt(), "asked once");
+}
+
+#[gpui::test]
+fn closing_another_window_during_the_question_keeps_quitting_possible(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        crate::apply_shortcuts(crate::ShortcutPrefs::default(), cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let mut settings = crate::settings_with_channels("#a");
+    settings.language = cayenchat_storage::Language::English;
+    settings.confirm_quit = true;
+    let app = cx.clone();
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    cx.run_until_parked();
+    // A second window, opened last so that it is the active one, as the
+    // settings window is when the user presses Ctrl+Q there.
+    let other = app.update(|cx| {
+        cx.open_window(gpui::WindowOptions::default(), |_, cx| {
+            cx.new(|_| gpui::Empty)
+        })
+        .unwrap()
+    });
+
+    app.update(crate::request_quit_anywhere);
+    assert!(cx.has_pending_prompt());
+    // The other window goes away before the question is answered.
+    other
+        .update(&mut app.clone(), |_, window, _| window.remove_window())
+        .unwrap();
+    app.update(|_| {});
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    chat.read_with(cx, |chat, _| assert!(!chat.quit_prompt_open));
+
+    // The next request asks again instead of being ignored.
+    app.update(crate::request_quit_anywhere);
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn quit_requested_while_the_chat_window_is_busy_still_asks(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        crate::apply_shortcuts(crate::ShortcutPrefs::default(), cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let mut settings = crate::settings_with_channels("#a");
+    settings.language = cayenchat_storage::Language::English;
+    settings.confirm_quit = true;
+    let app = cx.clone();
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    cx.run_until_parked();
+
+    // The global handler runs inside the chat window's own event handling
+    // when the focused fallback prompt passes Quit on; the window is then
+    // borrowed and cannot be updated.
+    app.update(|cx| {
+        let handle = cx.windows()[0].downcast::<ChatWindow>().unwrap();
+        handle
+            .update(cx, |_, _, cx| crate::request_quit_anywhere(cx))
+            .unwrap();
+    });
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt(), "asked after the event");
+    chat.read_with(cx, |chat, _| assert!(chat.quit_prompt_open));
+
+    // Asking again while the question is open and the window is busy neither
+    // quits nor opens a second question.
+    app.update(|cx| {
+        let handle = cx.windows()[0].downcast::<ChatWindow>().unwrap();
+        handle
+            .update(cx, |_, _, cx| crate::request_quit_anywhere(cx))
+            .unwrap();
+    });
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(!cx.has_pending_prompt(), "asked once");
+    chat.read_with(cx, |chat, _| assert!(!chat.quit_prompt_open));
+}
+
+#[gpui::test]
+fn actions_are_kept_as_their_own_text_on_every_path(cx: &mut TestAppContext) {
+    use cayenchat_irc_core::{Event, HistoryMessage};
+
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(crate::settings_with_channels("#a"), None, window, cx)
+    });
+    let channel_message = |text: &str, notice: bool| Event::ChannelMessage {
+        channel: "#a".into(),
+        sender: "bob".into(),
+        text: text.into(),
+        notice,
+        server_time: None,
+        msgid: None,
+        account: None,
+        replayed: false,
+    };
+    chat.update(cx, |chat, cx| {
+        chat.handle_events(
+            NetworkId(1),
+            vec![
+                Event::Registered {
+                    nickname: "alice".into(),
+                },
+                Event::Joined {
+                    channel: "#a".into(),
+                },
+                Event::HistoryRequested {
+                    channel: "#a".into(),
+                    resumed: false,
+                },
+                channel_message("\u{1}ACTION waves\u{1}", false),
+                // No closing U+0001 is still an action.
+                channel_message("\u{1}ACTION nods", false),
+                // These are not, and keep being shown as they are.
+                channel_message("\u{1}ACTION\u{1}", false),
+                channel_message("\u{1}ACTIONwaves\u{1}", false),
+                channel_message("\u{1}ACTION waves\u{1}", true),
+                Event::PrivateMessage {
+                    sender: "carol".into(),
+                    text: "\u{1}ACTION sighs\u{1}".into(),
+                    notice: false,
+                    server_time: None,
+                    msgid: None,
+                    account: None,
+                    replayed: false,
+                },
+                Event::OutgoingAccepted {
+                    local_id: Some(1),
+                    channel: "#a".into(),
+                    text: "* dances".into(),
+                    notice: false,
+                    action: Some("dances".into()),
+                },
+                Event::OutgoingConfirmed {
+                    local_id: 1,
+                    text: None,
+                    action: Some("dances!".into()),
+                    msgid: None,
+                    server_time: None,
+                },
+                Event::ChannelHistory {
+                    channel: "#a".into(),
+                    messages: vec![HistoryMessage {
+                        sender: "bob".into(),
+                        text: "\u{1}ACTION left\u{1}".into(),
+                        notice: false,
+                        server_time: None,
+                        msgid: None,
+                        account: None,
+                    }],
+                    incomplete: false,
+                },
+            ],
+            Worker::Running,
+            cx,
+        );
+        let shown = |conversation: usize| -> Vec<(bool, bool, String)> {
+            chat.state.conversations()[conversation]
+                .messages
+                .iter()
+                .filter(|message| !message.activity)
+                .map(|message| (message.action, message.notice, message.text.clone()))
+                .collect()
+        };
+        assert_eq!(
+            shown(0),
+            [
+                (true, false, "left".to_owned()),
+                (true, false, "waves".to_owned()),
+                (true, false, "nods".to_owned()),
+                (false, false, "\u{1}ACTION\u{1}".to_owned()),
+                (false, false, "\u{1}ACTIONwaves\u{1}".to_owned()),
+                (false, true, "[NOTICE] \u{1}ACTION waves\u{1}".to_owned()),
+                (true, false, "dances!".to_owned()),
+            ]
+        );
+        let private = chat.state.conversations().len() - 1;
+        assert_eq!(shown(private), [(true, false, "sighs".to_owned())]);
+    });
 }

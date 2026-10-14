@@ -28,6 +28,8 @@ pub struct NotificationRules {
     pub keyword_alerts: bool,
     pub keywords: Vec<String>,
     pub private_messages: bool,
+    /// Channel NOTICEs may notify on mentions and keywords.
+    pub channel_notices: bool,
     /// Also draw attention with a sound and the taskbar button.
     pub sound: bool,
 }
@@ -57,10 +59,14 @@ pub enum Trigger {
 
 impl NotificationRules {
     /// NOTICEs are usually automated (bots, services), so private NOTICEs
-    /// never notify; channel NOTICEs still notify on mentions and keywords.
-    /// Replayed history never notifies.
+    /// never notify; channel NOTICEs notify on mentions and keywords only
+    /// when `channel_notices` is on. Replayed history never notifies.
     pub fn trigger(&self, message: IncomingMessage) -> Option<Trigger> {
-        if !self.enabled || message.from_self || message.replayed {
+        if !self.enabled
+            || message.from_self
+            || message.replayed
+            || (message.channel && message.notice && !self.channel_notices)
+        {
             None
         } else if !message.channel {
             (self.private_messages && !message.notice).then_some(Trigger::PrivateMessage)
@@ -177,6 +183,7 @@ mod tests {
             keyword_alerts: true,
             keywords: vec!["ビルド".into(), "Deploy".into()],
             private_messages: true,
+            channel_notices: false,
             sound: false,
         }
     }
@@ -279,6 +286,52 @@ mod tests {
             ..rules
         };
         assert_eq!(no_private.trigger(private(false)), None);
+    }
+
+    #[test]
+    fn channel_notices_notify_only_when_enabled() {
+        let notice = |message| IncomingMessage {
+            notice: true,
+            ..message
+        };
+        let mention = notice(channel("me: ping", true));
+        let keyword = notice(channel("Deploy done", false));
+        let off = rules();
+        assert!(!off.channel_notices);
+        assert_eq!(off.trigger(mention), None);
+        assert_eq!(off.trigger(keyword), None);
+        // Ordinary channel messages are unaffected.
+        assert_eq!(
+            off.trigger(channel("me: ping", true)),
+            Some(Trigger::Mention)
+        );
+
+        let on = NotificationRules {
+            channel_notices: true,
+            ..off.clone()
+        };
+        assert_eq!(on.trigger(mention), Some(Trigger::Mention));
+        assert_eq!(on.trigger(keyword), Some(Trigger::Keyword));
+        let no_mentions = NotificationRules {
+            mentions: false,
+            ..on.clone()
+        };
+        assert_eq!(no_mentions.trigger(mention), None);
+        let no_keywords = NotificationRules {
+            keyword_alerts: false,
+            ..on.clone()
+        };
+        assert_eq!(no_keywords.trigger(keyword), None);
+        let replayed = IncomingMessage {
+            replayed: true,
+            ..mention
+        };
+        assert_eq!(on.trigger(replayed), None);
+        let echo = IncomingMessage {
+            from_self: true,
+            ..mention
+        };
+        assert_eq!(on.trigger(echo), None);
     }
 
     #[test]

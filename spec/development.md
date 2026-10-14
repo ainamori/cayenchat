@@ -485,8 +485,8 @@ this delay.
 ### Manual settings and UI checks
 
 1. Launch and confirm the separate settings window opens over the four-pane
-   chat window. After closing it, reopen it through **CayenChat → 接続設定…**
-   or Cmd+, on macOS; use Ctrl+, on Windows/Linux. With new settings (the
+   chat window. After closing it, reopen it through **CayenChat → 設定…**
+   or Cmd+, on macOS; use **ファイル → 設定…** or Ctrl+, on Windows/Linux. With new settings (the
    test build always starts with new settings) verify the server list says no
    servers are registered, the main log explains how to add one, and the
    drop-down offers IRCnet, IRCnet (IPv6), IRCnet (dev) and another server.
@@ -1115,7 +1115,8 @@ small IRC server on 127.0.0.1 that registers the client, offers `server-time`
 and `draft/metadata-2`, answers JOINs with topics, members and avatars, and
 then plays fixed lines in three channels and one private message, with
 today's local times from 20:30. The shown channel has an image preview, a
-mention of our nickname, a compacted long link and avatars (a few
+mention of our nickname, a compacted long link, a `/me` line (CTCP ACTION,
+shown as `* bob raises a glass ...`) and avatars (a few
 users keep the app's default one); the others are left unread, one of them
 with a mention. The avatars and the photo are drawn by the script, so nothing
 with a license of its own is involved. There is an English and a Japanese

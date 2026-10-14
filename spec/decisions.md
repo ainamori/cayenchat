@@ -1183,6 +1183,60 @@ point's reference is IRC's concern and is not a generic sync token.
 Private-message recovery, persistence and echo-message reconciliation are
 future work. Details in `architecture.md` (Channel history).
 
+## D046 — Optional confirmation before quitting (#349)
+
+**Status:** Implemented
+
+`Settings::confirm_quit` ("Confirm before quitting", Application page), off by
+default and added without a version change, so older files read as off.
+
+- **Asked:** only for the user's own quit requests: the `Quit` action (menu,
+  Cmd/Ctrl+Q) and closing the main window (× or Alt+F4, via
+  `on_window_should_close`). Closing the settings or WHOIS window is not a quit.
+- **Never asked:** SIGTERM/SIGHUP/SIGINT (`signals.rs`) and session end from the
+  OS call `cx.quit()` directly and do not pass through the question.
+- **Before the answer nothing happens:** no QUIT, no layout save, no log flush.
+  The window stays open, `quit_prompt_open` suppresses a second question, and
+  Cancel restores the focus that was in the window. "Quit" calls `cx.quit()`,
+  so `on_app_quit` runs the usual shutdown once.
+- The question uses the window prompt (`Window::prompt`). Native prompts
+  handle Esc themselves; the vendored GPUI fallback prompt (X11, Wayland)
+  was patched to treat Esc as its cancel button (`vendor/gpui/PATCHES.md`).
+- **Where it is asked:** the settings window has no Quit handler of its own;
+  the application-wide handler (`request_quit_anywhere`) opens the question in
+  the chat window and brings it to the front, so it is not hidden behind the
+  settings window. The chat window lives until the application quits, so
+  closing the settings window while the question is open cannot strand it.
+- **macOS Dock "Quit":** reaches `applicationShouldTerminate:`, which asks
+  `App::on_quit_request`; the answer "Quit" calls `cx.quit()`, which is not
+  asked again. System shutdown/restart/log out, signals and `cx.quit()` are
+  never asked. Written from the AppKit documentation; not run on macOS.
+
+## D045 — Menu structure per OS (#337)
+
+**Status:** Accepted
+
+The maintainer approved this on the issue (2026-10-13). One `app_menus()`
+definition serves the native macOS menus and the Windows/Linux in-window bar;
+only the parts that differ are split with `cfg`.
+
+- macOS: CayenChat (Settings… Cmd+,, Services, Quit Cmd+Q), Connection,
+  Edit, View, Window (Minimize Cmd+M, Zoom). Window is marked with
+  `SystemMenuType::Window` (a vendored GPUI patch) instead of matching the
+  name "Window", so its title can be translated (ウインドウ) and AppKit still
+  adds the window list and other system items.
+- Windows/Linux: File (Settings… Ctrl+,, Quit Ctrl+Q), Connection, Edit, View.
+  No application-named menu and no Window menu.
+- "Connection settings…" is now "Settings…" everywhere; it opens the whole
+  settings window and appears once.
+- Connection offers Connect, Disconnect and Reconnect. Connect applies to a
+  selected server not yet connected in this run (or when there is no server,
+  where it opens settings); Reconnect to one that has been; Disconnect while a
+  connection or scheduled retry exists. Availability is the registration of
+  the action handler on the chat and settings windows, which both menus read
+  through `is_action_available`, so the menus are not rebuilt on state changes.
+- About and Help are out of scope.
+
 ## D044 — Opt-in conversation logs in files (#313)
 
 **Status:** Accepted
