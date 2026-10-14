@@ -740,6 +740,15 @@ pub enum Event {
     Refused(String),
 }
 
+/// One operator or voice grant (`+o nick`) or removal (`-v nick`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrivilegeChange {
+    pub granted: bool,
+    /// `o` or `v`.
+    pub mode: char,
+    pub target: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChannelActivityKind {
     Joined {
@@ -756,7 +765,13 @@ pub enum ChannelActivityKind {
         to: String,
     },
     ModeChanged {
+        /// The display text; arguments may be hidden or wrongly paired.
         modes: String,
+        /// The `+o`/`-o`/`+v`/`-v` changes whose targets are certain; empty
+        /// when the mode string cannot be paired with its arguments.
+        privileges: Vec<PrivilegeChange>,
+        /// Inside an IRCv3 history batch.
+        replayed: bool,
     },
     /// `target` was removed from the channel by the actor. `own` is set
     /// when that is us.
@@ -926,6 +941,70 @@ fn redact_key_modes(modes: &[Mode<ChannelMode>]) -> Vec<Mode<ChannelMode>> {
             other => other.clone(),
         })
         .collect()
+}
+
+/// The operator and voice changes of a `MODE`, for the conversation log.
+///
+/// The parser pairs arguments with modes by its own table, which is wrong
+/// for a `-l` (no argument) and unknown for other letters, so the arguments
+/// it consumed (in order) are paired again here. Only modes whose argument
+/// count is the same on every server are understood; any other letter, a
+/// missing argument or an argument left over makes the whole line
+/// untrusted and yields nothing. `h`, `a` and `q` mean different things per
+/// server (`PREFIX`), so they are not privileges here.
+fn privilege_changes(modes: &[Mode<ChannelMode>]) -> Vec<PrivilegeChange> {
+    let mut flags = Vec::new();
+    let mut arguments = Vec::new();
+    for mode in modes {
+        let (granted, mode, argument) = match mode {
+            Mode::Plus(mode, argument) => (true, mode, argument),
+            Mode::Minus(mode, argument) => (false, mode, argument),
+            Mode::NoPrefix(_) => return Vec::new(),
+        };
+        flags.push((granted, mode));
+        arguments.extend(argument);
+    }
+    let mut arguments = arguments.into_iter();
+    let mut changes = Vec::new();
+    for (granted, mode) in flags {
+        let takes_argument = match mode {
+            ChannelMode::Oper
+            | ChannelMode::Voice
+            | ChannelMode::Ban
+            | ChannelMode::Exception
+            | ChannelMode::InviteException
+            | ChannelMode::Key => true,
+            ChannelMode::Limit => granted,
+            ChannelMode::InviteOnly
+            | ChannelMode::Moderated
+            | ChannelMode::RegisteredOnly
+            | ChannelMode::Secret
+            | ChannelMode::ProtectedTopic
+            | ChannelMode::NoExternalMessages => false,
+            _ => return Vec::new(),
+        };
+        let target = if takes_argument {
+            match arguments.next() {
+                Some(target) => Some(target),
+                None => return Vec::new(),
+            }
+        } else {
+            None
+        };
+        if let (ChannelMode::Oper | ChannelMode::Voice, Some(target)) = (mode, target)
+            && !target.is_empty()
+        {
+            changes.push(PrivilegeChange {
+                granted,
+                mode: if *mode == ChannelMode::Oper { 'o' } else { 'v' },
+                target: target.clone(),
+            });
+        }
+    }
+    if arguments.next().is_some() {
+        return Vec::new();
+    }
+    changes
 }
 
 /// Mode arguments as separate words (`MODE` after the target, or
@@ -3590,6 +3669,10 @@ fn translate_message(
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(" "),
+                privileges: privilege_changes(modes),
+                // Only a history batch: a server's own live line has no
+                // user mask but is not a replay.
+                replayed: replay.in_history_batch(&message),
             },
             server_time,
         }),

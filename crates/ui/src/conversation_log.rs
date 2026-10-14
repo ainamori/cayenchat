@@ -233,7 +233,8 @@ impl ChatWindow {
         self.write_log(record);
     }
 
-    /// Someone joined, left, was kicked… in a channel we have. Modes and
+    /// Someone joined, left, was kicked… in a channel we have, or had a
+    /// operator or voice (`+o`, `-v`) changed. Other modes, replayed ones and
     /// refused joins are not logged.
     pub(crate) fn log_channel_activity(
         &self,
@@ -261,9 +262,30 @@ impl ChatWindow {
                 };
                 (Kind::Kick, actor, body)
             }
-            ChannelActivityKind::ModeChanged { .. } | ChannelActivityKind::JoinFailed { .. } => {
+            ChannelActivityKind::ModeChanged {
+                privileges,
+                replayed,
+                ..
+            } => {
+                if *replayed {
+                    return;
+                }
+                for change in privileges {
+                    let sign = if change.granted { '+' } else { '-' };
+                    let body = format!("{sign}{} {}", change.mode, change.target);
+                    self.log_event(
+                        network,
+                        Scope::Channel,
+                        channel,
+                        Kind::Mode,
+                        actor,
+                        &body,
+                        time,
+                    );
+                }
                 return;
             }
+            ChannelActivityKind::JoinFailed { .. } => return,
         };
         self.log_event(network, Scope::Channel, channel, kind, nick, &body, time);
     }

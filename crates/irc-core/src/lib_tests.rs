@@ -1403,6 +1403,12 @@ fn local_server_registration_join_receive_and_send() {
             "alice",
             ChannelActivityKind::ModeChanged {
                 modes: "+o charlie".into(),
+                privileges: vec![PrivilegeChange {
+                    granted: true,
+                    mode: 'o',
+                    target: "charlie".into(),
+                }],
+                replayed: false,
             },
         ),
         ("bob", ChannelActivityKind::Left { reason: None }),
@@ -4748,6 +4754,115 @@ fn received_channel_keys_reach_no_event() {
     assert!(events.iter().any(|event| matches!(event,
         Event::ServerLine(line) if line == ":srv 324 alice #test +nk [redacted]")));
     assert!(events.iter().any(|event| matches!(event,
-        Event::ChannelActivity { kind: ChannelActivityKind::ModeChanged { modes }, .. }
+        Event::ChannelActivity { kind: ChannelActivityKind::ModeChanged { modes, .. }, .. }
             if modes.contains("[redacted]"))));
+}
+
+fn privileges_of(line: &str) -> Vec<String> {
+    let message: IrcMessage = line.parse().unwrap();
+    let IrcCommand::ChannelMODE(_, modes) = message.command else {
+        panic!("not a channel MODE: {line}");
+    };
+    privilege_changes(&modes)
+        .iter()
+        .map(|change| {
+            let sign = if change.granted { '+' } else { '-' };
+            format!("{sign}{} {}", change.mode, change.target)
+        })
+        .collect()
+}
+
+#[test]
+fn privilege_changes_pair_arguments_with_their_modes() {
+    assert_eq!(privileges_of("MODE #c +o alice"), ["+o alice"]);
+    assert_eq!(
+        privileges_of("MODE #c +ov-v alice bob carol"),
+        ["+o alice", "+v bob", "-v carol"]
+    );
+    // `-l` takes no argument, though the parser gives it one.
+    assert_eq!(
+        privileges_of("MODE #c -l+ov alice bob"),
+        ["+o alice", "+v bob"]
+    );
+    assert_eq!(privileges_of("MODE #c +nt-o alice"), ["-o alice"]);
+    // Keys, lists and limits are paired but not kept.
+    assert_eq!(
+        privileges_of("MODE #c +bok *!*@h alice"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        privileges_of("MODE #c +kov key alice bob"),
+        ["+o alice", "+v bob"]
+    );
+    assert_eq!(privileges_of("MODE #c +lo 5 alice"), ["+o alice"]);
+}
+
+#[test]
+fn privilege_changes_are_dropped_when_pairing_is_uncertain() {
+    // Unknown letters have an unknown argument count.
+    assert_eq!(
+        privileges_of("MODE #c +Xob private-mask alice *!*@h"),
+        Vec::<String>::new()
+    );
+    // `q` is a quiet list on some servers, `h` and `a` differ per server.
+    assert_eq!(
+        privileges_of("MODE #c +q *!*@quiet.invalid"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        privileges_of("MODE #c +hao alice bob carol"),
+        Vec::<String>::new()
+    );
+    // A missing argument, a leftover one, or a sign-less string.
+    assert_eq!(privileges_of("MODE #c +ov alice"), Vec::<String>::new());
+    assert_eq!(privileges_of("MODE #c o alice"), Vec::<String>::new());
+    assert_eq!(privileges_of("MODE #c +s"), Vec::<String>::new());
+}
+
+#[test]
+fn channel_mode_in_a_history_batch_is_marked_replayed() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut lines = BufReader::new(socket.try_clone().unwrap());
+        register_with(&mut socket, &mut lines, "batch message-tags", "NETWORK=t");
+        socket
+            .write_all(
+                b":alice!u@h JOIN #test\r\n\
+                  :srv BATCH +past znc.in/playback #test\r\n\
+                  @batch=past :op!u@h MODE #test +o old\r\n\
+                  :srv BATCH -past\r\n\
+                  :op!u@h MODE #test +o live\r\n\
+                  :srv MODE #test +v svc\r\n\
+                  :srv NOTICE alice :done\r\n",
+            )
+            .unwrap();
+        let _ = read_client_line(&mut lines);
+    });
+    let events = run_fixture(plain_config(port, sending_options()), |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, Event::PrivateMessage { text, .. } if text == "done"))
+    });
+    server.join().unwrap();
+    let seen: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::ChannelActivity {
+                kind:
+                    ChannelActivityKind::ModeChanged {
+                        privileges,
+                        replayed,
+                        ..
+                    },
+                ..
+            } => Some((privileges[0].target.as_str(), *replayed)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(seen, [("old", true), ("live", false), ("svc", false)]);
 }

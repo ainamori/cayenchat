@@ -66,6 +66,7 @@ pub enum Kind {
     Nick,
     Kick,
     Topic,
+    Mode,
 }
 
 impl Kind {
@@ -80,6 +81,7 @@ impl Kind {
             Self::Nick => "nick",
             Self::Kick => "kick",
             Self::Topic => "topic",
+            Self::Mode => "mode",
         }
     }
 }

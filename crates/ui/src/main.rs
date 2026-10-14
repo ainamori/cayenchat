@@ -140,7 +140,7 @@ fn channel_activity_text(actor: &str, kind: ChannelActivityKind) -> String {
         ChannelActivityKind::Left { reason } => with_detail(actor, "has left", reason),
         ChannelActivityKind::Quit { reason } => with_detail(actor, "has quit", reason),
         ChannelActivityKind::NickChanged { to } => format!("{actor} is now known as {to}"),
-        ChannelActivityKind::ModeChanged { modes } => {
+        ChannelActivityKind::ModeChanged { modes, .. } => {
             format!("{actor} has changed mode: {modes}")
         }
         ChannelActivityKind::Kicked {

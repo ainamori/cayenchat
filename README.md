@@ -37,7 +37,7 @@ Add a server in the settings window that opens at startup (`Cmd+,` / `Ctrl+,`), 
 
 ## Conversation logs
 
-Saving conversations to files is off by default. In the Application settings, turn on channel conversations and, separately, private conversations (they are written to your disk too), and choose the folder (by default `CayenChat/logs` in your data directory). CayenChat appends one UTF-8 text file per conversation and day, `<folder>/<server>/channels/<channel>/<date>.log` and `<folder>/<server>/private/<nick>/<date>.log`, each line being `time`, `kind` (`msg`, `action`, `notice`, `join`, `part`, `quit`, `nick`, `kick`, `topic`), `nick` and `text` separated by tabs. Passwords, the server log and history fetched from the server are never saved. Turning a log off stops writing and keeps the files. The format is specified in [D044](spec/decisions.md).
+Saving conversations to files is off by default. In the Application settings, turn on channel conversations and, separately, private conversations (they are written to your disk too), and choose the folder (by default `CayenChat/logs` in your data directory). CayenChat appends one UTF-8 text file per conversation and day, `<folder>/<server>/channels/<channel>/<date>.log` and `<folder>/<server>/private/<nick>/<date>.log`, each line being `time`, `kind` (`msg`, `action`, `notice`, `join`, `part`, `quit`, `nick`, `kick`, `topic`, `mode`), `nick` and `text` separated by tabs. Of mode changes only operator and voice changes (`+o nick`) are saved; keys, bans and other modes are not. Passwords, the server log and history fetched from the server are never saved. Turning a log off stops writing and keeps the files. The format is specified in [D044](spec/decisions.md).
 
 ## Customizing UI text
 
