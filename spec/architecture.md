@@ -306,7 +306,9 @@ palette: picking writes the field, typing in the field moves the picker, a
 palette color is applied by a click and removed by a right-click, and "Save to
 palette" adds the picked color (24 at most, no repeats). There the picker has
 no `#RRGGBB` field of its own (the row has one) and closes when the settings
-tab changes. Each picker acts only
+tab changes. A double click on a row's field selects its whole text
+(`TextInput::select_all_on_double_click`, set only on these fields); other
+inputs keep the plain click behavior. Each picker acts only
 on its own drags: GPUI delivers a
 drag's moves to every element that listens for that drag type, so the drag
 carries the picker's entity id.
