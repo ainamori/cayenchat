@@ -250,3 +250,67 @@ fn selecting_decoded_text_copies_the_characters_shown(cx: &mut TestAppContext) {
         Some("🍒🍒 hi")
     );
 }
+
+#[gpui::test]
+fn copying_an_action_adds_the_prefix_only_when_it_is_selected_whole(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let settings = crate::settings_with_channels("#a");
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    let id = chat.update(cx, |chat, cx| {
+        chat.handle_events(
+            NetworkId(1),
+            vec![
+                Event::Registered {
+                    nickname: "me".into(),
+                },
+                Event::Joined {
+                    channel: "#a".into(),
+                },
+                Event::ChannelMessage {
+                    channel: "#a".into(),
+                    sender: "bob".into(),
+                    text: "\u{1}ACTION waves\u{1}".into(),
+                    notice: false,
+                    server_time: None,
+                    msgid: None,
+                    account: None,
+                    replayed: false,
+                },
+            ],
+            Worker::Running,
+            cx,
+        );
+        let channel = chat.state.conversations()[0].id;
+        chat.state
+            .dispatch(cayenchat_app::Command::SelectChannel(channel));
+        assert_eq!(
+            chat.state.selected_channel().unwrap().messages[0].text,
+            "waves"
+        );
+        channel
+    });
+    let copied = |from: usize, to: usize, cx: &mut gpui::VisualTestContext| {
+        chat.update(cx, |chat, cx| {
+            chat.log_selection = Some(crate::LogSelection {
+                channel: id,
+                anchor: crate::LogPosition { row: 0, byte: from },
+                cursor: crate::LogPosition { row: 0, byte: to },
+            });
+            chat.copy_selected_log(cx);
+        });
+        cx.read_from_clipboard().and_then(|item| item.text())
+    };
+    assert_eq!(copied(0, 5, cx).as_deref(), Some("* bob waves"));
+    assert_eq!(copied(0, 1, cx).as_deref(), Some("w"));
+    assert_eq!(copied(1, 4, cx).as_deref(), Some("ave"));
+    assert_eq!(copied(1, 5, cx).as_deref(), Some("aves"));
+}

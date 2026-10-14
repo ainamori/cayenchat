@@ -2878,9 +2878,13 @@ impl ChatWindow {
             .filter_map(|row| {
                 channel.messages.get(row).map(|message| {
                     let range = selection.range(row, message.text.len()).unwrap_or(0..0);
-                    // An action copied from its start keeps the `* alice`
-                    // that makes it a `/me`.
-                    let lead = if message.action && range.start == 0 && !range.is_empty() {
+                    // An action copied whole keeps the `* alice` that makes it
+                    // a `/me`; a part of it is copied as selected.
+                    let lead = if message.action
+                        && range.start == 0
+                        && range.end == message.text.len()
+                        && !range.is_empty()
+                    {
                         sender_prefix(message)
                     } else {
                         String::new()
