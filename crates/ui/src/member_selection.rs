@@ -213,6 +213,17 @@ impl MemberSelection {
         }
     }
 
+    /// How many members of `conversation` are chosen. Chosen members who left
+    /// are dropped with every new roster (`retain_present`), so this needs no
+    /// roster.
+    pub fn count(&self, conversation: ConversationId) -> usize {
+        if self.conversation == Some(conversation) {
+            self.chosen.len()
+        } else {
+            0
+        }
+    }
+
     /// The chosen members of `conversation` that are still in `members`, as
     /// plain nicknames in list order.
     pub fn nicknames(
@@ -290,6 +301,20 @@ mod tests {
         let later = ["@alice", "@op", "dave"].map(str::to_owned).to_vec();
         assert_eq!(selection.nicknames(A, &later), ["alice"]);
         assert!(selection.contains(A, "@alice"));
+    }
+
+    #[test]
+    fn count_is_the_chosen_members_of_that_channel_only() {
+        let (mut selection, members) = (MemberSelection::default(), roster());
+        assert_eq!(selection.count(A), 0);
+        selection.click(A, &members, 2, Click::Only);
+        assert_eq!(selection.count(A), 1);
+        selection.click(A, &members, 3, Click::Toggle);
+        assert_eq!(selection.count(A), 2);
+        assert_eq!(selection.count(B), 0);
+        // Members who left are dropped, so the count needs no roster.
+        selection.retain_present(A, &["@alice".to_owned()]);
+        assert_eq!(selection.count(A), 1);
     }
 
     #[test]

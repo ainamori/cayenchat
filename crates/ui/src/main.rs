@@ -2478,9 +2478,18 @@ impl ChatWindow {
                 .conversations()
                 .iter()
                 .any(|conversation| self.state.is_unread(conversation.id)),
-            can_whois: registered && self.whois_target().is_some(),
+            can_whois: registered && self.can_whois_selected(),
             can_upload: self.inputs.contains_key(&self.state.selection()),
         }
+    }
+
+    /// Whether `whois_target` has someone, without walking the member list,
+    /// which this runs for on every chat notification.
+    fn can_whois_selected(&self) -> bool {
+        let Some(conversation) = self.state.selected_channel() else {
+            return false;
+        };
+        conversation.is_private() || self.member_selection.count(conversation.id) == 1
     }
 
     /// Whom the toolbar's WHOIS asks about: the peer of a private

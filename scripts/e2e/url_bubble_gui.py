@@ -77,6 +77,7 @@ def write_settings(path, port):
     with open(path, "w") as file:
         json.dump({
             "version": 15, "language": "english", "theme": "light", "linux_display": "x11",
+            "show_toolbar": False,  # keeps the positions below
             "credential_backend": "local_file", "selected_server": "local",
             "servers": [{
                 "id": "local", "host": "127.0.0.1", "port": port, "use_tls": False,
