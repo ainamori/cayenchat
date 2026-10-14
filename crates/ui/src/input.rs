@@ -179,18 +179,18 @@ impl TextInput {
         cx.notify();
     }
 
-    /// Inserts `link` at the cursor, replacing any selection and keeping one
-    /// space between it and neighbouring text. Undo restores the previous text.
+    /// Inserts `link` at the cursor without replacing any selection (which is
+    /// dropped), keeping one space between it and neighbouring text. The cursor
+    /// stays where it was, before the inserted text. Undo restores the
+    /// previous text.
     pub fn insert_link(&mut self, link: &str, cx: &mut Context<Self>) {
         self.record_edit();
-        let range = self.selected_range.clone();
-        let before = self.content[..range.start].chars().next_back();
-        let after = self.content[range.end..].chars().next();
+        let at = self.cursor_offset();
+        let before = self.content[..at].chars().next_back();
+        let after = self.content[at..].chars().next();
         let text = cayenchat_app::attachments::link_insertion(before, after, link);
-        self.content =
-            (self.content[..range.start].to_owned() + &text + &self.content[range.end..]).into();
-        let cursor = range.start + text.len();
-        self.selected_range = cursor..cursor;
+        self.content = (self.content[..at].to_owned() + &text + &self.content[at..]).into();
+        self.selected_range = at..at;
         self.selection_reversed = false;
         self.marked_range = None;
         self.completion = None;
@@ -1434,6 +1434,45 @@ mod tests {
                 format!("a {LONG_AMAZON} b")
             );
         }
+    }
+
+    #[gpui::test]
+    fn inserted_links_leave_the_cursor_in_place(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::new(
+                cayenchat_storage::ThemeMode::Light,
+                gpui::WindowAppearance::Light,
+                &cayenchat_storage::Appearance::default(),
+            ));
+        });
+        let (input, cx) = cx.add_window_view(|_, cx| TextInput::new_live("", cx));
+        // (text, selection, expected text, expected cursor)
+        let cases = [
+            ("", 0..0, "L", 0),
+            ("画像はこちら", 18..18, "画像はこちら L", 18),
+            ("画像はこちら", 0..0, "L 画像はこちら", 0),
+            ("これは参考資料です", 9..9, "これは L 参考資料です", 9),
+            ("a b", 2..2, "a L b", 2),
+            ("a b", 1..1, "a L b", 1),
+            // A selection is kept as text; the link goes to the cursor end.
+            ("keep me", 0..4, "keep L me", 4),
+        ];
+        for (text, selection, expected, cursor) in cases {
+            input.update(cx, |input, cx| {
+                input.content = text.into();
+                input.selected_range = selection;
+                input.insert_link("L", cx);
+                assert_eq!(input.text(), expected, "{text:?}");
+                assert_eq!(input.selected_range, cursor..cursor, "{text:?}");
+            });
+        }
+        input.update_in(cx, |input, window, cx| {
+            input.content = "abc".into();
+            input.selected_range = 1..1;
+            input.insert_link("L", cx);
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), "abc");
+        });
     }
 
     #[test]

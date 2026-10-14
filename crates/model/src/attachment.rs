@@ -64,6 +64,13 @@ impl ImageFormat {
         }
     }
 
+    /// File name extensions of the formats [`sniff`](Self::sniff) accepts,
+    /// for a file dialog to offer only those files. The check on the content
+    /// stays the authority: a name proves nothing.
+    pub const FILE_EXTENSIONS: &'static [&'static str] = &[
+        "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "heic", "heif", "avif",
+    ];
+
     /// Identifies the format from file content, not from a name or a
     /// declared type, so a renamed file cannot pass as an image.
     pub fn sniff(bytes: &[u8]) -> Option<Self> {
@@ -207,6 +214,23 @@ mod tests {
             ImageFormat::sniff(b"\xff\xd8\xff\xe0"),
             Some(ImageFormat::Jpeg)
         );
+    }
+
+    #[test]
+    fn the_file_dialog_offers_every_format_it_accepts() {
+        for format in [
+            ImageFormat::Png,
+            ImageFormat::Jpeg,
+            ImageFormat::Gif,
+            ImageFormat::Webp,
+            ImageFormat::Bmp,
+            ImageFormat::Tiff,
+            ImageFormat::Heic,
+            ImageFormat::Heif,
+            ImageFormat::Avif,
+        ] {
+            assert!(ImageFormat::FILE_EXTENSIONS.contains(&format.extension()));
+        }
     }
 
     fn ftyp(major: &[u8; 4], compatible: &[&[u8; 4]]) -> Vec<u8> {

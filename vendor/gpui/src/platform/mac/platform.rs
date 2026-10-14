@@ -768,6 +768,19 @@ impl Platform for MacPlatform {
                         let _: () = msg_send![panel, setPrompt: ns_string(&prompt)];
                     }
 
+                    // `allowedFileTypes` takes extensions and needs no
+                    // UniformTypeIdentifiers symbols; it is deprecated but
+                    // still honored by current macOS.
+                    if let Some(filter) = &options.filter {
+                        let extensions: Vec<id> = filter
+                            .extensions
+                            .iter()
+                            .map(|extension| ns_string(extension))
+                            .collect();
+                        let types = NSArray::arrayWithObjects(nil, &extensions);
+                        let _: () = msg_send![panel, setAllowedFileTypes: types];
+                    }
+
                     let _: () = msg_send![panel, beginWithCompletionHandler: block];
                 }
             })

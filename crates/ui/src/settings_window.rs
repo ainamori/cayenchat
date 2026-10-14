@@ -1063,12 +1063,28 @@ impl SettingsWindow {
     /// values back. Edits this window could not save yet are kept.
     /// Takes over the server order the file has, keeping every other edit
     /// in the form, so that saving cannot put back an older order.
+    /// The toolbar's visibility, which the chat window's View menu changes
+    /// without this window, is taken over the same way.
     fn follow_saved_server_order(&mut self) {
         let Ok(Some(file)) = settings_file::load() else {
             return;
         };
+        self.saved.show_toolbar = file.show_toolbar;
+        self.settings.values.show_toolbar = file.show_toolbar;
         if follow_server_order(&mut self.saved.servers, &file.servers) {
             follow_server_order(&mut self.settings.values.servers, &file.servers);
+        }
+    }
+
+    /// Shows the "keep on top" value the toolbar's button just saved, so the
+    /// checkbox follows it and a later save does not put the old one back.
+    /// Other edits in the form are kept.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn follow_saved_file(&mut self, cx: &mut Context<Self>) {
+        if let Ok(Some(file)) = settings_file::load() {
+            self.saved.always_on_top = file.always_on_top;
+            self.settings.values.always_on_top = file.always_on_top;
+            cx.notify();
         }
     }
 
@@ -1311,6 +1327,8 @@ impl SettingsWindow {
         let shortcuts_changed = ShortcutPrefs::from(previous) != shortcuts;
         let menu_bar_changed = previous.menu_bar_auto_hide != saved.menu_bar_auto_hide;
         let menu_bar_always = !saved.menu_bar_auto_hide;
+        let toolbar_changed = previous.show_toolbar != saved.show_toolbar;
+        let show_toolbar = saved.show_toolbar;
         let provider = saved.image_upload.provider.clone();
         let shorten_amazon_urls = saved.shorten_amazon_urls;
         let rules = notification_rules(&saved.notifications);
@@ -1330,6 +1348,9 @@ impl SettingsWindow {
             if menu_bar_changed {
                 owner.menu_bar.set_always(menu_bar_always);
                 cx.notify();
+            }
+            if toolbar_changed {
+                owner.set_toolbar_shown(show_toolbar, cx);
             }
             if layout_changed {
                 owner.restore_layout = restore_layout;

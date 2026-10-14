@@ -133,6 +133,9 @@ class Server:
         if every and self.sent_messages % every == 0:
             link = self.sent_messages // every % self.args.image_links
             text = f"see https://images.cayenchat.test/img{link:03d}.png"
+        notify = self.args.notify_every
+        if notify and self.sent_messages % notify == 0:
+            text = f"perfclient: {text}"
         return f":{sender}!{sender}@load.invalid PRIVMSG {channel} :{text}"
 
     # --- client handling ------------------------------------------------------
@@ -413,6 +416,9 @@ async def main():
     parser.add_argument("--image-every", type=int, default=0,
                         help="every Nth message carries an image link (0: none)")
     parser.add_argument("--image-links", type=int, default=120, help="distinct image links")
+    parser.add_argument("--notify-every", type=int, default=0,
+                        help="every Nth message addresses the nick 'perfclient', "
+                        "the one run_baseline.py sets (0: none)")
     args = parser.parse_args()
     server = Server(args)
     irc = await asyncio.start_server(server.handle_client, "127.0.0.1", args.port)

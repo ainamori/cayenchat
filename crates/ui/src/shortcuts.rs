@@ -108,6 +108,12 @@ pub const ACTIONS: &[ShortcutAction] = &[
         Command::NextUnreadChannel,
         per_platform!(&["ctrl-tab", "alt-space"], &["ctrl-tab"]),
     ),
+    // M for mention; unused by the text input and the menu access keys.
+    action(
+        "next_notified_message",
+        Command::NextNotifiedMessage,
+        per_platform!(&["cmd-shift-m"], &["ctrl-shift-m"]),
+    ),
     action(
         "previous_selected_channel",
         Command::PreviousSelectedChannel,
@@ -322,6 +328,7 @@ mod tests {
             ("alt-shift-space", Command::PreviousUnreadChannel),
             ("ctrl-tab", Command::NextUnreadChannel),
             ("alt-space", Command::NextUnreadChannel),
+            ("cmd-shift-m", Command::NextNotifiedMessage),
             ("alt-tab", Command::PreviousSelectedChannel),
         ];
         #[cfg(not(target_os = "macos"))]
@@ -336,6 +343,7 @@ mod tests {
             ("ctrl-alt-pagedown", Command::NextActiveServer),
             ("ctrl-shift-tab", Command::PreviousUnreadChannel),
             ("ctrl-tab", Command::NextUnreadChannel),
+            ("ctrl-shift-m", Command::NextNotifiedMessage),
             ("alt-left", Command::PreviousSelectedChannel),
         ];
         let expected: Vec<(String, Command)> = expected

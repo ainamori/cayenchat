@@ -2207,3 +2207,176 @@ fn actions_keep_their_own_text_and_kind_on_every_path() {
     let log = state.server_messages(network);
     assert_eq!(log.last().unwrap().text, "#elsewhere * bob waves");
 }
+
+/// Adds a line to `name` of network 1 and notes it as notified.
+fn notified(state: &mut AppState, name: &str, text: &str) -> ConversationId {
+    state.append_channel_message(
+        NetworkId(1),
+        name,
+        "bob",
+        text,
+        Kind::Message,
+        Provenance::Live,
+    );
+    let id = state.channel_id(NetworkId(1), name).unwrap();
+    state.note_attention(id);
+    id
+}
+
+#[test]
+fn notified_lines_are_visited_oldest_first_across_conversations_then_stop() {
+    let mut state = AppState::live("irc.example.org".into(), vec!["#a".into(), "#b".into()]);
+    let a = state.channel_id(NetworkId(1), "#a").unwrap();
+    let b = state.channel_id(NetworkId(1), "#b").unwrap();
+    let query = state
+        .private_conversation(NetworkId(1), "carol", "carol", Missing::Create)
+        .unwrap();
+    notified(&mut state, "#a", "first");
+    notified(&mut state, "#b", "second");
+    state.append_conversation_message(
+        query,
+        "carol",
+        "third",
+        Kind::Message,
+        MessageMeta::live(),
+        Unread::Mark,
+    );
+    state.note_attention(query);
+    notified(&mut state, "#a", "fourth");
+    assert!(state.has_attention());
+
+    let mut visited = Vec::new();
+    while state.has_attention() {
+        state.dispatch(Command::NextNotifiedMessage);
+        let (id, sequence) = state.take_reveal().expect("a line to reveal");
+        assert_eq!(state.selection(), Selection::Channel(id));
+        let text = &state
+            .conversation(id)
+            .unwrap()
+            .messages
+            .iter()
+            .find(|message| message.sequence == sequence)
+            .unwrap()
+            .text;
+        visited.push((id, text.clone()));
+    }
+    assert_eq!(
+        visited,
+        [
+            (a, "first".to_owned()),
+            (b, "second".to_owned()),
+            (query, "third".to_owned()),
+            (a, "fourth".to_owned()),
+        ]
+    );
+    // Everything was visited: nothing moves, nothing is revealed.
+    state.dispatch(Command::SelectChannel(b));
+    state.dispatch(Command::NextNotifiedMessage);
+    assert_eq!(state.selection(), Selection::Channel(b));
+    assert_eq!(state.take_reveal(), None);
+}
+
+#[test]
+fn a_line_is_noted_once_and_the_list_is_bounded() {
+    let mut state = AppState::live("irc.example.org".into(), vec!["#a".into()]);
+    let a = notified(&mut state, "#a", "one");
+    state.note_attention(a);
+    state.dispatch(Command::NextNotifiedMessage);
+    assert!(!state.has_attention());
+
+    for n in 0..MAX_ATTENTION + 5 {
+        notified(&mut state, "#a", &n.to_string());
+    }
+    assert_eq!(state.attention.len(), MAX_ATTENTION);
+    state.dispatch(Command::NextNotifiedMessage);
+    let (id, sequence) = state.take_reveal().unwrap();
+    let text = &state
+        .conversation(id)
+        .unwrap()
+        .messages
+        .iter()
+        .find(|message| message.sequence == sequence)
+        .unwrap()
+        .text;
+    assert_eq!(text, "5");
+}
+
+#[test]
+fn trimmed_lines_and_closed_conversations_leave_the_list() {
+    let mut state = AppState::live("irc.example.org".into(), vec!["#a".into(), "#b".into()]);
+    notified(&mut state, "#a", "old");
+    notified(&mut state, "#b", "kept");
+    for n in 0..MAX_RETAINED {
+        state.append_channel_message(
+            NetworkId(1),
+            "#a",
+            "bob",
+            &n.to_string(),
+            Kind::Message,
+            Provenance::Live,
+        );
+    }
+    let a = state.channel_id(NetworkId(1), "#a").unwrap();
+    assert!(state.conversation(a).unwrap().messages.len() < MAX_RETAINED);
+    // "old" went with the trimmed lines; only the line of #b remains.
+    assert_eq!(state.attention.len(), 1);
+    state.dispatch(Command::NextNotifiedMessage);
+    let b = state.channel_id(NetworkId(1), "#b").unwrap();
+    assert_eq!(state.selection(), Selection::Channel(b));
+
+    let query = state
+        .private_conversation(NetworkId(1), "carol", "carol", Missing::Create)
+        .unwrap();
+    state.append_conversation_message(
+        query,
+        "carol",
+        "hi",
+        Kind::Message,
+        MessageMeta::live(),
+        Unread::Mark,
+    );
+    state.note_attention(query);
+    assert!(state.has_attention());
+    assert!(state.close_private(query));
+    assert!(!state.has_attention());
+}
+
+#[test]
+fn resetting_or_removing_a_network_drops_its_notified_lines() {
+    let mut state = two_networks();
+    let one = state.channel_id(NetworkId(1), "#a").unwrap();
+    let two = state.channel_id(NetworkId(2), "#a").unwrap();
+    for (network, name, text) in [
+        (NetworkId(1), "#a", "first"),
+        (NetworkId(2), "#a", "second"),
+        (NetworkId(1), "#a", "third"),
+    ] {
+        state.append_channel_message(network, name, "bob", text, Kind::Message, Provenance::Live);
+        let id = state.channel_id(network, name).unwrap();
+        state.note_attention(id);
+    }
+    assert_eq!(state.attention.len(), 3);
+
+    state.reset_network(NetworkId(1), vec!["#a".into()]);
+    assert_eq!(state.attention.len(), 1);
+    state.dispatch(Command::NextNotifiedMessage);
+    assert_eq!(state.selection(), Selection::Channel(two));
+    assert!(state.take_reveal().is_some());
+    assert!(!state.has_attention());
+    assert_ne!(one, state.channel_id(NetworkId(1), "#a").unwrap());
+
+    let two_id = state.channel_id(NetworkId(2), "#a").unwrap();
+    state.append_channel_message(
+        NetworkId(2),
+        "#a",
+        "bob",
+        "later",
+        Kind::Message,
+        Provenance::Live,
+    );
+    state.note_attention(two_id);
+    state.sync_networks(&[]);
+    assert!(!state.has_attention());
+    state.dispatch(Command::NextNotifiedMessage);
+    assert_eq!(state.take_reveal(), None);
+}

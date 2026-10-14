@@ -215,14 +215,15 @@ impl<T: Clone> AttachmentFlow<T> {
 }
 
 /// Text to insert at a cursor between `before` and `after` so the link is
-/// separated from neighbouring words by single spaces.
+/// separated from neighbouring words by single spaces. Nothing is added at the
+/// start or end of the text.
 pub fn link_insertion(before: Option<char>, after: Option<char>, url: &str) -> String {
     let mut text = String::new();
     if before.is_some_and(|ch| !ch.is_whitespace()) {
         text.push(' ');
     }
     text.push_str(url);
-    if after.is_none_or(|ch| !ch.is_whitespace()) {
+    if after.is_some_and(|ch| !ch.is_whitespace()) {
         text.push(' ');
     }
     text
@@ -353,8 +354,9 @@ mod tests {
 
     #[test]
     fn links_are_spaced_from_surrounding_text() {
-        assert_eq!(link_insertion(None, None, "u"), "u ");
-        assert_eq!(link_insertion(Some('a'), None, "u"), " u ");
+        assert_eq!(link_insertion(None, None, "u"), "u");
+        assert_eq!(link_insertion(Some('a'), None, "u"), " u");
+        assert_eq!(link_insertion(None, Some('b'), "u"), "u ");
         assert_eq!(link_insertion(Some(' '), Some(' '), "u"), "u");
         assert_eq!(link_insertion(Some('a'), Some('b'), "u"), " u ");
     }

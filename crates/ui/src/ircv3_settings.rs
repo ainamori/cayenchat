@@ -605,6 +605,7 @@ impl SettingsWindow {
             directories: false,
             multiple: false,
             prompt: Some(self.i18n.text("ircv3_avatar_choose_prompt").into()),
+            filter: Some(crate::image_upload::image_file_filter(&self.i18n)),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = chosen.await else {

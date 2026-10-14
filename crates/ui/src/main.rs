@@ -43,6 +43,7 @@ mod shortcuts;
 mod signals;
 mod splitter;
 mod theme;
+mod toolbar;
 mod whois;
 mod window_layout;
 
@@ -92,6 +93,8 @@ use whois::{JoinedChannels, WhoisWindow};
 /// The channel log's share of the log height when nothing was dragged, and
 /// the bounds of what dragging may leave to either log.
 const DEFAULT_LOG_SPLIT: f32 = 0.5;
+/// How long a line stays emphasized after a jump to a notified line.
+const REVEAL_FLASH: Duration = Duration::from_millis(2_000);
 /// Pause after the last move or resize before the window layout is written.
 const LAYOUT_SAVE_DELAY: Duration = Duration::from_millis(500);
 /// Width of the right column (members and channel tree), its limits, and the
@@ -195,6 +198,7 @@ actions!(
         MinimizeWindow,
         ZoomWindow,
         ToggleDebug,
+        ToggleToolbar,
         CopyDiagnostics,
         CopyLogSelection,
         FocusNextField,
@@ -602,6 +606,10 @@ struct ChatWindow {
     debug_enabled: bool,
     conversation_logs: conversation_log::ConversationLogs,
     menu_bar: menu_bar::MenuBar,
+    /// The toolbar is on (View menu, saved in the settings), and its cached
+    /// view, made when it is first drawn.
+    toolbar_shown: bool,
+    toolbar: Option<AnyView>,
     appearance: Appearance,
     theme_mode: ThemeMode,
     i18n: Localizer,
@@ -615,6 +623,9 @@ struct ChatWindow {
     log_dragging: bool,
     /// The main log row whose URL the pointer is over; it shows a hand.
     url_hover: Option<(ConversationId, usize)>,
+    /// The line a jump to a notified line just chose, drawn emphasized for
+    /// `REVEAL_FLASH`.
+    reveal_flash: Option<(ConversationId, u64)>,
     /// Share of the two logs' height taken by the channel log; changed by
     /// dragging the bottom edge of the draft input, kept for this run only.
     log_split: f32,
@@ -878,7 +889,11 @@ impl ChatWindow {
         for input in self.inputs.values() {
             input.update(cx, |input, cx| input.set_placeholder(&placeholder, cx));
         }
-        cx.set_menus(app_menus(self.debug_enabled, &self.i18n));
+        cx.set_menus(app_menus(
+            self.debug_enabled,
+            self.toolbar_shown,
+            &self.i18n,
+        ));
         for handle in self.whois_windows.values() {
             let i18n = self.i18n.clone();
             let _ = handle.update(cx, |view, _, cx| view.set_localizer(i18n, cx));
@@ -1069,6 +1084,8 @@ impl ChatWindow {
             notification_rules: notification_rules(&saved.notifications),
             previews: previews::Previews::new(saved.appearance.image_previews),
             avatars: avatars::Avatars::new(saved.appearance.user_avatars),
+            toolbar_shown: saved.show_toolbar,
+            toolbar: None,
             saved,
             i18n,
             log_focus: cx.focus_handle(),
@@ -1084,6 +1101,7 @@ impl ChatWindow {
             right_column_bounds: Rc::new(Cell::new(None)),
             log_dragging: false,
             url_hover: None,
+            reveal_flash: None,
             attachments: AttachmentFlow::default(),
             uploader_override: None,
             notifier: Notifier::new(),
@@ -1441,24 +1459,33 @@ impl ChatWindow {
             replayed,
         } = message;
 
-        let Some(trigger) = self.notification_rules.trigger(IncomingMessage {
+        let incoming = IncomingMessage {
             channel: channel.is_some(),
             notice: kind.is_notice(),
             from_self: self.is_own_nickname(network, sender),
             mentioned: found.mentioned,
             keyword: found.keyword,
             replayed,
-        }) else {
+        };
+        let Some(trigger) = self.notification_rules.attention(incoming) else {
             return;
         };
+        let visible = self.window_active
+            && self.state.selection()
+                == conversation.map_or(Selection::Server(network), Selection::Channel);
+        // Visitable with desktop notifications off; a line in front of the
+        // user needs no visit.
+        if let (Some(conversation), false) = (conversation, visible) {
+            self.state.note_attention(conversation);
+        }
+        if !self.notification_rules.enabled {
+            return;
+        }
         let plain = display::neutralize_bidi_owned(if kind.is_action() {
             format!("* {sender} {}", strip_formatting(text))
         } else {
             strip_formatting(text)
         });
-        let visible = self.window_active
-            && self.state.selection()
-                == conversation.map_or(Selection::Server(network), Selection::Channel);
         if visible || !self.notification_burst.allow(Instant::now()) {
             return;
         }
@@ -2434,16 +2461,93 @@ impl ChatWindow {
         let Some(menu) = self.channel_menu.take() else {
             return;
         };
+        self.join_or_part(menu.network, &menu.channel, join, cx);
+    }
+
+    /// Joins or parts `channel`, showing why it could not be done.
+    fn join_or_part(
+        &mut self,
+        network: NetworkId,
+        channel: &str,
+        join: bool,
+        cx: &mut Context<Self>,
+    ) {
         let feedback = if join {
-            self.join_channel(menu.network, &menu.channel, cx).err()
+            self.join_channel(network, channel, cx).err()
         } else {
-            self.registered_connection(menu.network)
-                .and_then(|connection| {
-                    connection.send_command(&format!("/part {}", menu.channel), None)
-                })
+            self.registered_connection(network)
+                .and_then(|connection| connection.send_command(&format!("/part {channel}"), None))
                 .err()
         };
         self.set_feedback(feedback);
+        cx.notify();
+    }
+
+    /// What the toolbar's buttons can do now. Computed when the chat state
+    /// changes (see `toolbar`), never while drawing.
+    fn toolbar_state(&self) -> toolbar::State {
+        let channel = self.state.selected_channel().filter(|c| !c.is_private());
+        let registered = self
+            .selected_network_id()
+            .is_some_and(|network| self.state.is_registered(network));
+        toolbar::State {
+            connected: self.can_disconnect_selected(),
+            can_connect: self.can_connect_selected() || self.can_reconnect_selected(),
+            can_reconnect: self.can_reconnect_selected(),
+            always_on_top: self.toolbar_always_on_top_state(),
+            joined: channel.is_some_and(|c| self.state.is_active_channel(c.id)),
+            can_join_or_part: registered && channel.is_some(),
+            can_next_unread: self
+                .state
+                .conversations()
+                .iter()
+                .any(|conversation| self.state.is_unread(conversation.id)),
+            can_whois: registered && self.can_whois_selected(),
+            can_upload: self.inputs.contains_key(&self.state.selection()),
+        }
+    }
+
+    /// Whether `whois_target` has someone, without walking the member list,
+    /// which this runs for on every chat notification.
+    fn can_whois_selected(&self) -> bool {
+        let Some(conversation) = self.state.selected_channel() else {
+            return false;
+        };
+        conversation.is_private() || self.member_selection.count(conversation.id) == 1
+    }
+
+    /// Whom the toolbar's WHOIS asks about: the peer of a private
+    /// conversation, or the one member chosen in the member list.
+    fn whois_target(&self) -> Option<String> {
+        let conversation = self.state.selected_channel()?;
+        if conversation.is_private() {
+            return Some(conversation.name.clone());
+        }
+        let mut chosen = self
+            .member_selection
+            .nicknames(conversation.id, &conversation.members);
+        (chosen.len() == 1).then(|| chosen.remove(0))
+    }
+
+    fn toolbar_join_or_part(&mut self, cx: &mut Context<Self>) {
+        let Some(channel) = self.state.selected_channel().filter(|c| !c.is_private()) else {
+            return;
+        };
+        let (network, name, join) = (
+            channel.network,
+            channel.name.clone(),
+            !self.state.is_active_channel(channel.id),
+        );
+        self.join_or_part(network, &name, join, cx);
+    }
+
+    fn toolbar_whois(&mut self, cx: &mut Context<Self>) {
+        let (Some(network), Some(nickname)) = (self.selected_network_id(), self.whois_target())
+        else {
+            return;
+        };
+        let result = self.request_whois(network, &nickname, cx);
+        self.set_feedback(result.err());
         cx.notify();
     }
 
@@ -3075,11 +3179,38 @@ impl ChatWindow {
         cx.notify();
     }
 
+    /// Shows or hides the toolbar and remembers the choice in the settings
+    /// file, starting from the file, which a settings window may have updated.
+    fn toggle_toolbar(&mut self, _: &ToggleToolbar, _: &mut Window, cx: &mut Context<Self>) {
+        let shown = !self.toolbar_shown;
+        let mut settings = match settings_file::load() {
+            Ok(Some(settings)) => settings,
+            Ok(None) => self.saved.clone(),
+            Err(error) => {
+                self.set_feedback(Some(error));
+                self.set_toolbar_shown(shown, cx);
+                return;
+            }
+        };
+        settings.show_toolbar = shown;
+        if let Err(error) = settings_file::save(&settings) {
+            self.set_feedback(Some(error));
+        }
+        self.saved.show_toolbar = shown;
+        self.set_toolbar_shown(shown, cx);
+    }
+
+    fn set_toolbar_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        self.toolbar_shown = shown;
+        cx.set_menus(app_menus(self.debug_enabled, shown, &self.i18n));
+        cx.notify();
+    }
+
     /// Turns the debug transcript on or off. IRC lines are recorded after
     /// registration only while it is on.
     fn set_debug(&mut self, on: bool, cx: &mut Context<Self>) {
         self.debug_enabled = on;
-        cx.set_menus(app_menus(on, &self.i18n));
+        cx.set_menus(app_menus(on, self.toolbar_shown, &self.i18n));
         for connection in self
             .sessions
             .values()
@@ -3417,10 +3548,33 @@ impl ChatWindow {
         self.state.dispatch(command);
         self.log_selection = None;
         self.set_feedback(None);
+        if let Some((id, sequence)) = self.state.take_reveal() {
+            self.reveal_message(id, sequence, cx);
+        }
         self.update_title(window);
         cx.notify();
         // Redraw the pane contents together with the native title change.
         window.refresh();
+    }
+
+    /// Scrolls the selected conversation's log to the line `sequence` and
+    /// emphasizes it for a moment.
+    fn reveal_message(&mut self, id: ConversationId, sequence: u64, cx: &mut Context<Self>) {
+        self.sync_log_lists();
+        if let Some(list) = self.main_lists.get_mut(&Selection::Channel(id)) {
+            list.scroll_to_sequence(sequence);
+        }
+        self.reveal_flash = Some((id, sequence));
+        cx.spawn(async move |this, cx| {
+            Timer::after(REVEAL_FLASH).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.reveal_flash == Some((id, sequence)) {
+                    this.reveal_flash = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn navigate(&mut self, action: &Navigate, window: &mut Window, cx: &mut Context<Self>) {
@@ -4383,8 +4537,47 @@ fn notification_rules(settings: &Notifications) -> NotificationRules {
     }
 }
 
+/// The toolbar's "keep on top" button exists on Windows only.
+#[cfg(not(target_os = "windows"))]
+impl ChatWindow {
+    fn toolbar_always_on_top_state(&self) -> bool {
+        false
+    }
+
+    fn toolbar_always_on_top(&mut self, _: &mut Window, _: &mut Context<Self>) {}
+}
+
 #[cfg(target_os = "windows")]
 impl ChatWindow {
+    fn toolbar_always_on_top_state(&self) -> bool {
+        self.always_on_top
+    }
+
+    /// Switches the preference the way the settings window's checkbox does:
+    /// it is saved (starting from the file, which that window may have
+    /// updated) and applied to the open windows. An open settings window
+    /// shows the new value.
+    fn toolbar_always_on_top(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let enabled = !self.always_on_top;
+        match settings_file::load() {
+            Ok(file) => {
+                let mut settings = file.unwrap_or_else(|| self.saved.clone());
+                settings.always_on_top = enabled;
+                if let Err(error) = settings_file::save(&settings) {
+                    self.set_feedback(Some(error));
+                }
+            }
+            Err(error) => self.set_feedback(Some(error)),
+        }
+        self.saved.always_on_top = enabled;
+        self.apply_always_on_top(enabled, window, cx);
+        if let Some(handle) = self.settings_window {
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |settings, _, cx| settings.follow_saved_file(cx));
+            });
+        }
+    }
+
     /// Applies the Windows-only preference to the chat window and to the open
     /// settings and WHOIS windows, and remembers it for windows opened later.
     /// Dialogs follow their parent window. Callers apply it only when the
@@ -4613,6 +4806,32 @@ impl Render for ChatWindow {
             self.shown_title = title.clone();
         }
         let content = self.render_chat(window, cx);
+        let content = if self.toolbar_shown {
+            let bar = match &self.toolbar {
+                Some(bar) => bar.clone(),
+                None => {
+                    let bar = toolbar::view(self.toolbar_state(), cx);
+                    self.toolbar = Some(bar.clone());
+                    bar
+                }
+            };
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(
+                    bar.cached(
+                        StyleRefinement::default()
+                            .w_full()
+                            .h(toolbar::HEIGHT)
+                            .flex_shrink_0(),
+                    ),
+                )
+                .child(div().flex_1().min_h_0().child(content))
+                .into_any_element()
+        } else {
+            content
+        };
         let content = menu_bar::wrap(
             &self.menu_bar,
             cx.get_menus().unwrap_or_default(),
@@ -5128,6 +5347,9 @@ impl ChatWindow {
         let selection = self.state.selection();
         let mut origin = decorations::content_origin(window);
         origin.y += self.menu_bar.height();
+        if self.toolbar_shown {
+            origin.y += toolbar::HEIGHT;
+        }
         let log_id = match selection {
             Selection::Channel(id) => id.0,
             Selection::Server(id) => u32::MAX - id.0,
@@ -5911,6 +6133,7 @@ impl ChatWindow {
                 d.on_action(cx.listener(Self::reconnect_action))
             })
             .on_action(cx.listener(Self::toggle_debug))
+            .on_action(cx.listener(Self::toggle_toolbar))
             .on_action(cx.listener(Self::copy_diagnostics))
             .on_action(cx.listener(|this, _: &Quit, window, cx| this.request_quit(window, cx)))
             .on_action(cx.listener(Self::paste_image))
@@ -6547,6 +6770,15 @@ impl ChatWindow {
             .when(style.alternate_rows && index % 2 == 1, |d| {
                 d.bg(style.main_alt)
             })
+            .when(
+                self.reveal_flash == Some((selected_channel, message.sequence)),
+                |d| {
+                    d.bg(Rgba {
+                        a: 0.35,
+                        ..theme.panes.highlight
+                    })
+                },
+            )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -7006,7 +7238,7 @@ fn menu_access_keys(i18n: &Localizer) -> menu_bar::AccessKeys {
     }
 }
 
-fn app_menus(debug_enabled: bool, i18n: &Localizer) -> Vec<Menu> {
+fn app_menus(debug_enabled: bool, toolbar_shown: bool, i18n: &Localizer) -> Vec<Menu> {
     // macOS keeps Settings and Quit in the application menu; Windows and Linux
     // put them in File, with no application-named menu.
     let mut app_items = vec![
@@ -7056,6 +7288,15 @@ fn app_menus(debug_enabled: bool, i18n: &Localizer) -> Vec<Menu> {
         Menu {
             name: i18n.text("menu_view").into(),
             items: vec![
+                MenuItem::action(
+                    i18n.text(if toolbar_shown {
+                        "menu_hide_toolbar"
+                    } else {
+                        "menu_show_toolbar"
+                    }),
+                    ToggleToolbar,
+                ),
+                MenuItem::separator(),
                 MenuItem::action(
                     if debug_enabled {
                         i18n.text("menu_hide_diagnostics")
@@ -7281,174 +7522,185 @@ fn main() {
     select_linux_display(saved.linux_display);
     #[cfg(target_os = "linux")]
     let signal_quit = signals::install();
-    Application::new().run(move |cx: &mut App| {
-        #[cfg(target_os = "linux")]
-        if let Some(receiver) = signal_quit {
-            signals::quit_on_signal(receiver, cx);
-        }
-        secrets::install(saved.credential_backend, cx);
-        theme::apply(saved.theme, &saved.appearance, cx);
-        desktop::watch(cx);
-        apply_shortcuts(ShortcutPrefs::from(&saved), cx);
-        cx.set_menus(app_menus(false, &Localizer::new(Language::System)));
-        // Reached when no chat window handles it, e.g. from the settings
-        // window or the menu bar on macOS.
-        cx.on_action(|_: &Quit, cx| request_quit_anywhere(cx));
-        // macOS Dock "Quit" is the user's request too; the system's own
-        // shutdown and `cx.quit()` never reach this handler.
-        cx.on_quit_request(|cx| {
-            let Some(chat) = cx
-                .windows()
-                .into_iter()
-                .find_map(|w| w.downcast::<ChatWindow>())
-            else {
-                return true;
-            };
-            !chat
-                .update(cx, |this, window, cx| this.ask_before_quit(window, cx))
-                .unwrap_or(false)
-        });
-        // Global actions run inside the active window's update, so updating
-        // that window again here fails; do it once the dispatch has finished.
-        cx.on_action(|_: &MinimizeWindow, cx| {
-            cx.defer(|cx| {
-                if let Some(window) = cx.active_window() {
-                    let _ = window.update(cx, |_, window, _| window.minimize_window());
-                }
-            });
-        });
-        cx.on_action(|_: &ZoomWindow, cx| {
-            cx.defer(|cx| {
-                if let Some(window) = cx.active_window() {
-                    let _ = window.update(cx, |_, window, _| window.zoom_window());
-                }
-            });
-        });
-        cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
-                cx.quit();
+    Application::new()
+        .with_assets(toolbar::Icons)
+        .run(move |cx: &mut App| {
+            #[cfg(target_os = "linux")]
+            if let Some(receiver) = signal_quit {
+                signals::quit_on_signal(receiver, cx);
             }
-        })
-        .detach();
-        // Where the window was left, when that is remembered and a connected
-        // display still shows it; otherwise the usual place.
-        let min_size = size(px(MIN_WINDOW_SIZE.0), px(MIN_WINDOW_SIZE.1));
-        let layout = if saved.restore_window_layout {
-            cayenchat_storage::layout::load_layout()
-        } else {
-            Default::default()
-        };
-        let displays = cx.displays();
-        let display_bounds: Vec<_> = displays.iter().map(|display| display.bounds()).collect();
-        let restored = window_layout::restored_bounds(&layout, &display_bounds, min_size);
-        // Windows opens a window on the primary display unless told which
-        // one, and replaces bounds off that display with a centered default
-        // (#125). Its displays share one desktop coordinate space, so the
-        // display chosen above is the one to name. macOS and X11 report every
-        // display at the origin, so there it would be a guess.
-        let display_id = restored
-            .as_ref()
-            .filter(|_| cfg!(target_os = "windows"))
-            .map(|restored| displays[restored.display].id());
-        let window_bounds = restored.map(|restored| restored.bounds).unwrap_or_else(|| {
-            WindowBounds::Windowed(Bounds::centered(None, size(px(960.), px(600.)), cx))
-        });
-        #[cfg(target_os = "windows")]
-        let always_on_top = saved.always_on_top;
-        let chat_window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(window_bounds),
-                    display_id,
-                    window_min_size: Some(min_size),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("CayenChat".into()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                move |window, cx| cx.new(|cx| ChatWindow::with_settings(saved, notice, window, cx)),
-            )
-            .expect("could not open CayenChat window");
-        cx.activate(true);
-        // Off is the default state, so only an enabled preference touches the
-        // native window; the settings window below follows it.
-        #[cfg(target_os = "windows")]
-        if always_on_top {
-            let _ = chat_window.update(cx, |chat, window, cx| {
-                chat.apply_always_on_top(true, window, cx)
+            secrets::install(saved.credential_backend, cx);
+            theme::apply(saved.theme, &saved.appearance, cx);
+            desktop::watch(cx);
+            apply_shortcuts(ShortcutPrefs::from(&saved), cx);
+            cx.set_menus(app_menus(
+                false,
+                saved.show_toolbar,
+                &Localizer::new(Language::System),
+            ));
+            // Reached when no chat window handles it, e.g. from the settings
+            // window or the menu bar on macOS.
+            cx.on_action(|_: &Quit, cx| request_quit_anywhere(cx));
+            // macOS Dock "Quit" is the user's request too; the system's own
+            // shutdown and `cx.quit()` never reach this handler.
+            cx.on_quit_request(|cx| {
+                let Some(chat) = cx
+                    .windows()
+                    .into_iter()
+                    .find_map(|w| w.downcast::<ChatWindow>())
+                else {
+                    return true;
+                };
+                !chat
+                    .update(cx, |this, window, cx| this.ask_before_quit(window, cx))
+                    .unwrap_or(false)
             });
-        }
-        // Settings open when nothing connects at startup or a saved server
-        // cannot start, showing the first such server; valid servers still
-        // connect.
-        let settings_for = chat_window
-            .update(cx, |chat, window, cx| {
-                chat.layout_file = cayenchat_storage::layout::layout_path().ok();
-                chat.order_file = cayenchat_storage::order::order_path().ok();
-                chat.channel_orders = cayenchat_storage::order::load_orders();
-                chat.restore_channel_orders();
-                chat.apply_layout(&layout);
-                cx.set_menus(app_menus(false, &chat.i18n));
-                let startup = std::mem::take(&mut chat.startup_connections);
-                let mut settings_for = startup.is_empty().then(|| chat.selected_profile_id());
-                for (network, config) in startup {
-                    let failed = match config {
-                        Ok(config) => chat.apply_connection(network, config, window, cx).is_err(),
-                        Err(error) => {
-                            let message = chat.i18n.format("startup_invalid", &[("error", &error)]);
-                            chat.set_feedback(Some(message));
-                            cx.notify();
-                            true
-                        }
-                    };
-                    if failed && settings_for.is_none() {
-                        settings_for = Some(
-                            chat.sessions
-                                .get(&network)
-                                .map(|session| session.profile_id.clone()),
-                        );
+            // Global actions run inside the active window's update, so updating
+            // that window again here fails; do it once the dispatch has finished.
+            cx.on_action(|_: &MinimizeWindow, cx| {
+                cx.defer(|cx| {
+                    if let Some(window) = cx.active_window() {
+                        let _ = window.update(cx, |_, window, _| window.minimize_window());
                     }
+                });
+            });
+            cx.on_action(|_: &ZoomWindow, cx| {
+                cx.defer(|cx| {
+                    if let Some(window) = cx.active_window() {
+                        let _ = window.update(cx, |_, window, _| window.zoom_window());
+                    }
+                });
+            });
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
                 }
-                settings_for
             })
-            .expect("could not initialize the chat window");
-        let settings_opened = settings_for.is_some();
-        if let Some(profile) = settings_for {
-            chat_window
+            .detach();
+            // Where the window was left, when that is remembered and a connected
+            // display still shows it; otherwise the usual place.
+            let min_size = size(px(MIN_WINDOW_SIZE.0), px(MIN_WINDOW_SIZE.1));
+            let layout = if saved.restore_window_layout {
+                cayenchat_storage::layout::load_layout()
+            } else {
+                Default::default()
+            };
+            let displays = cx.displays();
+            let display_bounds: Vec<_> = displays.iter().map(|display| display.bounds()).collect();
+            let restored = window_layout::restored_bounds(&layout, &display_bounds, min_size);
+            // Windows opens a window on the primary display unless told which
+            // one, and replaces bounds off that display with a centered default
+            // (#125). Its displays share one desktop coordinate space, so the
+            // display chosen above is the one to name. macOS and X11 report every
+            // display at the origin, so there it would be a guess.
+            let display_id = restored
+                .as_ref()
+                .filter(|_| cfg!(target_os = "windows"))
+                .map(|restored| displays[restored.display].id());
+            let window_bounds = restored.map(|restored| restored.bounds).unwrap_or_else(|| {
+                WindowBounds::Windowed(Bounds::centered(None, size(px(960.), px(600.)), cx))
+            });
+            #[cfg(target_os = "windows")]
+            let always_on_top = saved.always_on_top;
+            let chat_window = cx
+                .open_window(
+                    WindowOptions {
+                        window_bounds: Some(window_bounds),
+                        display_id,
+                        window_min_size: Some(min_size),
+                        titlebar: Some(TitlebarOptions {
+                            title: Some("CayenChat".into()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    move |window, cx| {
+                        cx.new(|cx| ChatWindow::with_settings(saved, notice, window, cx))
+                    },
+                )
+                .expect("could not open CayenChat window");
+            cx.activate(true);
+            // Off is the default state, so only an enabled preference touches the
+            // native window; the settings window below follows it.
+            #[cfg(target_os = "windows")]
+            if always_on_top {
+                let _ = chat_window.update(cx, |chat, window, cx| {
+                    chat.apply_always_on_top(true, window, cx)
+                });
+            }
+            // Settings open when nothing connects at startup or a saved server
+            // cannot start, showing the first such server; valid servers still
+            // connect.
+            let settings_for = chat_window
                 .update(cx, |chat, window, cx| {
-                    chat.open_settings_for(profile, window, cx)
+                    chat.layout_file = cayenchat_storage::layout::layout_path().ok();
+                    chat.order_file = cayenchat_storage::order::order_path().ok();
+                    chat.channel_orders = cayenchat_storage::order::load_orders();
+                    chat.restore_channel_orders();
+                    chat.apply_layout(&layout);
+                    cx.set_menus(app_menus(false, chat.toolbar_shown, &chat.i18n));
+                    let startup = std::mem::take(&mut chat.startup_connections);
+                    let mut settings_for = startup.is_empty().then(|| chat.selected_profile_id());
+                    for (network, config) in startup {
+                        let failed = match config {
+                            Ok(config) => {
+                                chat.apply_connection(network, config, window, cx).is_err()
+                            }
+                            Err(error) => {
+                                let message =
+                                    chat.i18n.format("startup_invalid", &[("error", &error)]);
+                                chat.set_feedback(Some(message));
+                                cx.notify();
+                                true
+                            }
+                        };
+                        if failed && settings_for.is_none() {
+                            settings_for = Some(
+                                chat.sessions
+                                    .get(&network)
+                                    .map(|session| session.profile_id.clone()),
+                            );
+                        }
+                    }
+                    settings_for
                 })
-                .expect("could not open the initial settings window");
-        }
-        // GPUI's `activate` does nothing on Windows, so a window opened by
-        // hand can land behind others (#259). `activate_window` is queued and
-        // runs after this callback, so it goes last and to the topmost window;
-        // a login launch stays out of the user's way. The chat window is
-        // fronted even when settings open on top of it (#354), or it would
-        // stay behind other apps.
-        #[cfg(target_os = "windows")]
-        for front in
-            autostart::startup_front(autostart::launched_by_registration(), settings_opened)
-        {
-            match front {
-                autostart::StartupFront::Settings => {
-                    let settings = chat_window
-                        .update(cx, |chat, _, _| chat.settings_window)
-                        .ok()
-                        .flatten();
-                    if let Some(settings) = settings {
-                        let _ = settings.update(cx, |_, window, _| window.activate_window());
+                .expect("could not initialize the chat window");
+            let settings_opened = settings_for.is_some();
+            if let Some(profile) = settings_for {
+                chat_window
+                    .update(cx, |chat, window, cx| {
+                        chat.open_settings_for(profile, window, cx)
+                    })
+                    .expect("could not open the initial settings window");
+            }
+            // GPUI's `activate` does nothing on Windows, so a window opened by
+            // hand can land behind others (#259). `activate_window` is queued and
+            // runs after this callback, so it goes last and to the topmost window;
+            // a login launch stays out of the user's way. The chat window is
+            // fronted even when settings open on top of it (#354), or it would
+            // stay behind other apps.
+            #[cfg(target_os = "windows")]
+            for front in
+                autostart::startup_front(autostart::launched_by_registration(), settings_opened)
+            {
+                match front {
+                    autostart::StartupFront::Settings => {
+                        let settings = chat_window
+                            .update(cx, |chat, _, _| chat.settings_window)
+                            .ok()
+                            .flatten();
+                        if let Some(settings) = settings {
+                            let _ = settings.update(cx, |_, window, _| window.activate_window());
+                        }
+                    }
+                    autostart::StartupFront::Chat => {
+                        let _ = chat_window.update(cx, |_, window, _| window.activate_window());
                     }
                 }
-                autostart::StartupFront::Chat => {
-                    let _ = chat_window.update(cx, |_, window, _| window.activate_window());
-                }
             }
-        }
-        #[cfg(not(target_os = "windows"))]
-        let _ = settings_opened;
-    });
+            #[cfg(not(target_os = "windows"))]
+            let _ = settings_opened;
+        });
 }
 
 #[cfg(test)]
@@ -7555,3 +7807,6 @@ mod log_menu_tests;
 #[cfg(test)]
 #[path = "main_tests/menu_tests.rs"]
 mod menu_tests;
+#[cfg(test)]
+#[path = "main_tests/toolbar_tests.rs"]
+mod toolbar_tests;

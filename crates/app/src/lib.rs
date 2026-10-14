@@ -9,7 +9,7 @@ pub mod own_avatar;
 pub mod timeline;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     time::SystemTime,
 };
 
@@ -61,6 +61,8 @@ pub const MAX_PRIVATE_CONVERSATIONS_PER_NETWORK: usize = 100;
 pub const HISTORY_RESERVE: usize = 256;
 /// Lines kept per conversation; the oldest 1,000 go when it is exceeded.
 const MAX_RETAINED: usize = 2_000;
+/// Notified lines waiting to be visited; the oldest are forgotten beyond it.
+const MAX_ATTENTION: usize = 200;
 /// Lines asked for per older page. The backend lowers it to what its
 /// server allows.
 pub const OLDER_PAGE_LIMIT: usize = 50;
@@ -88,6 +90,8 @@ pub enum Command {
     SelectServer(NetworkId),
     NextUnreadChannel,
     PreviousUnreadChannel,
+    /// Jumps to the oldest notified line not yet visited.
+    NextNotifiedMessage,
     PreviousSelectedChannel,
     NextActiveChannel,
     PreviousActiveChannel,
@@ -131,6 +135,13 @@ pub struct AppState {
     unread: HashSet<ConversationId>,
     /// Unread channels where someone mentioned us or a keyword appeared.
     highlighted: HashSet<ConversationId>,
+    /// Notified lines not yet visited, oldest first, as the conversation
+    /// and the message's sequence. Bounded by `MAX_ATTENTION`; a line the
+    /// log trimmed leaves it too.
+    attention: VecDeque<(ConversationId, u64)>,
+    /// The line the last jump to a notified line chose, until the UI
+    /// scrolls to it.
+    reveal: Option<(ConversationId, u64)>,
     active_channels: HashSet<ConversationId>,
     active_servers: HashSet<NetworkId>,
     statuses: HashMap<NetworkId, ConnectionStatus>,
@@ -368,6 +379,8 @@ impl AppState {
             // Unread fixtures make the shortcut observable before IRC events exist.
             unread: HashSet::from([ConversationId(2), ConversationId(4)]),
             highlighted: HashSet::new(),
+            attention: VecDeque::new(),
+            reveal: None,
             active_channels,
             active_servers,
             statuses,
@@ -420,6 +433,8 @@ impl AppState {
             previous_channel: None,
             unread: HashSet::new(),
             highlighted: HashSet::new(),
+            attention: VecDeque::new(),
+            reveal: None,
             active_channels: HashSet::new(),
             active_servers: HashSet::new(),
             server_messages: HashMap::new(),
@@ -462,6 +477,8 @@ impl AppState {
             previous_channel: None,
             unread: HashSet::new(),
             highlighted: HashSet::new(),
+            attention: VecDeque::new(),
+            reveal: None,
             active_channels: HashSet::new(),
             active_servers: HashSet::new(),
             statuses: HashMap::new(),
@@ -590,6 +607,7 @@ impl AppState {
             .retain(|channel| channel.network != network);
         self.channel_ids.retain(|(owner, _), _| *owner != network);
         self.casemappings.remove(&network);
+        self.attention.retain(|(id, _)| !removed.contains(id));
         for id in &removed {
             self.duplicates.remove(id);
             self.pending_history.remove(id);
@@ -1002,6 +1020,8 @@ impl AppState {
         self.resume_points.remove(&id);
         self.unread.remove(&id);
         self.highlighted.remove(&id);
+        self.attention
+            .retain(|(conversation, _)| *conversation != id);
         self.active_channels.remove(&id);
         if self.previous_channel == Some(id) {
             self.previous_channel = None;
@@ -1377,8 +1397,69 @@ impl AppState {
             return false;
         }
         message.sequence = self.next_sequence();
-        push_bounded(&mut self.conversations[position].messages, message);
+        if push_bounded(&mut self.conversations[position].messages, message) {
+            self.prune_attention(id);
+        }
         true
+    }
+
+    /// Remembers the newest line of conversation `id` as one the user was
+    /// notified about (see `NotificationRules::attention`), to be visited by
+    /// [`Command::NextNotifiedMessage`]. Call it right after the line was
+    /// added; a line the user is looking at needs no call.
+    pub fn note_attention(&mut self, id: ConversationId) {
+        let Some(sequence) = self
+            .conversation(id)
+            .and_then(|conversation| conversation.messages.last())
+            .map(|message| message.sequence)
+        else {
+            return;
+        };
+        if self.attention.back() == Some(&(id, sequence)) {
+            return;
+        }
+        if self.attention.len() >= MAX_ATTENTION {
+            self.attention.pop_front();
+        }
+        self.attention.push_back((id, sequence));
+    }
+
+    /// Whether a notified line is waiting to be visited.
+    pub fn has_attention(&self) -> bool {
+        !self.attention.is_empty()
+    }
+
+    /// The line the last [`Command::NextNotifiedMessage`] moved to, once.
+    pub fn take_reveal(&mut self) -> Option<(ConversationId, u64)> {
+        self.reveal.take()
+    }
+
+    /// Forgets the notified lines of `id` that its log no longer holds.
+    fn prune_attention(&mut self, id: ConversationId) {
+        let first = self
+            .conversation(id)
+            .and_then(|conversation| conversation.messages.first())
+            .map(|message| message.sequence);
+        self.attention
+            .retain(|(conversation, sequence)| *conversation != id || Some(*sequence) >= first);
+    }
+
+    /// Selects the conversation of the oldest notified line not yet visited
+    /// and counts that line as visited.
+    fn visit_attention(&mut self) {
+        while let Some((id, sequence)) = self.attention.pop_front() {
+            let held = self.conversation(id).is_some_and(|conversation| {
+                conversation
+                    .messages
+                    .binary_search_by_key(&sequence, |message| message.sequence)
+                    .is_ok()
+            });
+            if held {
+                self.select_channel(id);
+                self.reveal = Some((id, sequence));
+                return;
+            }
+        }
     }
 
     /// The joined channels of `network` a disconnect just cut off. With
@@ -1582,7 +1663,9 @@ impl AppState {
         let messages = &mut self.conversations[position].messages;
         let at = messages.partition_point(|message| message.sequence < start);
         messages.splice(at..at, block);
-        trim_retained(messages);
+        if trim_retained(messages) {
+            self.prune_attention(id);
+        }
         added
     }
 
@@ -1975,6 +2058,7 @@ impl AppState {
             Command::SelectServer(id) => self.select_server(id),
             Command::NextUnreadChannel => self.cycle_channel(true, ChannelFilter::Unread),
             Command::PreviousUnreadChannel => self.cycle_channel(false, ChannelFilter::Unread),
+            Command::NextNotifiedMessage => self.visit_attention(),
             Command::PreviousSelectedChannel => {
                 if let Some(id) = self.previous_channel {
                     self.select_channel(id);
@@ -2097,15 +2181,19 @@ fn mock_time(time: &str) -> TimeOfDay {
     )
 }
 
-fn push_bounded(messages: &mut Vec<Message>, message: Message) {
+/// Whether the log dropped old lines.
+fn push_bounded(messages: &mut Vec<Message>, message: Message) -> bool {
     messages.push(message);
-    trim_retained(messages);
+    trim_retained(messages)
 }
 
-fn trim_retained(messages: &mut Vec<Message>) {
+/// Whether lines were dropped.
+fn trim_retained(messages: &mut Vec<Message>) -> bool {
+    let trimmed = messages.len() > MAX_RETAINED;
     while messages.len() > MAX_RETAINED {
         messages.drain(..1_000);
     }
+    trimmed
 }
 
 #[cfg(test)]
