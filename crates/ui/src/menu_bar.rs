@@ -108,18 +108,19 @@ impl MenuBar {
             "left" | "right" => self.move_menu(key.key == "left", menus.len()),
             "up" | "down" => self.move_item(key.key == "up", &enabled[self.active]),
             "enter" | "space" => {
-                if self.open
-                    && let Some(row) = self.selected
-                {
-                    if enabled[self.active].contains(&row)
-                        && let OwnedMenuItem::Action { action, .. } = &menus[self.active].items[row]
-                    {
-                        window.dispatch_action(action.boxed_clone(), cx);
-                    }
+                // A bar that was only reached (an IME toggle such as Alt+~ can
+                // look like a lone Alt) has no item chosen yet: leave the key to
+                // the input instead of opening a menu with it.
+                let (true, Some(row)) = (self.open, self.selected) else {
                     self.close();
-                } else {
-                    self.move_item(false, &enabled[self.active]);
+                    return false;
+                };
+                if enabled[self.active].contains(&row)
+                    && let OwnedMenuItem::Action { action, .. } = &menus[self.active].items[row]
+                {
+                    window.dispatch_action(action.boxed_clone(), cx);
                 }
+                self.close();
             }
             _ => {
                 self.close();
@@ -646,6 +647,14 @@ mod tests {
         );
         cx.simulate_keystrokes("f10");
         assert!(!view.read_with(cx, |view, _| view.menu.visible));
+
+        // A lone-Alt look-alike (IME toggle) must not let Enter pick a menu
+        // item: it closes the bar and goes on to the input.
+        cx.simulate_modifiers_change(alt);
+        cx.simulate_modifiers_change(Modifiers::default());
+        assert!(view.read_with(cx, |view, _| view.menu.visible));
+        cx.simulate_keystrokes("enter");
+        assert!(view.read_with(cx, |view, _| !view.menu.visible && !view.menu.open));
 
         // Resting in the hot zone reveals it; moving away hides it again.
         cx.simulate_mouse_move(gpui::point(px(40.), px(80.)), None, Modifiers::default());
