@@ -70,28 +70,54 @@ pub fn restored_bounds(
     })
 }
 
-/// The display area a new window's content may use: the work area where the
-/// platform tells it (excluding taskbar and Dock), otherwise `display` less a
-/// fixed reserve for a menu bar, taskbar or Dock. Either way room is left for
-/// the title bar and frame, which GPUI's window bounds do not include.
-pub fn usable_area(display: Bounds<Pixels>, work: Option<Bounds<Pixels>>) -> Bounds<Pixels> {
+/// The area a new window's content may use inside `base`, the work area of
+/// the owner's monitor (or the whole display where the platform cannot tell
+/// it): room is left for the title bar and frame, which the window bounds do
+/// not include. These are allowances for typical decorations, not for panels.
+pub fn usable_area(base: Bounds<Pixels>) -> Bounds<Pixels> {
     const TITLE: f32 = 40.;
     const FRAME: f32 = 8.;
-    const RESERVE_TOP: f32 = 32.;
-    const RESERVE_BOTTOM: f32 = 80.;
-    let base = work.unwrap_or_else(|| {
-        let height = f32::from(display.size.height) - RESERVE_TOP - RESERVE_BOTTOM;
-        Bounds::new(
-            point(display.origin.x, display.origin.y + px(RESERVE_TOP)),
-            size(display.size.width, px(height.max(1.))),
-        )
-    });
     let width = f32::from(base.size.width) - 2. * FRAME;
     let height = f32::from(base.size.height) - TITLE - FRAME;
     Bounds::new(
         point(base.origin.x + px(FRAME), base.origin.y + px(TITLE)),
         size(px(width.max(1.)), px(height.max(1.))),
     )
+}
+
+/// The part of `a` also in `b`, or `None` when they do not overlap.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+pub fn intersection(a: Bounds<Pixels>, b: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
+    let left = f32::from(a.left()).max(f32::from(b.left()));
+    let top = f32::from(a.top()).max(f32::from(b.top()));
+    let right = f32::from(a.right()).min(f32::from(b.right()));
+    let bottom = f32::from(a.bottom()).min(f32::from(b.bottom()));
+    (right > left && bottom > top).then(|| {
+        Bounds::new(
+            point(px(left), px(top)),
+            size(px(right - left), px(bottom - top)),
+        )
+    })
+}
+
+/// The monitor showing most of `owner`, else the one nearest its center.
+/// Needed where GPUI's display is the whole screen spanning several monitors
+/// (X11), so the owner's monitor has to be found among the outputs.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+pub fn monitor_of(owner: Bounds<Pixels>, monitors: &[Bounds<Pixels>]) -> Option<Bounds<Pixels>> {
+    let area =
+        |bounds: Bounds<Pixels>| f32::from(bounds.size.width) * f32::from(bounds.size.height);
+    let shown = |monitor: &Bounds<Pixels>| intersection(owner, *monitor).map_or(0., area);
+    let distance = |monitor: &Bounds<Pixels>| {
+        let dx = f32::from(monitor.center().x) - f32::from(owner.center().x);
+        let dy = f32::from(monitor.center().y) - f32::from(owner.center().y);
+        dx * dx + dy * dy
+    };
+    monitors.iter().copied().max_by(|a, b| {
+        shown(a)
+            .total_cmp(&shown(b))
+            .then(distance(b).total_cmp(&distance(a)))
+    })
 }
 
 /// Where a new settings window opens: horizontally centered on the owner
@@ -170,15 +196,47 @@ mod tests {
     }
 
     #[test]
-    fn usable_area_leaves_room_for_the_frame_and_the_work_area() {
-        let screen = display(0., 0., 1920., 1080.);
+    fn usable_area_leaves_room_only_for_the_decorations() {
         let work = display(0., 0., 1920., 1032.);
-        assert_eq!(
-            rect(usable_area(screen, Some(work))),
-            (8., 40., 1904., 984.)
-        );
-        // Work area unknown: a menu bar and a taskbar or Dock are assumed.
-        assert_eq!(rect(usable_area(screen, None)), (8., 72., 1904., 920.));
+        assert_eq!(rect(usable_area(work)), (8., 40., 1904., 984.));
+    }
+
+    #[test]
+    fn the_owner_decides_which_monitor_of_a_wide_screen_is_used() {
+        // Two 1920 wide monitors side by side in one 3840 wide X screen.
+        let monitors = [
+            display(0., 0., 1920., 1080.),
+            display(1920., 0., 1920., 1080.),
+        ];
+        // 800 wide at the left edge of the right monitor.
+        let owner = display(1920., 100., 800., 600.);
+        assert_eq!(monitor_of(owner, &monitors), Some(monitors[1]));
+        // Straddling: the monitor with more of it wins.
+        let owner = display(1500., 100., 800., 600.);
+        assert_eq!(monitor_of(owner, &monitors), Some(monitors[0]));
+        // On none of them: the nearest.
+        let owner = display(1700., 2000., 100., 100.);
+        assert_eq!(monitor_of(owner, &monitors), Some(monitors[0]));
+        assert_eq!(monitor_of(owner, &[]), None);
+        // The settings window is kept off the left monitor although centering
+        // on the owner would put its left part there.
+        let area = usable_area(monitors[1]);
+        let owner = display(1920., 100., 800., 600.);
+        let got = settings_bounds(owner, area, size(px(900.), px(400.)));
+        assert_eq!(rect(got), (1928., 400., 900., 400.));
+    }
+
+    #[test]
+    fn panels_taken_off_the_work_area_are_respected_on_every_side() {
+        let monitor = display(0., 0., 800., 600.);
+        // A 120 high panel at the bottom and a 60 wide Dock on the left.
+        let work = intersection(monitor, display(60., 0., 740., 480.)).unwrap();
+        assert_eq!(rect(work), (60., 0., 740., 480.));
+        let owner = display(0., 0., 400., 300.);
+        let got = settings_bounds(owner, usable_area(work), size(px(900.), px(750.)));
+        let (x, y, w, h) = rect(got);
+        assert!(x >= 68. && x + w <= 792. && y >= 40. && y + h <= 480.);
+        assert!(intersection(display(0., 0., 10., 10.), display(10., 0., 10., 10.)).is_none());
     }
 
     #[test]

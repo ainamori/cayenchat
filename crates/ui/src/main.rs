@@ -29,6 +29,7 @@ mod menu_bar;
 mod notifier;
 #[cfg(test)]
 mod perf_baseline;
+mod placement;
 mod previews;
 mod quit_dialog;
 mod scrollbar;
@@ -3106,13 +3107,15 @@ impl ChatWindow {
         let owner = window.window_handle().downcast::<ChatWindow>().unwrap();
         // Placed relative to this window on the display it is on; the usual
         // screen center only when that display is unknown.
+        let settings_title = self.i18n.text("settings_title");
         let wanted = size(px(900.), px(750.));
         let mut min_size = size(px(760.), px(540.));
         let display = window.display(cx);
         let bounds = match &display {
             Some(display) => {
-                let area = window_layout::usable_area(display.bounds(), work_area(window));
-                let bounds = window_layout::settings_bounds(window.bounds(), area, wanted);
+                let anchor = placement::anchor(window, &settings_title);
+                let area = window_layout::usable_area(anchor.work.unwrap_or(display.bounds()));
+                let bounds = window_layout::settings_bounds(anchor.owner, area, wanted);
                 // A small area shrinks the window below its usual minimum;
                 // the settings pages scroll.
                 min_size = size(
@@ -3133,7 +3136,7 @@ impl ChatWindow {
                     .map(|display| display.id()),
                 window_min_size: Some(min_size),
                 titlebar: Some(TitlebarOptions {
-                    title: Some(self.i18n.text("settings_title").into()),
+                    title: Some(settings_title.clone().into()),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -3154,6 +3157,25 @@ impl ChatWindow {
                             log::warn!("Could not keep the settings window on top: {error}");
                         }
                     });
+                }
+                // The window manager of X11 places a new window itself; ask it
+                // again for the computed place once it manages the window.
+                #[cfg(target_os = "linux")]
+                if let Ok(target) = handle.update(cx, |_, window, _| {
+                    placement::move_target(window, &settings_title, bounds)
+                }) {
+                    cx.spawn(async move |_, cx| {
+                        for _ in 0..40 {
+                            match placement::try_move(&target) {
+                                Some(false) => {}
+                                _ => return,
+                            }
+                            cx.background_executor()
+                                .timer(Duration::from_millis(50))
+                                .await;
+                        }
+                    })
+                    .detach();
                 }
                 self.settings_window = Some(handle)
             }
@@ -4603,50 +4625,6 @@ impl ChatWindow {
         }
         cx.notify();
     }
-}
-
-/// The work area (the display less the taskbar) of the display `window` is on,
-/// in GPUI's logical pixels. GPUI does not report it, so it is read from the
-/// native handle; `None` where that is not done (macOS, Linux) or fails.
-#[cfg(target_os = "windows")]
-fn work_area(window: &Window) -> Option<Bounds<Pixels>> {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows_sys::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
-    };
-
-    if cfg!(test) {
-        return None;
-    }
-    let handle = HasWindowHandle::window_handle(window).ok()?;
-    let RawWindowHandle::Win32(native) = handle.as_raw() else {
-        return None;
-    };
-    let hwnd = native.hwnd.get() as windows_sys::Win32::Foundation::HWND;
-    // SAFETY: plain queries on a live window handle and a zeroed out struct.
-    let work = unsafe {
-        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        let mut info: MONITORINFO = std::mem::zeroed();
-        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-        if GetMonitorInfoW(monitor, &mut info) == 0 {
-            return None;
-        }
-        info.rcWork
-    };
-    // Physical pixels to GPUI's logical ones, as for its display bounds.
-    let scale = window.scale_factor();
-    Some(Bounds::new(
-        point(px(work.left as f32 / scale), px(work.top as f32 / scale)),
-        size(
-            px((work.right - work.left) as f32 / scale),
-            px((work.bottom - work.top) as f32 / scale),
-        ),
-    ))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn work_area(_: &Window) -> Option<Bounds<Pixels>> {
-    None
 }
 
 /// Puts a CayenChat window above (or back among) ordinary windows.

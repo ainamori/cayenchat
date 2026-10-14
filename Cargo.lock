@@ -944,6 +944,7 @@ dependencies = [
  "native-theme-derive",
  "native-theme-gpui",
  "notify-rust",
+ "objc2-app-kit",
  "objc2-foundation",
  "objc2-service-management",
  "raw-window-handle",
@@ -954,6 +955,7 @@ dependencies = [
  "unicode-segmentation",
  "windows 0.61.3",
  "windows-sys 0.61.2",
+ "x11rb",
 ]
 
 [[package]]
