@@ -160,6 +160,14 @@ impl LogList {
             .map(|sequence| (*sequence, top.offset_in_item))
     }
 
+    /// Scrolls so the row with `sequence` is at the top; a line the list
+    /// does not hold is ignored.
+    pub fn scroll_to_sequence(&mut self, sequence: u64) {
+        if let Ok(index) = self.sequences.binary_search(&sequence) {
+            self.scroll_to_row(self.prefix + index, px(0.));
+        }
+    }
+
     /// How many message rows lie above row `visible_start` (the first row a
     /// scroll event reports as visible).
     pub fn message_rows_above(&self, visible_start: usize) -> usize {

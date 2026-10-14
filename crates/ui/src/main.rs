@@ -91,6 +91,8 @@ use whois::{JoinedChannels, WhoisWindow};
 /// The channel log's share of the log height when nothing was dragged, and
 /// the bounds of what dragging may leave to either log.
 const DEFAULT_LOG_SPLIT: f32 = 0.5;
+/// How long a line stays emphasized after a jump to a notified line.
+const REVEAL_FLASH: Duration = Duration::from_millis(2_000);
 /// Pause after the last move or resize before the window layout is written.
 const LAYOUT_SAVE_DELAY: Duration = Duration::from_millis(500);
 /// Width of the right column (members and channel tree), its limits, and the
@@ -609,6 +611,9 @@ struct ChatWindow {
     log_dragging: bool,
     /// The main log row whose URL the pointer is over; it shows a hand.
     url_hover: Option<(ConversationId, usize)>,
+    /// The line a jump to a notified line just chose, drawn emphasized for
+    /// `REVEAL_FLASH`.
+    reveal_flash: Option<(ConversationId, u64)>,
     /// Share of the two logs' height taken by the channel log; changed by
     /// dragging the bottom edge of the draft input, kept for this run only.
     log_split: f32,
@@ -1076,6 +1081,7 @@ impl ChatWindow {
             right_column_bounds: Rc::new(Cell::new(None)),
             log_dragging: false,
             url_hover: None,
+            reveal_flash: None,
             attachments: AttachmentFlow::default(),
             uploader_override: None,
             notifier: Notifier::new(),
@@ -1433,24 +1439,33 @@ impl ChatWindow {
             replayed,
         } = message;
 
-        let Some(trigger) = self.notification_rules.trigger(IncomingMessage {
+        let incoming = IncomingMessage {
             channel: channel.is_some(),
             notice: kind.is_notice(),
             from_self: self.is_own_nickname(network, sender),
             mentioned: found.mentioned,
             keyword: found.keyword,
             replayed,
-        }) else {
+        };
+        let Some(trigger) = self.notification_rules.attention(incoming) else {
             return;
         };
+        let visible = self.window_active
+            && self.state.selection()
+                == conversation.map_or(Selection::Server(network), Selection::Channel);
+        // Visitable with desktop notifications off; a line in front of the
+        // user needs no visit.
+        if let (Some(conversation), false) = (conversation, visible) {
+            self.state.note_attention(conversation);
+        }
+        if !self.notification_rules.enabled {
+            return;
+        }
         let plain = display::neutralize_bidi_owned(if kind.is_action() {
             format!("* {sender} {}", strip_formatting(text))
         } else {
             strip_formatting(text)
         });
-        let visible = self.window_active
-            && self.state.selection()
-                == conversation.map_or(Selection::Server(network), Selection::Channel);
         if visible || !self.notification_burst.allow(Instant::now()) {
             return;
         }
@@ -3391,10 +3406,33 @@ impl ChatWindow {
         self.state.dispatch(command);
         self.log_selection = None;
         self.set_feedback(None);
+        if let Some((id, sequence)) = self.state.take_reveal() {
+            self.reveal_message(id, sequence, cx);
+        }
         self.update_title(window);
         cx.notify();
         // Redraw the pane contents together with the native title change.
         window.refresh();
+    }
+
+    /// Scrolls the selected conversation's log to the line `sequence` and
+    /// emphasizes it for a moment.
+    fn reveal_message(&mut self, id: ConversationId, sequence: u64, cx: &mut Context<Self>) {
+        self.sync_log_lists();
+        if let Some(list) = self.main_lists.get_mut(&Selection::Channel(id)) {
+            list.scroll_to_sequence(sequence);
+        }
+        self.reveal_flash = Some((id, sequence));
+        cx.spawn(async move |this, cx| {
+            Timer::after(REVEAL_FLASH).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.reveal_flash == Some((id, sequence)) {
+                    this.reveal_flash = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn navigate(&mut self, action: &Navigate, window: &mut Window, cx: &mut Context<Self>) {
@@ -6456,6 +6494,15 @@ impl ChatWindow {
             .when(style.alternate_rows && index % 2 == 1, |d| {
                 d.bg(style.main_alt)
             })
+            .when(
+                self.reveal_flash == Some((selected_channel, message.sequence)),
+                |d| {
+                    d.bg(Rgba {
+                        a: 0.35,
+                        ..theme.panes.highlight
+                    })
+                },
+            )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
