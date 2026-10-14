@@ -1194,8 +1194,16 @@ The confirm button keeps its specific label ("Quit", "Delete", …).
   the OS lays them out: the Windows task dialog shows custom buttons left to
   right, `NSAlert` puts the first button at the right edge, and the Linux
   fallback prompt stacks them top to bottom. Answer 0 is the confirming
-  action; the quit question was the only one with Cancel first and was
-  flipped. Read from the vendored GPUI sources; not run on Windows or macOS.
+  action. Read from the vendored GPUI sources; not run on Windows or macOS.
+  The first button is also the default for Enter (Windows task dialog without
+  `nDefaultButton`, AppKit's Return), so these prompts are only for actions
+  where Enter on the confirm button is acceptable.
+- **The quit question is not native.** Enter must keep cancelling, which a
+  native prompt cannot do together with "confirm on the left" (the first
+  button is both). It is drawn in the chat window (`quit_dialog.rs`) with
+  `button_order::row`; the focus starts on Cancel, so Enter, Space and Escape
+  cancel, and quitting takes a click or Tab then Enter. Covered by UI tests
+  (keys, clicks, button positions for both orders).
 - **Rows drawn by the app** (member and nickname prompts, upload token,
   avatar editor) list the confirm button first and are wrapped in
   `button_order::row`, which reverses the row on macOS only, so source and
@@ -1266,9 +1274,9 @@ default and added without a version change, so older files read as off.
   The window stays open, `quit_prompt_open` suppresses a second question, and
   Cancel restores the focus that was in the window. "Quit" calls `cx.quit()`,
   so `on_app_quit` runs the usual shutdown once.
-- The question uses the window prompt (`Window::prompt`). Native prompts
-  handle Esc themselves; the vendored GPUI fallback prompt (X11, Wayland)
-  was patched to treat Esc as its cancel button (`vendor/gpui/PATCHES.md`).
+- The question is drawn in the chat window (`quit_dialog.rs`, D048), not by
+  `Window::prompt`: focus starts on Cancel, so Enter, Space and Esc cancel on
+  every OS and the buttons follow the OS order.
 - **Where it is asked:** the settings window has no Quit handler of its own;
   the application-wide handler (`request_quit_anywhere`) opens the question in
   the chat window and brings it to the front, so it is not hidden behind the

@@ -3616,6 +3616,13 @@ fn switching_settings_tabs_resets_only_the_pane_scroll(cx: &mut TestAppContext) 
     }
 }
 
+/// Runs the pending work and draws the window, so that what a change put on
+/// screen can be found and reached by keys.
+fn settle(cx: &mut gpui::VisualTestContext) {
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear());
+}
+
 #[gpui::test]
 fn quitting_asks_first_only_when_switched_on(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -3646,15 +3653,20 @@ fn quitting_asks_first_only_when_switched_on(cx: &mut TestAppContext) {
 
     // On: the window stays and one question opens, however often asked.
     assert!(!cx.simulate_close());
-    assert!(cx.has_pending_prompt());
-    let (title, detail) = cx.pending_prompt().unwrap();
-    assert_eq!(title, "Quit CayenChat?");
-    assert!(detail.contains("quits the application"), "{detail}");
+    settle(cx);
+    assert!(
+        !cx.has_pending_prompt(),
+        "the question is not a native prompt"
+    );
+    chat.read_with(cx, |chat, _| assert!(chat.quit_prompt_open));
+    assert!(cx.debug_bounds("quit-dialog").is_some());
     assert!(!cx.simulate_close());
     cx.dispatch_action(super::Quit);
-    cx.simulate_prompt_answer("Cancel");
-    cx.run_until_parked();
-    assert!(!cx.has_pending_prompt(), "asked once");
+    settle(cx);
+    // Escape cancels.
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    chat.read_with(cx, |chat, _| assert!(!chat.quit_prompt_open, "asked once"));
 
     // Cancelled: the draft and the focus are where they were, and the next
     // request asks again.
@@ -3662,9 +3674,10 @@ fn quitting_asks_first_only_when_switched_on(cx: &mut TestAppContext) {
     cx.update(|window, cx| assert!(input.focus_handle(cx).is_focused(window)));
     chat.read_with(cx, |chat, _| assert!(!chat.quit_prompt_open));
     cx.dispatch_action(super::Quit);
-    assert!(cx.has_pending_prompt());
-    cx.simulate_prompt_answer("Cancel");
-    cx.run_until_parked();
+    settle(cx);
+    chat.read_with(cx, |chat, _| assert!(chat.quit_prompt_open));
+    cx.simulate_keystrokes("escape");
+    settle(cx);
 }
 
 #[gpui::test]
@@ -3689,12 +3702,13 @@ fn quit_from_another_window_asks_in_the_chat_window(cx: &mut TestAppContext) {
 
     // The settings window has no Quit handler, so the action ends up here.
     app.update(crate::request_quit_anywhere);
-    assert!(cx.has_pending_prompt());
+    cx.run_until_parked();
     chat.read_with(cx, |chat, _| assert!(chat.quit_prompt_open));
     app.update(crate::request_quit_anywhere);
-    cx.simulate_prompt_answer("Cancel");
-    cx.run_until_parked();
-    assert!(!cx.has_pending_prompt(), "asked once");
+    settle(cx);
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    chat.read_with(cx, |chat, _| assert!(!chat.quit_prompt_open));
 }
 
 #[gpui::test]
@@ -3726,22 +3740,24 @@ fn closing_another_window_during_the_question_keeps_quitting_possible(cx: &mut T
     });
 
     app.update(crate::request_quit_anywhere);
-    assert!(cx.has_pending_prompt());
+    cx.run_until_parked();
+    chat.read_with(cx, |chat, _| assert!(chat.quit_prompt_open));
     // The other window goes away before the question is answered.
     other
         .update(&mut app.clone(), |_, window, _| window.remove_window())
         .unwrap();
     app.update(|_| {});
-    cx.run_until_parked();
-    cx.simulate_prompt_answer("Cancel");
-    cx.run_until_parked();
+    settle(cx);
+    cx.simulate_keystrokes("escape");
+    settle(cx);
     chat.read_with(cx, |chat, _| assert!(!chat.quit_prompt_open));
 
     // The next request asks again instead of being ignored.
     app.update(crate::request_quit_anywhere);
-    assert!(cx.has_pending_prompt());
-    cx.simulate_prompt_answer("Cancel");
-    cx.run_until_parked();
+    settle(cx);
+    chat.read_with(cx, |chat, _| assert!(chat.quit_prompt_open));
+    cx.simulate_keystrokes("escape");
+    settle(cx);
 }
 
 #[gpui::test]
@@ -3774,8 +3790,9 @@ fn quit_requested_while_the_chat_window_is_busy_still_asks(cx: &mut TestAppConte
             .unwrap();
     });
     cx.run_until_parked();
-    assert!(cx.has_pending_prompt(), "asked after the event");
-    chat.read_with(cx, |chat, _| assert!(chat.quit_prompt_open));
+    chat.read_with(cx, |chat, _| {
+        assert!(chat.quit_prompt_open, "asked after the event")
+    });
 
     // Asking again while the question is open and the window is busy neither
     // quits nor opens a second question.
@@ -3785,11 +3802,115 @@ fn quit_requested_while_the_chat_window_is_busy_still_asks(cx: &mut TestAppConte
             .update(cx, |_, _, cx| crate::request_quit_anywhere(cx))
             .unwrap();
     });
-    cx.run_until_parked();
-    cx.simulate_prompt_answer("Cancel");
-    cx.run_until_parked();
-    assert!(!cx.has_pending_prompt(), "asked once");
+    settle(cx);
+    cx.simulate_keystrokes("escape");
+    settle(cx);
     chat.read_with(cx, |chat, _| assert!(!chat.quit_prompt_open));
+}
+
+fn quit_dialog_window(
+    cx: &mut TestAppContext,
+) -> (gpui::Entity<ChatWindow>, &mut gpui::VisualTestContext) {
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        crate::apply_shortcuts(crate::ShortcutPrefs::default(), cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let mut settings = crate::settings_with_channels("#a");
+    settings.language = cayenchat_storage::Language::English;
+    settings.confirm_quit = true;
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    cx.run_until_parked();
+    cx.dispatch_action(super::Quit);
+    settle(cx);
+    (chat, cx)
+}
+
+#[gpui::test]
+fn quit_question_keeps_enter_and_space_on_cancel(cx: &mut TestAppContext) {
+    let (chat, cx) = quit_dialog_window(cx);
+    let input = chat.read_with(cx, |chat, _| chat.inputs[&chat.state.selection()].clone());
+    // The question is already open; cancel it, then focus the input, which
+    // is where the focus must come back to.
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    cx.update(|window, cx| window.focus(&input.focus_handle(cx)));
+
+    for key in ["enter", "space"] {
+        cx.dispatch_action(super::Quit);
+        settle(cx);
+        chat.read_with(cx, |chat, _| assert!(chat.quit_prompt_open));
+        cx.simulate_keystrokes(key);
+        settle(cx);
+        chat.read_with(cx, |chat, _| {
+            assert!(!chat.quit_prompt_open, "{key} cancels")
+        });
+        cx.update(|window, cx| assert!(input.focus_handle(cx).is_focused(window)));
+    }
+}
+
+#[gpui::test]
+fn quit_question_quits_only_through_the_confirm_button(cx: &mut TestAppContext) {
+    let (chat, cx) = quit_dialog_window(cx);
+    let input = chat.read_with(cx, |chat, _| chat.inputs[&chat.state.selection()].clone());
+    // Tab goes to the confirm button and a second Tab back to Cancel, where
+    // Enter cancels.
+    cx.simulate_keystrokes("tab tab enter");
+    settle(cx);
+    chat.read_with(cx, |chat, _| assert!(!chat.quit_prompt_open));
+
+    // Clicking Cancel cancels; clicking the confirm button quits.
+    cx.dispatch_action(super::Quit);
+    settle(cx);
+    let cancel = cx.debug_bounds("quit-dialog-cancel").unwrap();
+    cx.simulate_click(cancel.center(), gpui::Modifiers::none());
+    settle(cx);
+    chat.read_with(cx, |chat, _| assert!(!chat.quit_prompt_open));
+    cx.update(|window, cx| window.focus(&input.focus_handle(cx)));
+
+    cx.dispatch_action(super::Quit);
+    settle(cx);
+    let confirm = cx.debug_bounds("quit-dialog-confirm").unwrap();
+    cx.simulate_click(confirm.center(), gpui::Modifiers::none());
+    settle(cx);
+    chat.read_with(cx, |chat, _| assert!(!chat.quit_prompt_open));
+    // The test platform ignores `quit`; the focus is the visible difference:
+    // cancelling gives it back to the input, quitting does not.
+    cx.update(|window, cx| assert!(!input.focus_handle(cx).is_focused(window)));
+}
+
+#[gpui::test]
+fn quit_question_lays_out_confirm_and_cancel_per_os(cx: &mut TestAppContext) {
+    let (_chat, cx) = quit_dialog_window(cx);
+    let confirm = cx.debug_bounds("quit-dialog-confirm").unwrap();
+    let cancel = cx.debug_bounds("quit-dialog-cancel").unwrap();
+    // Windows and Linux: confirm left of Cancel; macOS: the other way round.
+    assert_eq!(
+        confirm.origin.x < cancel.origin.x,
+        !crate::button_order::cancel_first()
+    );
+
+    // Both orders, whatever OS the test runs on.
+    struct Row(bool);
+    impl gpui::Render for Row {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            crate::button_order::row_with(div().flex(), self.0)
+                .child(div().debug_selector(|| "first".into()).child("first"))
+                .child(div().debug_selector(|| "second".into()).child("second"))
+        }
+    }
+    for cancel_first in [false, true] {
+        let (_, cx) = cx.add_window_view(|_, _| Row(cancel_first));
+        let first = cx.debug_bounds("first").unwrap();
+        let second = cx.debug_bounds("second").unwrap();
+        assert_eq!(first.origin.x > second.origin.x, cancel_first);
+    }
 }
 
 #[gpui::test]
@@ -3900,4 +4021,41 @@ fn actions_are_kept_as_their_own_text_on_every_path(cx: &mut TestAppContext) {
         let private = chat.state.conversations().len() - 1;
         assert_eq!(shown(private), [(true, false, "sighs".to_owned())]);
     });
+}
+
+#[gpui::test]
+fn member_prompt_buttons_follow_the_os_order(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        crate::apply_shortcuts(crate::ShortcutPrefs::default(), cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let mut settings = crate::settings_with_channels("#a");
+    settings.language = cayenchat_storage::Language::English;
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    cx.run_until_parked();
+    chat.update_in(cx, |chat, window, cx| {
+        let network = chat.selected_network_id().unwrap();
+        chat.show_member_prompt(
+            network,
+            String::new(),
+            super::MemberPromptKind::Join,
+            gpui::point(gpui::px(50.), gpui::px(50.)),
+            window,
+            cx,
+        );
+    });
+    settle(cx);
+    let submit = cx.debug_bounds("member-prompt-submit").unwrap();
+    let cancel = cx.debug_bounds("member-prompt-cancel").unwrap();
+    assert_eq!(
+        submit.origin.x < cancel.origin.x,
+        !crate::button_order::cancel_first()
+    );
 }

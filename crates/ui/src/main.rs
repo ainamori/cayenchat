@@ -30,6 +30,7 @@ mod notifier;
 #[cfg(test)]
 mod perf_baseline;
 mod previews;
+mod quit_dialog;
 mod scrollbar;
 mod secrets;
 mod session;
@@ -577,6 +578,7 @@ struct ChatWindow {
     /// on screen, so a second quit request does not open another.
     confirm_quit: bool,
     quit_prompt_open: bool,
+    quit_dialog: quit_dialog::QuitDialog,
     layout_file: Option<std::path::PathBuf>,
     /// The channel order chosen by dragging or the menu, and the file it is
     /// written to (`None` writes nothing, as for `layout_file`).
@@ -1056,6 +1058,7 @@ impl ChatWindow {
             restore_layout: saved.restore_window_layout,
             confirm_quit: saved.confirm_quit,
             quit_prompt_open: false,
+            quit_dialog: quit_dialog::QuitDialog::new(cx),
             layout_file: None,
             channel_orders: Default::default(),
             order_file: None,
@@ -1207,40 +1210,11 @@ impl ChatWindow {
         if self.quit_prompt_open {
             return true;
         }
-        self.quit_prompt_open = true;
         // The request may come from the settings window or the Dock; show
-        // the question in front.
+        // the question in front. It is drawn in this window (`quit_dialog`)
+        // so that Enter cancels whatever the OS's button order is.
         window.activate_window();
-        let focused = window.focused(cx);
-        let connected = self.sessions.values().any(|session| session.irc.is_some());
-        let detail = self.i18n.text(if connected {
-            "quit_detail_connected"
-        } else {
-            "quit_detail"
-        });
-        let answer = window.prompt(
-            PromptLevel::Info,
-            &self.i18n.text("quit_title"),
-            Some(&detail),
-            &[
-                PromptButton::ok(self.i18n.text("quit_confirm")),
-                PromptButton::cancel(self.i18n.text("cancel")),
-            ],
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            let quit = answer.await == Ok(0);
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.quit_prompt_open = false;
-                if quit {
-                    cx.quit();
-                } else if let Some(handle) = focused {
-                    // Back to where the user was typing.
-                    window.focus(&handle);
-                }
-            });
-        })
-        .detach();
+        self.open_quit_dialog(window, cx);
         true
     }
 
@@ -6060,6 +6034,7 @@ impl ChatWindow {
                         .child(
                             div()
                                 .id("member-prompt-submit")
+                                .debug_selector(|| "member-prompt-submit".into())
                                 .px_2()
                                 .py_1()
                                 .bg(theme.selected)
@@ -6072,6 +6047,7 @@ impl ChatWindow {
                         .child(
                             div()
                                 .id("member-prompt-cancel")
+                                .debug_selector(|| "member-prompt-cancel".into())
                                 .px_2()
                                 .py_1()
                                 .border_1()
@@ -6085,6 +6061,7 @@ impl ChatWindow {
                 )
         });
         let nick_prompts = self.render_nick_prompts(origin, window, cx);
+        let quit_dialog = self.render_quit_dialog(window, cx);
         div()
             .id("chat-window")
             .key_context("ChatWindow")
@@ -6157,6 +6134,7 @@ impl ChatWindow {
             })
             .when_some(member_prompt, |d, prompt| d.child(prompt))
             .when_some(nick_prompts, |d, prompts| d.child(prompts))
+            .when_some(quit_dialog, |d, dialog| d.child(dialog))
             .into_any_element()
     }
 }

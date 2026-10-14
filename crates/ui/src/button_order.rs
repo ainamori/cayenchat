@@ -25,7 +25,12 @@ const fn cancel_first_on(macos: bool) -> bool {
 
 /// Lays a row out with its first child (the confirm button) in the OS's place.
 pub(crate) fn row(row: Div) -> Div {
-    if cancel_first() {
+    row_with(row, cancel_first())
+}
+
+/// [`row`] for a given OS, so that both orders can be drawn in tests.
+pub(crate) fn row_with(row: Div, cancel_first: bool) -> Div {
+    if cancel_first {
         row.flex_row_reverse()
     } else {
         row
