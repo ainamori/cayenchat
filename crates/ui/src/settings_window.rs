@@ -3,7 +3,7 @@
 
 use crate::{
     ChatWindow, Connect, CopyDiagnostics, Disconnect, FocusNextField, FocusPreviousField,
-    OpenSettings, Quit, Reconnect, ShortcutPrefs, ToggleDebug, account_settings, apply_shortcuts,
+    OpenSettings, Reconnect, ShortcutPrefs, ToggleDebug, account_settings, apply_shortcuts,
     autostart, avatar_editor, color_picker, connection_config, decorations, diagnostics,
     field_traversal, forget_removed_profiles, i18n_error, input::TextInput, ircv3_settings,
     localization::Localizer, notification_rules, saved_connection_secrets, scrollbar, secrets,
@@ -1300,6 +1300,7 @@ impl SettingsWindow {
         let language_changed = previous.language != saved.language;
         let layout_changed = previous.restore_window_layout != saved.restore_window_layout;
         let restore_layout = saved.restore_window_layout;
+        let confirm_quit = saved.confirm_quit;
         let shortcuts = ShortcutPrefs::from(&saved);
         let shortcuts_changed = ShortcutPrefs::from(previous) != shortcuts;
         let menu_bar_changed = previous.menu_bar_auto_hide != saved.menu_bar_auto_hide;
@@ -1309,6 +1310,7 @@ impl SettingsWindow {
         let rules = notification_rules(&saved.notifications);
         let _ = self.owner.update(cx, |owner, window, cx| {
             owner.image_provider = provider;
+            owner.confirm_quit = confirm_quit;
             owner.apply_conversation_log(&saved.conversation_log);
             cx.set_global(crate::input::ShortenPastedAmazon(shorten_amazon_urls));
             owner.notification_rules = rules;
@@ -3421,7 +3423,6 @@ impl SettingsWindow {
             )
             .on_action(cx.listener(Self::toggle_debug_action))
             .on_action(cx.listener(Self::copy_diagnostics_action))
-            .on_action(|_: &Quit, _, cx| cx.quit())
     }
 }
 

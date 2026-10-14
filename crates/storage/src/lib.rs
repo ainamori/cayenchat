@@ -911,6 +911,10 @@ pub struct Settings {
     /// Reopen the main window where it was left, with its pane sizes (see
     /// [`layout`]). On by default, also for files saved before it existed.
     pub restore_window_layout: bool,
+    /// Ask before the user quits the application. Off by default, also for
+    /// files saved before it existed. Quits by the system or by a signal
+    /// never ask.
+    pub confirm_quit: bool,
     /// Shorten long Amazon product links to `/dp/<ASIN>` in the text a send
     /// puts on the wire; the draft keeps what was typed. On by default, also
     /// for files saved before it existed.
@@ -960,6 +964,7 @@ impl Default for Settings {
             text_key_theme: TextKeyTheme::Auto,
             appearance: Appearance::default(),
             restore_window_layout: true,
+            confirm_quit: false,
             shorten_amazon_urls: true,
             credential_backend: CredentialBackendKind::System,
             image_upload: ImageUpload::default(),
@@ -2903,6 +2908,18 @@ mod tests {
         settings.restore_window_layout = false;
         save_to(&path, &settings).unwrap();
         assert!(!load_from(&path).unwrap().unwrap().restore_window_layout);
+    }
+
+    #[test]
+    fn quitting_is_confirmed_only_when_switched_on() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        fs::write(&path, r#"{"version":15,"selected_server":"","servers":[]}"#).unwrap();
+        let mut settings = load_from(&path).unwrap().unwrap();
+        assert!(!settings.confirm_quit, "absent reads as off");
+        settings.confirm_quit = true;
+        save_to(&path, &settings).unwrap();
+        assert!(load_from(&path).unwrap().unwrap().confirm_quit);
     }
 
     #[test]

@@ -229,6 +229,11 @@ pub(crate) trait Platform: 'static {
     fn open_with_system(&self, path: &Path);
 
     fn on_quit(&self, callback: Box<dyn FnMut()>);
+    /// Called when the user asks the system to quit the application from
+    /// outside it (macOS Dock "Quit"). Returning `false` cancels the request.
+    /// Quits started by [`Platform::quit`] and by the system (shutdown, log
+    /// out) do not ask. Platforms without such a request ignore it.
+    fn on_quit_request(&self, _callback: Box<dyn FnMut() -> bool>) {}
     fn on_reopen(&self, callback: Box<dyn FnMut()>);
 
     fn set_menus(&self, menus: Vec<Menu>, keymap: &Keymap);

@@ -109,6 +109,25 @@ impl SettingsWindow {
             )
             .child(
                 div()
+                    .id("confirm-quit")
+                    .ml(px(158.))
+                    .flex()
+                    .gap_2()
+                    .cursor_pointer()
+                    .child(settings_theme::checkbox(
+                        self.settings.values.confirm_quit,
+                        true,
+                        cx,
+                    ))
+                    .child(self.i18n.text("confirm_quit"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let value = &mut this.settings.values.confirm_quit;
+                        *value = !*value;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
                     .id("shorten-amazon-urls")
                     .ml(px(158.))
                     .flex()

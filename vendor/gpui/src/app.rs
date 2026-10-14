@@ -589,6 +589,7 @@ pub struct App {
     #[cfg(any(test, feature = "test-support", debug_assertions))]
     pub(crate) name: Option<&'static str>,
     quitting: bool,
+    quit_request: Option<Box<dyn FnMut(&mut App) -> bool>>,
 }
 
 impl App {
@@ -660,6 +661,7 @@ impl App {
                 #[cfg(any(feature = "inspector", debug_assertions))]
                 inspector_element_registry: InspectorElementRegistry::default(),
                 quitting: false,
+                quit_request: None,
 
                 #[cfg(any(test, feature = "test-support", debug_assertions))]
                 name: None,
@@ -687,6 +689,19 @@ impl App {
             let cx = app.clone();
             move || {
                 cx.borrow_mut().shutdown();
+            }
+        }));
+
+        platform.on_quit_request(Box::new({
+            let cx = app.clone();
+            move || {
+                let cx = &mut *cx.borrow_mut();
+                let Some(mut handler) = cx.quit_request.take() else {
+                    return true;
+                };
+                let allowed = handler(cx);
+                cx.quit_request.get_or_insert(handler);
+                allowed
             }
         }));
 
@@ -743,6 +758,14 @@ impl App {
         );
         activate();
         subscription
+    }
+
+    /// Register a handler for quit requests the user makes outside the
+    /// application (macOS Dock "Quit"). Return `false` to cancel the request,
+    /// for instance while asking for confirmation, and call [`App::quit`] once
+    /// it is given. [`App::quit`] and system shutdown never reach the handler.
+    pub fn on_quit_request(&mut self, handler: impl FnMut(&mut App) -> bool + 'static) {
+        self.quit_request = Some(Box::new(handler));
     }
 
     /// Gracefully quit the application via the platform's standard routine.
