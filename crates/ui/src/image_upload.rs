@@ -320,7 +320,8 @@ impl ChatWindow {
                 if let Some(input) = self.inputs.get(&target) {
                     input.update(cx, |input, cx| input.insert_link(&url, cx));
                 }
-                self.feedback = Some(self.i18n.text("upload_done"));
+                // The inserted link is the feedback; clear the progress note.
+                self.feedback = None;
             }
             Completion::Failed {
                 provider,
@@ -484,7 +485,7 @@ mod tests {
         cx.simulate_prompt_answer("Upload");
         cx.run_until_parked();
         assert_eq!(fake.calls(), 1);
-        assert_eq!(draft(&input, cx), format!("look: {URL} "));
+        assert_eq!(draft(&input, cx), format!("look: {URL}"));
         // The draft is only edited; it is not sent or cleared.
         let messages = chat.read_with(cx, |chat, _| chat.state.conversations()[0].messages.len());
         assert_eq!(messages, 0);
@@ -615,6 +616,6 @@ mod tests {
         cx.simulate_prompt_answer("Upload");
         cx.run_until_parked();
         assert_eq!(fake.uploaded_names(), ["dropped.png"]);
-        assert_eq!(draft(&input, cx), format!("{URL} "));
+        assert_eq!(draft(&input, cx), URL.to_owned());
     }
 }

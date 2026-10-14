@@ -359,7 +359,6 @@
   "upload_reconnect": "アカウントを再接続",
   "upload_preparing": "画像を準備しています…",
   "upload_uploading": "{provider} に画像をアップロードしています…",
-  "upload_done": "画像をアップロードし、入力欄にリンクを追加しました。",
   "upload_cancel": "キャンセル",
   "upload_cancelled": "アップロードをキャンセルしました。送信が完了していた場合、画像は {provider} に残っている可能性があります。",
   "upload_busy": "別の画像をアップロード中です。",
