@@ -231,7 +231,7 @@ impl ConnectionConfig {
     }
 
     /// The `QUIT` reason: the configured message, or the default when blank.
-    pub(crate) fn wire_quit_message(&self) -> String {
+    pub fn wire_quit_message(&self) -> String {
         let configured = self.quit_message.trim();
         if configured.is_empty() {
             QUIT_MESSAGE.to_owned()

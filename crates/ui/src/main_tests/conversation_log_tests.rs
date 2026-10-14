@@ -159,6 +159,7 @@ fn enabled_logs_save_live_lines_only(cx: &mut TestAppContext) {
                     msgid: None,
                     server_time: None,
                 },
+                Event::Disconnected("Ping timeout: 240 seconds".into()),
             ],
             Worker::Running,
             cx,
@@ -176,6 +177,7 @@ fn enabled_logs_save_live_lines_only(cx: &mut TestAppContext) {
             "mode|dave|-v gina",
             "msg|me|from me",
             "msg|me|confirmed",
+            "quit|me|Ping timeout: 240 seconds",
         ]
     );
     assert_eq!(

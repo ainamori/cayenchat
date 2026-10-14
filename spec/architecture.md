@@ -1815,6 +1815,10 @@ change, and our own sends after `OutgoingAccepted`, held until
 the logger's `Notify` callback (a channel read by a task of the window) to
 announce a failure or a lock, and retires the logger without waiting when a
 log is turned off; only quitting waits, for at most 2 seconds.
+Our own quit is logged as a `quit` line by our nickname in every joined channel,
+with the reason of the disconnect (ping timeout, user disconnect…), or the QUIT
+text sent when the application quits; it is written before the channels are
+reset (#389).
 `Event::Topic` carries who changed the topic and the server time for it.
 
 ## Server-confirmed sending (D036)
