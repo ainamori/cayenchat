@@ -3111,6 +3111,9 @@ impl ChatWindow {
         let wanted = size(px(900.), px(750.));
         let mut min_size = size(px(760.), px(540.));
         let display = window.display(cx);
+        let display_known = display.is_some();
+        #[cfg(target_os = "windows")]
+        let owner_scale = window.scale_factor();
         let bounds = match &display {
             Some(display) => {
                 let anchor = placement::anchor(window, &settings_title);
@@ -3158,24 +3161,23 @@ impl ChatWindow {
                         }
                     });
                 }
-                // The window manager of X11 places a new window itself; ask it
-                // again for the computed place once it manages the window.
+                // A new window is not where it was asked for on X11 (the window
+                // manager places it) nor with mixed scales on Windows; both are
+                // put right once it exists, off the UI thread on X11.
                 #[cfg(target_os = "linux")]
-                if let Ok(target) = handle.update(cx, |_, window, _| {
-                    placement::move_target(window, &settings_title, bounds)
-                }) {
-                    cx.spawn(async move |_, cx| {
-                        for _ in 0..40 {
-                            match placement::try_move(&target) {
-                                Some(false) => {}
-                                _ => return,
-                            }
-                            cx.background_executor()
-                                .timer(Duration::from_millis(50))
-                                .await;
-                        }
-                    })
-                    .detach();
+                if display_known {
+                    placement::place_later(
+                        window.bounds(),
+                        window.scale_factor(),
+                        settings_title.clone(),
+                        wanted,
+                    );
+                }
+                #[cfg(target_os = "windows")]
+                if display_known {
+                    let _ = handle.update(cx, |_, settings_window, _| {
+                        placement::place_native(settings_window, bounds, owner_scale)
+                    });
                 }
                 self.settings_window = Some(handle)
             }
