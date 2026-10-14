@@ -3107,20 +3107,29 @@ impl ChatWindow {
         // Placed relative to this window on the display it is on; the usual
         // screen center only when that display is unknown.
         let wanted = size(px(900.), px(750.));
-        let min_size = size(px(760.), px(540.));
+        let mut min_size = size(px(760.), px(540.));
         let display = window.display(cx);
         let bounds = match &display {
             Some(display) => {
-                window_layout::settings_bounds(window.bounds(), display.bounds(), wanted, min_size)
+                let area = window_layout::usable_area(display.bounds(), work_area(window));
+                let bounds = window_layout::settings_bounds(window.bounds(), area, wanted);
+                // A small area shrinks the window below its usual minimum;
+                // the settings pages scroll.
+                min_size = size(
+                    min_size.width.min(bounds.size.width),
+                    min_size.height.min(bounds.size.height),
+                );
+                bounds
             }
             None => Bounds::centered(None, wanted, cx),
         };
         match cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                // Windows opens on the primary display unless told which one.
+                // Windows and macOS open on the primary display unless told
+                // which one (and macOS takes the position within it).
                 display_id: display
-                    .filter(|_| cfg!(target_os = "windows"))
+                    .filter(|_| cfg!(any(target_os = "windows", target_os = "macos")))
                     .map(|display| display.id()),
                 window_min_size: Some(min_size),
                 titlebar: Some(TitlebarOptions {
@@ -4594,6 +4603,50 @@ impl ChatWindow {
         }
         cx.notify();
     }
+}
+
+/// The work area (the display less the taskbar) of the display `window` is on,
+/// in GPUI's logical pixels. GPUI does not report it, so it is read from the
+/// native handle; `None` where that is not done (macOS, Linux) or fails.
+#[cfg(target_os = "windows")]
+fn work_area(window: &Window) -> Option<Bounds<Pixels>> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    };
+
+    if cfg!(test) {
+        return None;
+    }
+    let handle = HasWindowHandle::window_handle(window).ok()?;
+    let RawWindowHandle::Win32(native) = handle.as_raw() else {
+        return None;
+    };
+    let hwnd = native.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: plain queries on a live window handle and a zeroed out struct.
+    let work = unsafe {
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(monitor, &mut info) == 0 {
+            return None;
+        }
+        info.rcWork
+    };
+    // Physical pixels to GPUI's logical ones, as for its display bounds.
+    let scale = window.scale_factor();
+    Some(Bounds::new(
+        point(px(work.left as f32 / scale), px(work.top as f32 / scale)),
+        size(
+            px((work.right - work.left) as f32 / scale),
+            px((work.bottom - work.top) as f32 / scale),
+        ),
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn work_area(_: &Window) -> Option<Bounds<Pixels>> {
+    None
 }
 
 /// Puts a CayenChat window above (or back among) ordinary windows.

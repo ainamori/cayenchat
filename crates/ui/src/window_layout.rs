@@ -70,35 +70,69 @@ pub fn restored_bounds(
     })
 }
 
+/// The display area a new window's content may use: the work area where the
+/// platform tells it (excluding taskbar and Dock), otherwise `display` less a
+/// fixed reserve for a menu bar, taskbar or Dock. Either way room is left for
+/// the title bar and frame, which GPUI's window bounds do not include.
+pub fn usable_area(display: Bounds<Pixels>, work: Option<Bounds<Pixels>>) -> Bounds<Pixels> {
+    const TITLE: f32 = 40.;
+    const FRAME: f32 = 8.;
+    const RESERVE_TOP: f32 = 32.;
+    const RESERVE_BOTTOM: f32 = 80.;
+    let base = work.unwrap_or_else(|| {
+        let height = f32::from(display.size.height) - RESERVE_TOP - RESERVE_BOTTOM;
+        Bounds::new(
+            point(display.origin.x, display.origin.y + px(RESERVE_TOP)),
+            size(display.size.width, px(height.max(1.))),
+        )
+    });
+    let width = f32::from(base.size.width) - 2. * FRAME;
+    let height = f32::from(base.size.height) - TITLE - FRAME;
+    Bounds::new(
+        point(base.origin.x + px(FRAME), base.origin.y + px(TITLE)),
+        size(px(width.max(1.)), px(height.max(1.))),
+    )
+}
+
 /// Where a new settings window opens: horizontally centered on the owner
-/// (the chat window), vertically starting at the owner's middle so that at
-/// least its upper half stays visible. The whole window stays inside
-/// `display`, which wins over both; it is shrunk (not below `min`) when the
-/// display is too small. GPUI reports no work area, so a taskbar or Dock is
-/// not subtracted.
+/// (the chat window). Vertically it either starts at the owner's middle or
+/// ends there, whichever leaves more of the owner visible (the first when
+/// equal). The whole window stays inside `area` (see [`usable_area`]), which
+/// wins over both; it is shrunk when `area` is smaller than `wanted`, even
+/// below the window's usual minimum, so the caller lowers the minimum to the
+/// returned size.
 pub fn settings_bounds(
     owner: Bounds<Pixels>,
-    display: Bounds<Pixels>,
+    area: Bounds<Pixels>,
     wanted: Size<Pixels>,
-    min: Size<Pixels>,
 ) -> Bounds<Pixels> {
-    let (left, top) = (f32::from(display.left()), f32::from(display.top()));
-    let (screen_width, screen_height) = (
-        f32::from(display.size.width),
-        f32::from(display.size.height),
-    );
-    let width = f32::from(wanted.width)
-        .min(screen_width)
-        .max(f32::from(min.width));
-    let height = f32::from(wanted.height)
-        .min(screen_height)
-        .max(f32::from(min.height));
-    let center_x = f32::from(owner.center().x);
-    let owner_middle = f32::from(owner.center().y);
-    let x = (center_x - width / 2.)
-        .min(left + screen_width - width)
+    let (left, top) = (f32::from(area.left()), f32::from(area.top()));
+    let (area_width, area_height) = (f32::from(area.size.width), f32::from(area.size.height));
+    let width = f32::from(wanted.width).min(area_width);
+    let height = f32::from(wanted.height).min(area_height);
+    let x = (f32::from(owner.center().x) - width / 2.)
+        .min(left + area_width - width)
         .max(left);
-    let y = owner_middle.min(top + screen_height - height).max(top);
+    let middle = f32::from(owner.center().y);
+    let fit = |y: f32| y.min(top + area_height - height).max(top);
+    // How much of the owner a settings window at `y` leaves uncovered.
+    let visible = |y: f32| {
+        let across = (x + width).min(f32::from(owner.right())) - x.max(f32::from(owner.left()));
+        let down = (y + height).min(f32::from(owner.bottom())) - y.max(f32::from(owner.top()));
+        let covered = if across > 0. && down > 0. {
+            across * down
+        } else {
+            0.
+        };
+        f32::from(owner.size.width) * f32::from(owner.size.height) - covered
+    };
+    let below = fit(middle);
+    let above = fit(middle - height);
+    let y = if visible(above) > visible(below) {
+        above
+    } else {
+        below
+    };
     Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
 }
 
@@ -120,14 +154,31 @@ mod tests {
     fn settings_are_centered_horizontally_on_the_owner() {
         let screen = display(0., 0., 1920., 1080.);
         let owner = display(400., 100., 960., 500.);
-        let got = settings_bounds(
-            owner,
-            screen,
-            size(px(900.), px(400.)),
-            size(px(760.), px(540.)),
+        let got = settings_bounds(owner, screen, size(px(900.), px(400.)));
+        // Starts at the owner's middle (350), leaving its upper part visible.
+        assert_eq!(rect(got), (430., 350., 900., 400.));
+    }
+
+    #[test]
+    fn settings_go_above_when_below_would_hide_the_owner() {
+        let screen = display(0., 0., 1920., 1080.);
+        let owner = display(400., 500., 960., 500.);
+        let got = settings_bounds(owner, screen, size(px(900.), px(750.)));
+        // Below the middle it would be pushed up over the whole owner; ending
+        // at the screen top instead leaves the owner's lower half.
+        assert_eq!(rect(got), (430., 0., 900., 750.));
+    }
+
+    #[test]
+    fn usable_area_leaves_room_for_the_frame_and_the_work_area() {
+        let screen = display(0., 0., 1920., 1080.);
+        let work = display(0., 0., 1920., 1032.);
+        assert_eq!(
+            rect(usable_area(screen, Some(work))),
+            (8., 40., 1904., 984.)
         );
-        // 880 is the owner's middle; 540 is the minimum height.
-        assert_eq!(rect(got), (430., 350., 900., 540.));
+        // Work area unknown: a menu bar and a taskbar or Dock are assumed.
+        assert_eq!(rect(usable_area(screen, None)), (8., 72., 1904., 920.));
     }
 
     #[test]
@@ -135,43 +186,23 @@ mod tests {
         let screens = display(-1280., 0., 1280., 1024.);
         // Owner at the left edge of a monitor with negative coordinates.
         let owner = display(-1280., 900., 800., 124.);
-        let got = settings_bounds(
-            owner,
-            screens,
-            size(px(900.), px(750.)),
-            size(px(760.), px(540.)),
-        );
-        assert_eq!(rect(got), (-1280., 274., 900., 750.));
+        let got = settings_bounds(owner, screens, size(px(900.), px(750.)));
+        assert_eq!(rect(got), (-1280., 212., 900., 750.));
         // At the bottom right corner.
         let owner = display(-500., 800., 500., 224.);
-        let got = settings_bounds(
-            owner,
-            screens,
-            size(px(900.), px(750.)),
-            size(px(760.), px(540.)),
-        );
-        assert_eq!(rect(got), (-900., 274., 900., 750.));
+        let got = settings_bounds(owner, screens, size(px(900.), px(750.)));
+        assert_eq!(rect(got), (-900., 162., 900., 750.));
     }
 
     #[test]
-    fn settings_shrink_on_a_small_display_but_not_below_the_minimum() {
+    fn settings_shrink_to_a_small_area_even_below_the_usual_minimum() {
+        let owner = display(0., 0., 700., 500.);
         let small = display(0., 0., 800., 600.);
-        let owner = display(0., 0., 800., 600.);
-        let got = settings_bounds(
-            owner,
-            small,
-            size(px(900.), px(750.)),
-            size(px(760.), px(540.)),
-        );
+        let got = settings_bounds(owner, small, size(px(900.), px(750.)));
         assert_eq!(rect(got), (0., 0., 800., 600.));
-        let tiny = display(0., 0., 700., 500.);
-        let got = settings_bounds(
-            owner,
-            tiny,
-            size(px(900.), px(750.)),
-            size(px(760.), px(540.)),
-        );
-        assert_eq!(rect(got), (0., 0., 760., 540.));
+        let tiny = display(10., 20., 600., 400.);
+        let got = settings_bounds(owner, tiny, size(px(900.), px(750.)));
+        assert_eq!(rect(got), (10., 20., 600., 400.));
     }
 
     const MIN: fn() -> Size<Pixels> = || size(px(320.), px(240.));
