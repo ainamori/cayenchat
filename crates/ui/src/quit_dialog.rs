@@ -125,7 +125,7 @@ impl ChatWindow {
                 .size_full()
                 .flex()
                 .justify_center()
-                .pt(px(60.))
+                .items_center()
                 .bg(Rgba {
                     a: 0.6,
                     ..theme.surface

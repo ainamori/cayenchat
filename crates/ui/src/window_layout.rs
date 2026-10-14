@@ -70,10 +70,109 @@ pub fn restored_bounds(
     })
 }
 
+/// Where a new settings window opens: horizontally centered on the owner
+/// (the chat window), vertically starting at the owner's middle so that at
+/// least its upper half stays visible. The whole window stays inside
+/// `display`, which wins over both; it is shrunk (not below `min`) when the
+/// display is too small. GPUI reports no work area, so a taskbar or Dock is
+/// not subtracted.
+pub fn settings_bounds(
+    owner: Bounds<Pixels>,
+    display: Bounds<Pixels>,
+    wanted: Size<Pixels>,
+    min: Size<Pixels>,
+) -> Bounds<Pixels> {
+    let (left, top) = (f32::from(display.left()), f32::from(display.top()));
+    let (screen_width, screen_height) = (
+        f32::from(display.size.width),
+        f32::from(display.size.height),
+    );
+    let width = f32::from(wanted.width)
+        .min(screen_width)
+        .max(f32::from(min.width));
+    let height = f32::from(wanted.height)
+        .min(screen_height)
+        .max(f32::from(min.height));
+    let center_x = f32::from(owner.center().x);
+    let owner_middle = f32::from(owner.center().y);
+    let x = (center_x - width / 2.)
+        .min(left + screen_width - width)
+        .max(left);
+    let y = owner_middle.min(top + screen_height - height).max(top);
+    Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use cayenchat_storage::layout::WindowRect;
+
+    fn rect(bounds: Bounds<Pixels>) -> (f32, f32, f32, f32) {
+        (
+            f32::from(bounds.origin.x),
+            f32::from(bounds.origin.y),
+            f32::from(bounds.size.width),
+            f32::from(bounds.size.height),
+        )
+    }
+
+    #[test]
+    fn settings_are_centered_horizontally_on_the_owner() {
+        let screen = display(0., 0., 1920., 1080.);
+        let owner = display(400., 100., 960., 500.);
+        let got = settings_bounds(
+            owner,
+            screen,
+            size(px(900.), px(400.)),
+            size(px(760.), px(540.)),
+        );
+        // 880 is the owner's middle; 540 is the minimum height.
+        assert_eq!(rect(got), (430., 350., 900., 540.));
+    }
+
+    #[test]
+    fn settings_stay_on_the_display_the_owner_is_on() {
+        let screens = display(-1280., 0., 1280., 1024.);
+        // Owner at the left edge of a monitor with negative coordinates.
+        let owner = display(-1280., 900., 800., 124.);
+        let got = settings_bounds(
+            owner,
+            screens,
+            size(px(900.), px(750.)),
+            size(px(760.), px(540.)),
+        );
+        assert_eq!(rect(got), (-1280., 274., 900., 750.));
+        // At the bottom right corner.
+        let owner = display(-500., 800., 500., 224.);
+        let got = settings_bounds(
+            owner,
+            screens,
+            size(px(900.), px(750.)),
+            size(px(760.), px(540.)),
+        );
+        assert_eq!(rect(got), (-900., 274., 900., 750.));
+    }
+
+    #[test]
+    fn settings_shrink_on_a_small_display_but_not_below_the_minimum() {
+        let small = display(0., 0., 800., 600.);
+        let owner = display(0., 0., 800., 600.);
+        let got = settings_bounds(
+            owner,
+            small,
+            size(px(900.), px(750.)),
+            size(px(760.), px(540.)),
+        );
+        assert_eq!(rect(got), (0., 0., 800., 600.));
+        let tiny = display(0., 0., 700., 500.);
+        let got = settings_bounds(
+            owner,
+            tiny,
+            size(px(900.), px(750.)),
+            size(px(760.), px(540.)),
+        );
+        assert_eq!(rect(got), (0., 0., 760., 540.));
+    }
 
     const MIN: fn() -> Size<Pixels> = || size(px(320.), px(240.));
 

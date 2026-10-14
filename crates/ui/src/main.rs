@@ -3104,11 +3104,25 @@ impl ChatWindow {
             settings.selected_server = profile;
         }
         let owner = window.window_handle().downcast::<ChatWindow>().unwrap();
-        let bounds = Bounds::centered(None, size(px(900.), px(750.)), cx);
+        // Placed relative to this window on the display it is on; the usual
+        // screen center only when that display is unknown.
+        let wanted = size(px(900.), px(750.));
+        let min_size = size(px(760.), px(540.));
+        let display = window.display(cx);
+        let bounds = match &display {
+            Some(display) => {
+                window_layout::settings_bounds(window.bounds(), display.bounds(), wanted, min_size)
+            }
+            None => Bounds::centered(None, wanted, cx),
+        };
         match cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(760.), px(540.))),
+                // Windows opens on the primary display unless told which one.
+                display_id: display
+                    .filter(|_| cfg!(target_os = "windows"))
+                    .map(|display| display.id()),
+                window_min_size: Some(min_size),
                 titlebar: Some(TitlebarOptions {
                     title: Some(self.i18n.text("settings_title").into()),
                     ..Default::default()
