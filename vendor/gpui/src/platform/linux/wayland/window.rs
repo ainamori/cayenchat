@@ -99,6 +99,7 @@ pub struct WaylandWindowState {
     bounds: Bounds<Pixels>,
     scale: f32,
     input_handler: Option<PlatformInputHandler>,
+    ime_wanted: bool,
     decorations: WindowDecorations,
     background_appearance: WindowBackgroundAppearance,
     fullscreen: bool,
@@ -173,6 +174,7 @@ impl WaylandWindowState {
             bounds: options.bounds,
             scale: 1.0,
             input_handler: None,
+            ime_wanted: true,
             decorations: WindowDecorations::Client,
             background_appearance: WindowBackgroundAppearance::Opaque,
             fullscreen: false,
@@ -657,6 +659,14 @@ impl WaylandWindowStatePtr {
         }
     }
 
+    pub fn surface_id(&self) -> wayland_backend::client::ObjectId {
+        self.state.borrow().surface.id()
+    }
+
+    pub fn ime_wanted(&self) -> bool {
+        self.state.borrow().ime_wanted
+    }
+
     pub fn get_ime_area(&self) -> Option<Bounds<Pixels>> {
         let mut state = self.state.borrow_mut();
         let mut bounds: Option<Bounds<Pixels>> = None;
@@ -1096,6 +1106,19 @@ impl PlatformWindow for WaylandWindow {
     fn update_ime_position(&self, bounds: Bounds<Pixels>) {
         let state = self.borrow();
         state.client.update_ime_position(bounds);
+    }
+
+    fn update_ime_enabled(&self, enabled: bool) -> bool {
+        let (client, surface) = {
+            let mut state = self.borrow_mut();
+            state.ime_wanted = enabled;
+            (state.client.clone(), state.surface.id())
+        };
+        // The text-input is shared by the seat: only the window that has the
+        // keyboard focus may switch it. Any other window just records its
+        // wish, which `enable_ime` honors when that window gets the focus.
+        client.set_ime_for_window(&surface, enabled);
+        true
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {

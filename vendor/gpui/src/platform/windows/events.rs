@@ -692,6 +692,9 @@ impl WindowsWindowInner {
     }
 
     fn handle_ime_composition(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
+        if self.state.borrow().discarding_ime_commit {
+            return Some(0);
+        }
         let ctx = unsafe { ImmGetContext(handle) };
         let result = self.handle_ime_composition_inner(ctx, lparam);
         unsafe { ImmReleaseContext(handle, ctx).ok().log_err() };
@@ -1238,7 +1241,43 @@ impl WindowsWindowInner {
         });
         self.state.borrow_mut().callbacks.request_frame = Some(request_frame);
         unsafe { ValidateRect(Some(handle), None).ok().log_err() };
+        let pending_ime_enabled = self.state.borrow_mut().pending_ime_enabled.take();
+        if let Some(enabled) = pending_ime_enabled {
+            self.update_ime_enabled(handle, enabled);
+        }
         Some(0)
+    }
+
+    /// Ported from upstream Zed (`gpui_windows`). Detaching the IME input
+    /// context makes keys reach the window as plain characters; attaching the
+    /// default context again restores the user's IME state.
+    fn update_ime_enabled(&self, handle: HWND, enabled: bool) {
+        unsafe {
+            if enabled {
+                ImmAssociateContextEx(handle, HIMC::default(), IACE_DEFAULT)
+                    .ok()
+                    .log_err();
+            } else {
+                // End any composition before the context goes away. The
+                // handler registered by now is the field that just took focus,
+                // so the committed string must not be delivered to it (it
+                // could come from a password field and would replace the new
+                // field's selection). The old field keeps the text it already
+                // shows as marked text and drops the mark when it loses focus.
+                let ctx = ImmGetContext(handle);
+                if !ctx.is_invalid() {
+                    self.state.borrow_mut().discarding_ime_commit = true;
+                    ImmNotifyIME(ctx, NI_COMPOSITIONSTR, CPS_COMPLETE, 0)
+                        .ok()
+                        .log_err();
+                    self.state.borrow_mut().discarding_ime_commit = false;
+                    ImmReleaseContext(handle, ctx).ok().log_err();
+                }
+                ImmAssociateContextEx(handle, HIMC::default(), 0)
+                    .ok()
+                    .log_err();
+            }
+        }
     }
 
     #[inline]

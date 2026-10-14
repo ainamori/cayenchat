@@ -27,6 +27,21 @@ longer log `window not found` when the window was already removed; Windows
 still delivers activation and vsync redraw messages while a removed window is
 torn down. Other failures are still logged.
 
+In `src/platform.rs`, `src/input.rs`, `src/window.rs` and the platform windows,
+the per-window IME switch is ported from upstream Zed (`update_ime_enabled` in
+`crates/gpui_windows/src/events.rs` and the Wayland window):
+`InputHandler::accepts_text_input` (upstream's name and meaning, default true),
+the CayenChat-only `InputHandler::prefers_direct_input` (default false) and
+`PlatformWindow::update_ime_enabled`. `Window::draw` calls the latter only when
+`accepts_text_input && !prefers_direct_input` changes. Windows detaches the IME
+with `ImmAssociateContextEx` after the frame and discards the composition commit
+that ends it (it would reach the newly focused field); Wayland skips `enable` on
+text-input enter while off and switches the shared text-input only for the
+keyboard-focused window; macOS limits the window's own view's
+`allowedInputSourceLocales` to Roman input sources. `update_ime_enabled` returns
+whether it was applied; `Window` retries on the next frame otherwise. X11 keeps
+the default no-op.
+
 In `src/platform/linux/wayland/window.rs`:
 
 - `request_decorations` keeps client-side decorations when the compositor does

@@ -70,6 +70,16 @@ pub trait EntityInputHandler: 'static + Sized {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<usize>;
+
+    /// See [`InputHandler::accepts_text_input`] for details
+    fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
+        true
+    }
+
+    /// See [`InputHandler::prefers_direct_input`] for details
+    fn prefers_direct_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
+        false
+    }
 }
 
 /// The canonical implementation of [`crate::PlatformInputHandler`]. Call [`Window::handle_input`]
@@ -176,5 +186,15 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
         self.view.update(cx, |view, cx| {
             view.character_index_for_point(point, window, cx)
         })
+    }
+
+    fn accepts_text_input(&mut self, window: &mut Window, cx: &mut App) -> bool {
+        self.view
+            .update(cx, |view, cx| view.accepts_text_input(window, cx))
+    }
+
+    fn prefers_direct_input(&mut self, window: &mut Window, cx: &mut App) -> bool {
+        self.view
+            .update(cx, |view, cx| view.prefers_direct_input(window, cx))
     }
 }

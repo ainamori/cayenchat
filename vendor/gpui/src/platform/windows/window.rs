@@ -43,6 +43,10 @@ pub struct WindowsWindowState {
     pub callbacks: Callbacks,
     pub input_handler: Option<PlatformInputHandler>,
     pub pending_surrogate: Option<u16>,
+    pub pending_ime_enabled: Option<bool>,
+    /// Set while detaching the IME: the composition it commits belongs to the
+    /// field that had focus, not to the handler registered by now.
+    pub discarding_ime_commit: bool,
     pub last_reported_modifiers: Option<Modifiers>,
     pub last_reported_capslock: Option<Capslock>,
     pub system_key_handled: bool,
@@ -110,6 +114,8 @@ impl WindowsWindowState {
         let callbacks = Callbacks::default();
         let input_handler = None;
         let pending_surrogate = None;
+        let pending_ime_enabled = None;
+        let discarding_ime_commit = false;
         let last_reported_modifiers = None;
         let last_reported_capslock = None;
         let system_key_handled = false;
@@ -131,6 +137,8 @@ impl WindowsWindowState {
             callbacks,
             input_handler,
             pending_surrogate,
+            pending_ime_enabled,
+            discarding_ime_commit,
             last_reported_modifiers,
             last_reported_capslock,
             system_key_handled,
@@ -877,6 +885,14 @@ impl PlatformWindow for WindowsWindow {
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {
         // There is no such thing on Windows.
+    }
+
+    fn update_ime_enabled(&self, enabled: bool) -> bool {
+        // Called during a frame, while the window is leased. Detaching the IME
+        // commits the composition into the input handler, which needs the
+        // window, so `draw_window` applies this once the frame is done.
+        self.0.state.borrow_mut().pending_ime_enabled = Some(enabled);
+        true
     }
 }
 
