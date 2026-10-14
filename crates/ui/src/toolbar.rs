@@ -568,8 +568,11 @@ mod tests {
     #[test]
     fn unavailable_buttons_are_disabled_and_settings_never_is() {
         let state = State::default();
-        for button in buttons(state) {
-            assert_eq!(button.enabled, button.id == "settings", "{}", button.id);
+        for shown in [false, true] {
+            for button in state.layout_with(shown).into_iter().flatten() {
+                let always_enabled = button.id == "settings" || button.id == "always-on-top";
+                assert_eq!(button.enabled, always_enabled, "{}", button.id);
+            }
         }
     }
 
