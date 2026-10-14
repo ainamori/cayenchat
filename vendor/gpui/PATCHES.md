@@ -176,3 +176,15 @@ Alt press when a window of this process is already the foreground window
 succeeds then, and the Alt would only reach our own window and focus its menu
 bar. CayenChat activates the chat window and then the initial settings window
 at startup (issue #354).
+
+In `src/platform.rs` and the Linux, macOS and Windows `prompt_for_paths`
+implementations, `PathPromptOptions` has a `filter: Option<PathPromptFilter>`
+(a name and a list of extensions) so a file dialog can offer only some files:
+
+- Windows: `IFileOpenDialog::SetFileTypes` with one `*.ext;...` entry.
+- macOS: `NSOpenPanel` `allowedFileTypes` with the extensions. It is the
+  deprecated form, chosen because it needs no UniformTypeIdentifiers symbols
+  (`allowedContentTypes` would); current macOS still honors it.
+- Linux: an `ashpd` `FileFilter` with a lower- and an upper-case glob per
+  extension (portal globs are case-sensitive). Portals that ignore filters show
+  every file.
