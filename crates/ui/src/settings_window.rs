@@ -1153,10 +1153,14 @@ impl SettingsWindow {
             let settings = self.commit_settings(&previous, settings, true, cx)?;
             self.saved = settings.clone();
             self.settings.values = settings.clone();
-            Ok::<_, String>((config, settings))
+            Ok::<_, String>((config, settings, previous))
         })();
         self.feedback = match result {
-            Ok((config, settings)) => {
+            Ok((config, settings, previous)) => {
+                // Connecting may have taken over a pending autosave, so what
+                // it saved, such as always-on-top, is applied here whether or
+                // not the connection succeeds.
+                self.apply_to_chat_window(&previous, settings.clone(), false, cx);
                 let (appearance, mode, language) = (
                     settings.appearance.clone(),
                     settings.theme,

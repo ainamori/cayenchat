@@ -4377,9 +4377,8 @@ fn notification_rules(settings: &Notifications) -> NotificationRules {
 impl ChatWindow {
     /// Applies the Windows-only preference to the chat window and to the open
     /// settings and WHOIS windows, and remembers it for windows opened later.
-    /// Dialogs follow their parent window. Must not run for test windows,
-    /// whose native handle is unimplemented, so callers apply it only when
-    /// the preference is on at startup or changes.
+    /// Dialogs follow their parent window. Callers apply it only when the
+    /// preference is on at startup or changes; test builds skip the native call.
     fn apply_always_on_top(&mut self, enabled: bool, window: &Window, cx: &mut Context<Self>) {
         self.always_on_top = enabled;
         if let Err(error) = set_window_always_on_top(window, enabled) {
@@ -4387,14 +4386,18 @@ impl ChatWindow {
         }
         for handle in self.whois_windows.values() {
             let _ = handle.update(cx, |_, window, _| {
-                let _ = set_window_always_on_top(window, enabled);
+                if let Err(error) = set_window_always_on_top(window, enabled) {
+                    log::warn!("Could not change the WHOIS window's Z-order: {error}");
+                }
             });
         }
         // The settings window is mid-update when it saves, so reach it after.
         if let Some(handle) = self.settings_window {
             cx.defer(move |cx| {
                 let _ = handle.update(cx, |_, window, _| {
-                    let _ = set_window_always_on_top(window, enabled);
+                    if let Err(error) = set_window_always_on_top(window, enabled) {
+                        log::warn!("Could not change the settings window's Z-order: {error}");
+                    }
                 });
             });
         }
@@ -4412,6 +4415,11 @@ fn set_window_always_on_top(window: &Window, enabled: bool) -> Result<(), String
         SetWindowPos,
     };
 
+    // Test windows have no native handle (GPUI's is `unimplemented!()`), and
+    // tests can change the preference, so they never reach it.
+    if cfg!(test) {
+        return Ok(());
+    }
     // GPUI has an inherent window_handle() method (its own view handle), so
     // explicitly call the raw-window-handle trait for the native HWND.
     let handle = HasWindowHandle::window_handle(window).map_err(|error| error.to_string())?;
