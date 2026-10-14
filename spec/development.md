@@ -1115,7 +1115,8 @@ small IRC server on 127.0.0.1 that registers the client, offers `server-time`
 and `draft/metadata-2`, answers JOINs with topics, members and avatars, and
 then plays fixed lines in three channels and one private message, with
 today's local times from 20:30. The shown channel has an image preview, a
-mention of our nickname, a compacted long link and avatars (a few
+mention of our nickname, a compacted long link, a `/me` line (CTCP ACTION,
+shown as `* bob raises a glass ...`) and avatars (a few
 users keep the app's default one); the others are left unread, one of them
 with a mention. The avatars and the photo are drawn by the script, so nothing
 with a license of its own is involved. There is an English and a Japanese
