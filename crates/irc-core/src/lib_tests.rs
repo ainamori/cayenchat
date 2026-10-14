@@ -4669,3 +4669,85 @@ fn a_replayed_line_with_an_old_mask_does_not_change_the_prefix() {
     connection.disconnect().unwrap();
     server.join().unwrap();
 }
+
+#[test]
+fn channel_keys_stay_out_of_the_transcript_and_mode_activity() {
+    let parse = |line: &str| line.parse::<IrcMessage>().unwrap();
+    for (line, expected) in [
+        (
+            ":op!u@h MODE #chan +k review-key",
+            ":op!u@h MODE #chan +k [redacted]",
+        ),
+        (
+            ":op!u@h MODE #chan +ok bob review-key",
+            ":op!u@h MODE #chan +o+k [redacted] [redacted]",
+        ),
+        (
+            ":op!u@h MODE #chan -k review-key",
+            ":op!u@h MODE #chan -k [redacted]",
+        ),
+        (
+            ":srv 324 me #chan +nk review-key",
+            ":srv 324 me #chan +nk [redacted]",
+        ),
+        (":op!u@h MODE #chan +o bob", ":op!u@h MODE #chan +o bob"),
+    ] {
+        let shown = redacted_wire_line(&parse(line));
+        assert_eq!(shown, expected, "{line}");
+        assert!(!shown.contains("review-key"), "{line}");
+    }
+    let sent = IrcMessage::from(IrcCommand::Raw(
+        "MODE".into(),
+        vec!["#chan".into(), "+k".into(), "review-key".into()],
+    ));
+    assert_eq!(redacted_wire_line(&sent), "MODE #chan +k [redacted]");
+    let modes = [
+        Mode::Plus(ChannelMode::Oper, Some("bob".into())),
+        Mode::Plus(ChannelMode::Key, Some("review-key".into())),
+    ];
+    let shown: Vec<_> = redact_key_modes(&modes)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(shown, ["+o [redacted]", "+k [redacted]"]);
+}
+
+#[test]
+fn received_channel_keys_reach_no_event() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut lines = BufReader::new(socket.try_clone().unwrap());
+        register_with(&mut socket, &mut lines, "message-tags", "NETWORK=t");
+        socket
+            .write_all(
+                b":alice!u@h JOIN #test\r\n\
+                  :op!u@h MODE #test +k review-key\r\n\
+                  :op!u@h MODE #test -l+k review-key\r\n\
+                  :op!u@h MODE #test +ok bob review-key\r\n\
+                  :op!u@h MODE #test -k review-key\r\n\
+                  :srv 324 alice #test +nk review-key\r\n\
+                  :srv NOTICE alice :done\r\n",
+            )
+            .unwrap();
+        let _ = read_client_line(&mut lines);
+    });
+    let events = run_fixture(plain_config(port, sending_options()), |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, Event::PrivateMessage { text, .. } if text == "done"))
+    });
+    server.join().unwrap();
+    for event in &events {
+        assert!(!format!("{event:?}").contains("review-key"), "{event:?}");
+    }
+    assert!(events.iter().any(|event| matches!(event,
+        Event::ServerLine(line) if line == ":srv 324 alice #test +nk [redacted]")));
+    assert!(events.iter().any(|event| matches!(event,
+        Event::ChannelActivity { kind: ChannelActivityKind::ModeChanged { modes }, .. }
+            if modes.contains("[redacted]"))));
+}

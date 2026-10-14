@@ -97,6 +97,12 @@ impl TextInput {
         self.marked_range.is_some()
     }
 
+    /// Pastes the clipboard at the caret, replacing the selection, exactly as
+    /// the Paste shortcut does. Nothing is sent.
+    pub fn paste_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.paste(&Paste, window, cx);
+    }
+
     pub fn complete_nickname(
         &mut self,
         members: &[String],
