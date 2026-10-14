@@ -431,7 +431,14 @@ keystroke as IME input, so the fields are asked for marked text
 the form has no field, so the page takes the initial focus to receive Escape.
 The bar shares native menu definitions and actions, supports arrows/Enter/Escape,
 and preserves input focus for editing commands. Alt chords do not toggle it;
-selecting an action or clicking outside dismisses it. Action availability is
+Alt held with a menu's access key (File F, Connection C, Edit E, View V; set per
+language in the locale, issue #365) shows the bar and opens that menu. Only the
+held chord counts, not Alt released and then a letter: an IME toggle can look like
+a lone Alt, and typed letters must not open menus. A key that a user shortcut
+took never reaches it, and it is ignored while any input holds IME text. Japanese
+shows "名前(K)" always, English underlines the letter while Alt or the bar is in
+use. Items inside menus have no access keys yet (after #337); selecting
+ an action or clicking outside dismisses it. Action availability is
 queried only while a menu is open: GPUI has no rendered dispatch tree during
 the first frame, so querying it while the bar renders (now always, unless
 auto-hidden) would panic on startup. macOS retains native menus.

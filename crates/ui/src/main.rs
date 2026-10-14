@@ -2314,6 +2314,15 @@ impl ChatWindow {
         cx.notify();
     }
 
+    /// Whether any input of the chat window holds uncommitted IME text.
+    fn is_composing(&self, cx: &App) -> bool {
+        self.inputs
+            .values()
+            .chain(self.member_prompt.iter().map(|prompt| &prompt.input))
+            .chain(self.nick_prompts.iter().map(|prompt| &prompt.input))
+            .any(|input| input.read(cx).is_composing())
+    }
+
     /// Whether the clipboard has text and the selected conversation's input
     /// is not composing (a paste would replace the composition).
     fn can_paste_into_input(&self, cx: &App) -> bool {
@@ -4512,8 +4521,10 @@ impl Render for ChatWindow {
         let content = menu_bar::wrap(
             &self.menu_bar,
             cx.get_menus().unwrap_or_default(),
+            menu_access_keys(&self.i18n),
             content,
             |this| &mut this.menu_bar,
+            |this, cx| this.is_composing(cx),
             window,
             cx,
         );
@@ -6883,6 +6894,24 @@ fn request_quit_in_chat_window(cx: &mut App, retry: bool) {
         && retry
     {
         cx.defer(|cx| request_quit_in_chat_window(cx, false));
+    }
+}
+
+/// Access keys for the menus of `app_menus` on Windows and Linux (File,
+/// Connection, Edit, View), taken from the locale.
+fn menu_access_keys(i18n: &Localizer) -> menu_bar::AccessKeys {
+    let key = |id: &str| i18n.text(id).chars().next().map(|c| c.to_ascii_lowercase());
+    menu_bar::AccessKeys {
+        keys: [
+            "menu_file_key",
+            "menu_connection_key",
+            "menu_edit_key",
+            "menu_view_key",
+        ]
+        .into_iter()
+        .map(key)
+        .collect(),
+        suffix: i18n.text("menu_access_suffix") == "yes",
     }
 }
 
