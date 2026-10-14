@@ -408,7 +408,7 @@ window offers Connection and Appearance tabs. With startup connection enabled,
 the UI validates the saved selected profile and connects without opening settings;
 invalid saved connection details open settings with feedback. Only explicitly
 saved credentials are available at startup. The macOS
-application menu and Command+, open that window;
+application menu (Settings…) and Command+, open that window (menus: D045);
 Windows/Linux use Ctrl+, or an in-window menu bar that is shown all the time by
 default (users found a hidden bar hard to discover, issue #60). The Startup &
 Behavior tab has "Hide the menu bar until Alt or F10" (`menu_bar_auto_hide`, off by default,
