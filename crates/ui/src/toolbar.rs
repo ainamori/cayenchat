@@ -11,7 +11,9 @@ use std::borrow::Cow;
 
 use gpui::{prelude::*, *};
 
-use crate::{ChatWindow, Connect, Disconnect, OpenSettings, ircv3_settings::TextTooltip};
+use crate::{
+    ChatWindow, Connect, Disconnect, OpenSettings, Reconnect, ircv3_settings::TextTooltip,
+};
 use crate::{key_recorder, shortcuts, theme::Theme};
 use cayenchat_app::Command;
 
@@ -23,27 +25,32 @@ const ICON: f32 = 16.;
 /// What the buttons can do right now.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct State {
-    /// The first button reconnects (the selected server has been connected in
-    /// this run) instead of connecting; it has another icon and name.
-    pub reconnect: bool,
+    /// The selected server has a connection, one still opening or a retry
+    /// waiting: the first button disconnects instead of connecting.
+    pub connected: bool,
     pub can_connect: bool,
-    pub can_disconnect: bool,
+    /// The selected server has been connected in this run.
+    pub can_reconnect: bool,
     /// The selected channel is joined: the button parts instead of joining.
     pub joined: bool,
     pub can_join_or_part: bool,
     pub can_next_unread: bool,
     pub can_whois: bool,
     pub can_upload: bool,
+    /// The windows are kept on top (Windows only).
+    pub always_on_top: bool,
 }
 
 #[derive(Clone, Copy)]
 enum Click {
     Connect,
     Disconnect,
+    Reconnect,
     JoinOrPart,
     NextUnread,
     Whois,
     Upload,
+    AlwaysOnTop,
     Settings,
 }
 
@@ -64,6 +71,9 @@ struct Button {
     label: &'static str,
     keys: Keys,
     enabled: bool,
+    /// For a button that switches something on and off: whether it is on.
+    /// It is drawn pressed in, and the tooltip says which.
+    toggled: Option<bool>,
     click: Click,
 }
 
@@ -72,25 +82,31 @@ impl State {
     /// Topic, mode and nickname changes and the next notification join the
     /// groups when those actions exist (#369, #370).
     fn layout(&self) -> Vec<Option<Button>> {
-        let button = |id, icon, label, keys, enabled, click| {
-            Some(Button {
-                id,
-                icon,
-                label,
-                keys,
-                enabled,
-                click,
-            })
+        self.layout_with(cfg!(target_os = "windows"))
+    }
+
+    /// [`layout`](Self::layout), saying whether the Windows-only "keep on
+    /// top" button is among them.
+    fn layout_with(&self, always_on_top_button: bool) -> Vec<Option<Button>> {
+        let button = |id, icon, label, keys, enabled, click| Button {
+            id,
+            icon,
+            label,
+            keys,
+            enabled,
+            toggled: None,
+            click,
         };
-        vec![
-            if self.reconnect {
+        let mut buttons = vec![
+            // One button connects or disconnects, whichever the server needs.
+            Some(if self.connected {
                 button(
                     "connect",
-                    "refresh-cw",
-                    "reconnect",
+                    "unplug",
+                    "disconnect",
                     Keys::None,
-                    self.can_connect,
-                    Click::Connect,
+                    true,
+                    Click::Disconnect,
                 )
             } else {
                 button(
@@ -101,17 +117,17 @@ impl State {
                     self.can_connect,
                     Click::Connect,
                 )
-            },
-            button(
-                "disconnect",
-                "unplug",
-                "disconnect",
+            }),
+            Some(button(
+                "reconnect",
+                "refresh-cw",
+                "reconnect",
                 Keys::None,
-                self.can_disconnect,
-                Click::Disconnect,
-            ),
+                self.can_reconnect,
+                Click::Reconnect,
+            )),
             None,
-            if self.joined {
+            Some(if self.joined {
                 button(
                     "join-part",
                     "log-out",
@@ -129,47 +145,61 @@ impl State {
                     self.can_join_or_part,
                     Click::JoinOrPart,
                 )
-            },
+            }),
             None,
-            button(
+            Some(button(
                 "next-unread",
                 "chevrons-down",
                 "shortcut_next_unread_channel",
                 Keys::Action("next_unread_channel"),
                 self.can_next_unread,
                 Click::NextUnread,
-            ),
+            )),
             None,
-            button(
+            Some(button(
                 "whois",
                 "user-search",
                 "toolbar_whois",
                 Keys::None,
                 self.can_whois,
                 Click::Whois,
-            ),
-            button(
+            )),
+            Some(button(
                 "upload",
                 "image-up",
                 "toolbar_upload",
                 Keys::None,
                 self.can_upload,
                 Click::Upload,
-            ),
+            )),
             None,
-            button(
-                "settings",
-                "settings",
-                "menu_settings",
-                Keys::Fixed(if cfg!(target_os = "macos") {
-                    "cmd-,"
-                } else {
-                    "ctrl-,"
-                }),
-                true,
-                Click::Settings,
-            ),
-        ]
+        ];
+        if always_on_top_button {
+            buttons.push(Some(Button {
+                toggled: Some(self.always_on_top),
+                ..button(
+                    "always-on-top",
+                    "bring-to-front",
+                    "toolbar_always_on_top",
+                    Keys::None,
+                    true,
+                    Click::AlwaysOnTop,
+                )
+            }));
+        }
+        buttons.push(Some(button(
+            "settings",
+            "settings",
+            "menu_settings",
+            Keys::Fixed(if cfg!(target_os = "macos") {
+                "cmd-,"
+            } else {
+                "ctrl-,"
+            }),
+            true,
+            Click::Settings,
+        )));
+        buttons
     }
 }
 
@@ -233,13 +263,17 @@ impl Toolbar {
             label,
             keys,
             enabled,
+            toggled,
             click,
         } = spec;
         let chat = self.chat.clone();
-        let color = if enabled {
-            theme.text
-        } else {
+        let pressed = toggled == Some(true);
+        let color = if !enabled {
             theme.text_muted
+        } else if pressed {
+            theme.link
+        } else {
+            theme.text
         };
         div()
             .id(id)
@@ -250,6 +284,7 @@ impl Toolbar {
             .justify_center()
             .size(px(BUTTON))
             .rounded(px(4.))
+            .when(pressed, |button| button.bg(theme.selected))
             .child(
                 svg()
                     .path(format!("icons/ui/{icon}.svg"))
@@ -265,6 +300,8 @@ impl Toolbar {
                         let _ = this.chat.update(cx, |chat, cx| match click {
                             Click::Connect => chat.connect_action(&Connect, window, cx),
                             Click::Disconnect => chat.disconnect_action(&Disconnect, window, cx),
+                            Click::Reconnect => chat.reconnect_action(&Reconnect, window, cx),
+                            Click::AlwaysOnTop => chat.toolbar_always_on_top(window, cx),
                             Click::JoinOrPart => chat.toolbar_join_or_part(cx),
                             Click::NextUnread => {
                                 chat.dispatch(Command::NextUnreadChannel, window, cx)
@@ -278,14 +315,23 @@ impl Toolbar {
             // Built when the pointer rests on the button, so a changed
             // shortcut or language shows without redrawing the bar.
             .tooltip(move |_, cx| {
-                let name = chat
-                    .read_with(cx, |chat, _| chat.i18n.text(label))
+                let (name, state) = chat
+                    .read_with(cx, |chat, _| {
+                        let state = toggled.map(|on| {
+                            chat.i18n
+                                .text(if on { "toolbar_on" } else { "toolbar_off" })
+                        });
+                        (chat.i18n.text(label), state)
+                    })
                     .unwrap_or_default();
                 let overrides = cx
                     .try_global::<crate::ShortcutPrefs>()
                     .map(|prefs| prefs.overrides.clone())
                     .unwrap_or_default();
-                let text = tooltip_text(&name, &shown_keys(keys, &overrides));
+                let mut text = tooltip_text(&name, &shown_keys(keys, &overrides));
+                if let Some(state) = state {
+                    text = format!("{text}: {state}");
+                }
                 cx.new(|_| TextTooltip(text.into())).into()
             })
     }
@@ -327,6 +373,10 @@ impl Render for Toolbar {
 pub struct Icons;
 
 const ICONS: &[(&str, &[u8])] = &[
+    (
+        "icons/ui/bring-to-front.svg",
+        include_bytes!("../../../assets/icons/ui/bring-to-front.svg"),
+    ),
     (
         "icons/ui/chevrons-down.svg",
         include_bytes!("../../../assets/icons/ui/chevrons-down.svg"),
@@ -384,7 +434,9 @@ impl AssetSource for Icons {
 
 #[cfg(test)]
 mod tests {
-    use super::{Button, Icons, Keys, State, key_recorder, shortcuts, shown_keys, tooltip_text};
+    use super::{
+        Button, Click, Icons, Keys, State, key_recorder, shortcuts, shown_keys, tooltip_text,
+    };
     use gpui::AssetSource;
 
     fn buttons(state: State) -> Vec<Button> {
@@ -422,17 +474,48 @@ mod tests {
     }
 
     #[test]
-    fn the_first_button_follows_whether_the_server_was_connected() {
+    fn one_button_connects_or_disconnects() {
         let first = |state| buttons(state).remove(0);
-        assert_eq!(first(State::default()).icon, "plug-zap");
-        let reconnect = first(State {
-            reconnect: true,
+        let idle = first(State {
+            can_connect: true,
             ..State::default()
         });
-        assert_eq!(
-            (reconnect.icon, reconnect.label),
-            ("refresh-cw", "reconnect")
-        );
+        assert_eq!((idle.icon, idle.label), ("plug-zap", "connect"));
+        assert!(idle.enabled && matches!(idle.click, Click::Connect));
+        // While connecting or connected the same place disconnects.
+        let busy = first(State {
+            connected: true,
+            can_connect: true,
+            ..State::default()
+        });
+        assert_eq!((busy.icon, busy.label), ("unplug", "disconnect"));
+        assert!(busy.enabled && matches!(busy.click, Click::Disconnect));
+        // No server to act on: connect is there but cannot be pressed.
+        assert!(!first(State::default()).enabled);
+    }
+
+    #[test]
+    fn reconnect_is_its_own_button_for_a_server_connected_before() {
+        let reconnect = |can_reconnect, connected| {
+            buttons(State {
+                can_reconnect,
+                connected,
+                ..State::default()
+            })
+            .into_iter()
+            .find(|button| button.id == "reconnect")
+            .map(|button| {
+                (
+                    button.icon,
+                    button.enabled,
+                    matches!(button.click, Click::Reconnect),
+                )
+            })
+        };
+        assert_eq!(reconnect(false, false), Some(("refresh-cw", false, true)));
+        assert_eq!(reconnect(true, false), Some(("refresh-cw", true, true)));
+        // It stays while connected, for a connection that seems stuck.
+        assert_eq!(reconnect(true, true), Some(("refresh-cw", true, true)));
     }
 
     #[test]
@@ -444,10 +527,42 @@ mod tests {
             })
             .into_iter()
             .find(|button| button.id == "join-part")
-            .map(|button| button.icon)
+            .map(|button| (button.icon, button.label))
         };
-        assert_eq!(channel(false), Some("log-in"));
-        assert_eq!(channel(true), Some("log-out"));
+        assert_eq!(channel(false), Some(("log-in", "toolbar_join")));
+        assert_eq!(channel(true), Some(("log-out", "toolbar_part")));
+    }
+
+    #[test]
+    fn the_keep_on_top_button_is_a_toggle_beside_settings() {
+        let state = State {
+            always_on_top: true,
+            ..State::default()
+        };
+        let ids = |shown| {
+            state
+                .layout_with(shown)
+                .into_iter()
+                .flatten()
+                .map(|button| button.id)
+                .collect::<Vec<_>>()
+        };
+        assert!(!ids(false).contains(&"always-on-top"));
+        let ids = ids(true);
+        assert_eq!(&ids[ids.len() - 2..], ["always-on-top", "settings"]);
+        let toggled = |always_on_top| {
+            State {
+                always_on_top,
+                ..State::default()
+            }
+            .layout_with(true)
+            .into_iter()
+            .flatten()
+            .find(|button| button.id == "always-on-top")
+            .map(|button| (button.icon, button.enabled, button.toggled))
+        };
+        assert_eq!(toggled(false), Some(("bring-to-front", true, Some(false))));
+        assert_eq!(toggled(true), Some(("bring-to-front", true, Some(true))));
     }
 
     #[test]
@@ -464,12 +579,12 @@ mod tests {
         for state in [
             State::default(),
             State {
-                reconnect: true,
+                connected: true,
                 joined: true,
                 ..State::default()
             },
         ] {
-            for button in buttons(state) {
+            for button in state.layout_with(true).into_iter().flatten() {
                 let loaded = icons
                     .load(&format!("icons/ui/{}.svg", button.icon))
                     .unwrap();

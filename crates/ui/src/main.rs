@@ -2475,9 +2475,10 @@ impl ChatWindow {
             .selected_network_id()
             .is_some_and(|network| self.state.is_registered(network));
         toolbar::State {
-            reconnect: !self.can_connect_selected(),
+            connected: self.can_disconnect_selected(),
             can_connect: self.can_connect_selected() || self.can_reconnect_selected(),
-            can_disconnect: self.can_disconnect_selected(),
+            can_reconnect: self.can_reconnect_selected(),
+            always_on_top: self.toolbar_always_on_top_state(),
             joined: channel.is_some_and(|c| self.state.is_active_channel(c.id)),
             can_join_or_part: registered && channel.is_some(),
             can_next_unread: self
@@ -2532,22 +2533,6 @@ impl ChatWindow {
         let result = self.request_whois(network, &nickname, cx);
         self.set_feedback(result.err());
         cx.notify();
-    }
-
-    /// Asks for an image to upload, which then goes the way a dropped file does.
-    fn toolbar_upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let chosen = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: None,
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = chosen.await {
-                let _ = this.update_in(cx, |this, window, cx| this.drop_paths(&paths, window, cx));
-            }
-        })
-        .detach();
     }
 
     /// Whether `channel` is an enabled auto-join entry of `network`'s server.
@@ -4513,8 +4498,47 @@ fn notification_rules(settings: &Notifications) -> NotificationRules {
     }
 }
 
+/// The toolbar's "keep on top" button exists on Windows only.
+#[cfg(not(target_os = "windows"))]
+impl ChatWindow {
+    fn toolbar_always_on_top_state(&self) -> bool {
+        false
+    }
+
+    fn toolbar_always_on_top(&mut self, _: &mut Window, _: &mut Context<Self>) {}
+}
+
 #[cfg(target_os = "windows")]
 impl ChatWindow {
+    fn toolbar_always_on_top_state(&self) -> bool {
+        self.always_on_top
+    }
+
+    /// Switches the preference the way the settings window's checkbox does:
+    /// it is saved (starting from the file, which that window may have
+    /// updated) and applied to the open windows. An open settings window
+    /// shows the new value.
+    fn toolbar_always_on_top(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let enabled = !self.always_on_top;
+        match settings_file::load() {
+            Ok(file) => {
+                let mut settings = file.unwrap_or_else(|| self.saved.clone());
+                settings.always_on_top = enabled;
+                if let Err(error) = settings_file::save(&settings) {
+                    self.set_feedback(Some(error));
+                }
+            }
+            Err(error) => self.set_feedback(Some(error)),
+        }
+        self.saved.always_on_top = enabled;
+        self.apply_always_on_top(enabled, window, cx);
+        if let Some(handle) = self.settings_window {
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |settings, _, cx| settings.follow_saved_file(cx));
+            });
+        }
+    }
+
     /// Applies the Windows-only preference to the chat window and to the open
     /// settings and WHOIS windows, and remembers it for windows opened later.
     /// Dialogs follow their parent window. Callers apply it only when the

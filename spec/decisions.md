@@ -1190,22 +1190,34 @@ future work. Details in `architecture.md` (Channel history).
 A toolbar of icon buttons sits below the menu bar on every OS (`toolbar.rs`),
 shown by default; View → Show/Hide Toolbar flips it and saves
 `Settings::show_toolbar` (added without a version change; older files read as
-shown). Choices made by the maintainer on #367: one button each for
-connect/reconnect and join/leave whose icon follows the state; the rest use the
-first candidates there.
+shown). The maintainer's decisions on #367 and #368: one button connects or
+disconnects according to the state, reconnect is a button of its own, and join
+and leave share one button whose icon follows the state; the rest use the first
+candidates on #367.
 
-- **Buttons:** connect or reconnect (`plug-zap` / `refresh-cw`), disconnect
-  (`unplug`) | join or leave (`log-in` / `log-out`) | next unread channel
-  (`chevrons-down`) | WHOIS (`user-search`), upload image (`image-up`) |
-  settings. Topic, mode and nickname (#370) and the next notification (#369)
-  are added with those actions.
+- **Buttons:** connect (`plug-zap`) or, while connecting, connected or waiting
+  for a retry, disconnect (`unplug`) in the same place; reconnect
+  (`refresh-cw`), enabled once the selected server has been connected in this
+  run | join or leave (`log-in` / `log-out`) | next unread channel
+  (`chevrons-down`) | WHOIS (`user-search`), upload image (`image-up`) | on
+  Windows only, keep on top (`bring-to-front`, a toggle drawn pressed in while
+  on, whose tooltip says on or off) and settings. Topic, mode and nickname
+  (#370) and the next notification (#369) are added with those actions.
 - **No new behavior:** a button calls the handler the menu item or shortcut
-  calls (connect, disconnect, settings, `Command::NextUnreadChannel`) or the
-  helper the context menus use (join/part). WHOIS asks about the peer of a
-  private conversation or the one member chosen in the member list. Upload opens
-  a file dialog and hands the file to the same path as a dropped file.
+  calls (connect, disconnect, reconnect, settings, `Command::NextUnreadChannel`)
+  or the helper the context menus use (join/part). WHOIS asks about the peer of
+  a private conversation or the one member chosen in the member list. Keep on
+  top saves `always_on_top` and applies it as the settings checkbox does; an
+  open settings window shows the new value.
+- **Upload:** the button first checks the upload service as a drop does. When it
+  is not configured or needs its account again, the same prompt with the way to
+  the settings appears and no file dialog opens. Otherwise the dialog opens,
+  offering only the extensions of `ImageFormat::FILE_EXTENSIONS` (the avatar
+  picker too), and the file goes the dropped file's way (content check, size,
+  confirmation). Where a dialog cannot filter (some Linux portals) that check
+  refuses other files.
 - **Unavailable:** a button that cannot act is dimmed and ignores clicks (for
-  example Disconnect without a connection; join, leave and WHOIS off a channel
+  example Reconnect before the server was ever connected; join, leave and WHOIS off a channel
   or while not registered; next unread with nothing unread).
 - **Performance:** availability is the pure `toolbar::State`, recomputed when
   the chat window notifies; the bar is its own `AnyView::cached` view that

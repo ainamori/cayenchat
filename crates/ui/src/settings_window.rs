@@ -1076,6 +1076,18 @@ impl SettingsWindow {
         }
     }
 
+    /// Shows the "keep on top" value the toolbar's button just saved, so the
+    /// checkbox follows it and a later save does not put the old one back.
+    /// Other edits in the form are kept.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn follow_saved_file(&mut self, cx: &mut Context<Self>) {
+        if let Ok(Some(file)) = settings_file::load() {
+            self.saved.always_on_top = file.always_on_top;
+            self.settings.values.always_on_top = file.always_on_top;
+            cx.notify();
+        }
+    }
+
     fn reload_changed_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.follow_saved_server_order();
         if self.autosave.is_some() || self.autosave_error.is_some() || self.servers_unsaved(cx) {

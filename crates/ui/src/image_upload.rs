@@ -11,7 +11,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use cayenchat_app::attachments::{Completion, Offer, UploadFailure, UploadJob, UploaderReadiness};
 use cayenchat_model::attachment::{
-    Attachment, AttachmentError, AttachmentSource, MAX_ATTACHMENT_BYTES, format_size,
+    Attachment, AttachmentError, AttachmentSource, ImageFormat, MAX_ATTACHMENT_BYTES, format_size,
 };
 use cayenchat_storage::SecretKey;
 use cayenchat_upload::{ExternalUploader, UploadError};
@@ -46,6 +46,19 @@ pub(crate) fn configured_uploader(
         )),
         Ok(None) => Ok((UploaderReadiness::NeedsAccount { provider }, None)),
         Err(error) => Err(secrets::error_text(i18n, &error)),
+    }
+}
+
+/// What a file dialog offers when an image is wanted: the extensions of the
+/// formats the attachment check accepts. Where a dialog cannot filter, that
+/// check refuses the other files.
+pub(crate) fn image_file_filter(i18n: &Localizer) -> PathPromptFilter {
+    PathPromptFilter {
+        name: i18n.text("upload_image_files").into(),
+        extensions: ImageFormat::FILE_EXTENSIONS
+            .iter()
+            .map(|extension| SharedString::from(*extension))
+            .collect(),
     }
 }
 
@@ -233,27 +246,73 @@ impl ChatWindow {
                 })
                 .detach();
             }
-            Offer::Configure => self.prompt_upload_setup(
-                self.i18n.text("upload_not_configured_title"),
-                self.i18n.text("upload_not_configured_detail"),
-                self.i18n.text("upload_configure"),
-                window,
-                cx,
-            ),
-            Offer::Reconnect { provider } => self.prompt_upload_setup(
-                self.i18n
-                    .format("upload_reconnect_title", &[("provider", &provider)]),
-                self.i18n
-                    .format("upload_reconnect_detail", &[("provider", &provider)]),
-                self.i18n.text("upload_reconnect"),
-                window,
-                cx,
-            ),
+            Offer::Configure => self.prompt_configure_upload(window, cx),
+            Offer::Reconnect { provider } => self.prompt_reconnect_upload(&provider, window, cx),
             Offer::Busy => {
                 self.feedback = Some(self.i18n.text("upload_busy"));
                 cx.notify();
             }
         }
+    }
+
+    /// The toolbar's upload button: an image is asked for only once the
+    /// upload service is ready; otherwise the user is told first, with the way
+    /// to the settings. The chosen file then goes the way a dropped one does.
+    pub(crate) fn toolbar_upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.uploader(cx) {
+            Err(error) => {
+                self.feedback = Some(error);
+                cx.notify();
+                return;
+            }
+            Ok((UploaderReadiness::NotConfigured, _)) => {
+                return self.prompt_configure_upload(window, cx);
+            }
+            Ok((UploaderReadiness::NeedsAccount { provider }, _)) => {
+                return self.prompt_reconnect_upload(&provider, window, cx);
+            }
+            Ok((UploaderReadiness::Ready { .. }, _)) => {}
+        }
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+            filter: Some(image_file_filter(&self.i18n)),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = chosen.await {
+                let _ = this.update_in(cx, |this, window, cx| this.drop_paths(&paths, window, cx));
+            }
+        })
+        .detach();
+    }
+
+    fn prompt_configure_upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.prompt_upload_setup(
+            self.i18n.text("upload_not_configured_title"),
+            self.i18n.text("upload_not_configured_detail"),
+            self.i18n.text("upload_configure"),
+            window,
+            cx,
+        );
+    }
+
+    fn prompt_reconnect_upload(
+        &mut self,
+        provider: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prompt_upload_setup(
+            self.i18n
+                .format("upload_reconnect_title", &[("provider", provider)]),
+            self.i18n
+                .format("upload_reconnect_detail", &[("provider", provider)]),
+            self.i18n.text("upload_reconnect"),
+            window,
+            cx,
+        );
     }
 
     /// Asks whether to open image upload settings.
