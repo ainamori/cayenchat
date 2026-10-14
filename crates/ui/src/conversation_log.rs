@@ -233,8 +233,9 @@ impl ChatWindow {
         self.write_log(record);
     }
 
-    /// Someone joined, left, was kicked… in a channel we have. Modes and
-    /// refused joins are not logged.
+    /// Someone joined, left, was kicked… in a channel we have, or had a
+    /// privilege (`+o`, `-v`…) changed. Other modes and refused joins are not
+    /// logged.
     pub(crate) fn log_channel_activity(
         &self,
         network: NetworkId,
@@ -261,9 +262,21 @@ impl ChatWindow {
                 };
                 (Kind::Kick, actor, body)
             }
-            ChannelActivityKind::ModeChanged { .. } | ChannelActivityKind::JoinFailed { .. } => {
+            ChannelActivityKind::ModeChanged { modes } => {
+                for change in privilege_changes(modes) {
+                    self.log_event(
+                        network,
+                        Scope::Channel,
+                        channel,
+                        Kind::Mode,
+                        actor,
+                        &change,
+                        time,
+                    );
+                }
                 return;
             }
+            ChannelActivityKind::JoinFailed { .. } => return,
         };
         self.log_event(network, Scope::Channel, channel, kind, nick, &body, time);
     }
@@ -582,11 +595,56 @@ impl SettingsWindow {
     }
 }
 
+/// What the event shows as redacted channel-key arguments.
+const REDACTED_ARGUMENT: &str = "[redacted]";
+
+/// The privilege changes (`+o nick`, `-v nick`; also `h`, `a`, `q`) in the
+/// event's mode text, one per change. Every other mode (keys, bans, limits,
+/// unknown modes) and its argument is left out, as is a change whose target
+/// is missing or redacted, so no secret or host mask reaches a file.
+fn privilege_changes(modes: &str) -> Vec<String> {
+    let mut words = modes.split(' ').peekable();
+    let mut changes = Vec::new();
+    while let Some(word) = words.next() {
+        let mut chars = word.chars();
+        let (Some(sign @ ('+' | '-')), Some(mode), None) =
+            (chars.next(), chars.next(), chars.next())
+        else {
+            continue;
+        };
+        let is_sign = |word: &str| {
+            let mut chars = word.chars();
+            matches!(chars.next(), Some('+' | '-')) && chars.count() == 1
+        };
+        let target = words.next_if(|word| !is_sign(word));
+        if let ('o' | 'v' | 'h' | 'a' | 'q', Some(target)) = (mode, target)
+            && !target.is_empty()
+            && target != REDACTED_ARGUMENT
+        {
+            changes.push(format!("{sign}{mode} {target}"));
+        }
+    }
+    changes
+}
+
 #[cfg(test)]
 mod tests {
     use cayenchat_storage::Settings;
 
-    use super::network_directory;
+    use super::{network_directory, privilege_changes};
+
+    #[test]
+    fn only_privilege_changes_with_a_target_are_kept() {
+        assert_eq!(privilege_changes("+o alice -v bob"), ["+o alice", "-v bob"]);
+        assert_eq!(privilege_changes("+k secret"), Vec::<String>::new());
+        assert_eq!(
+            privilege_changes("+b *!*@host +l 5 +o alice +e *!*@x -I m"),
+            ["+o alice"]
+        );
+        assert_eq!(privilege_changes("+o [redacted] +k [redacted]").len(), 0);
+        assert_eq!(privilege_changes("+s +o"), Vec::<String>::new());
+        assert_eq!(privilege_changes("+X token +v bob"), ["+v bob"]);
+    }
 
     #[test]
     fn servers_added_with_the_same_name_get_different_directories() {

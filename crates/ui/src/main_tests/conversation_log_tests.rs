@@ -76,7 +76,9 @@ fn enabled_logs_save_live_lines_only(cx: &mut TestAppContext) {
                 Event::ChannelActivity {
                     channel: "#rust".into(),
                     actor: "dave".into(),
-                    kind: ChannelActivityKind::ModeChanged { modes: "+o".into() },
+                    kind: ChannelActivityKind::ModeChanged {
+                        modes: "+o frank +b *!*@example.invalid -v gina +l 5".into(),
+                    },
                     server_time: None,
                 },
                 Event::PrivateMessage {
@@ -133,6 +135,8 @@ fn enabled_logs_save_live_lines_only(cx: &mut TestAppContext) {
             "msg|alice|hello world",
             "action|bob|waves",
             "kick|dave|erin spam",
+            "mode|dave|+o frank",
+            "mode|dave|-v gina",
             "msg|me|from me",
             "msg|me|confirmed",
         ]
