@@ -268,8 +268,9 @@ impl PeerAvatars {
 
     /// A user who queried us is a client that speaks CTCP AVATAR: they are
     /// told of later changes, one by one ([`PeerAvatars::notify`]). What
-    /// they are taken to know is what we share now, whether or not the
-    /// answer was rate-limited, so they are not told twice.
+    /// they are taken to know changes only when they are actually answered
+    /// ([`PeerAvatars::mark_told`]), so an unanswered query never hides a
+    /// pending change or clear.
     fn remember_asker(&mut self, sender: &str, presence: &PresenceIndex) {
         if !valid_sender(sender) || !presence.shares(sender, None) {
             return;
@@ -278,13 +279,17 @@ impl PeerAvatars {
         if !self.askers.contains_key(&key) && self.askers.len() >= MAX_NOTIFIED_USERS {
             return;
         }
-        self.askers.insert(
-            key,
-            Asker {
-                nickname: sender.to_owned(),
-                known: self.share.clone(),
-            },
-        );
+        self.askers.entry(key).or_insert_with(|| Asker {
+            nickname: sender.to_owned(),
+            known: None,
+        });
+    }
+
+    /// Records that an asker was just given what we share now.
+    fn mark_told(&mut self, sender: &str) {
+        if let Some(asker) = self.askers.get_mut(&nickname_key(sender)) {
+            asker.known = self.share.clone();
+        }
     }
 
     /// Tells the next asker still present whose picture differs from what
@@ -308,6 +313,7 @@ impl PeerAvatars {
                 .map(|(key, _)| key.clone())?;
             let asker = self.askers.get_mut(&key)?;
             if same_nickname(&asker.nickname, current_nick)
+                || !valid_sender(&asker.nickname)
                 || !presence.shares(&asker.nickname, None)
             {
                 self.askers.remove(&key);
@@ -351,6 +357,7 @@ impl PeerAvatars {
                     if let Some(url) = self.share.clone()
                         && self.may_reply(sender, now)
                     {
+                        self.mark_told(sender);
                         handled.send.push(IrcCommand::NOTICE(
                             sender.to_owned(),
                             format!("\u{1}{CTCP_TAG} {url}\u{1}"),
@@ -668,7 +675,9 @@ impl PeerAvatars {
         if let Some(stage) = self.stages.remove(&from_key) {
             self.stages.insert(to_key.clone(), stage);
         }
-        if let Some(mut asker) = self.askers.remove(&from_key) {
+        if let Some(mut asker) = self.askers.remove(&from_key)
+            && valid_sender(to)
+        {
             asker.nickname = to.to_owned();
             self.askers.insert(to_key.clone(), asker);
         }
@@ -1486,6 +1495,38 @@ mod tests {
         assert!(peers.tick(now, ME, &renamed).send.is_empty());
         assert!(peers.askers.is_empty());
         assert_eq!(peers.next_deadline(), None);
+    }
+
+    #[test]
+    fn an_unanswered_query_does_not_hide_a_pending_clear() {
+        let now = Instant::now();
+        let mut peers = PeerAvatars::new(true, Some(URL.into()));
+        ask(&mut peers, "kv", now);
+        peers.set_share(Some(URL2.into()));
+        assert_eq!(tick(&mut peers, now).len(), 1);
+        peers.set_share(None);
+        // Asked again before the clear went out: nothing is answered, and
+        // the clear is still sent.
+        ask(&mut peers, "kv", now);
+        assert_eq!(
+            tick(&mut peers, now + NOTIFY_INTERVAL),
+            ["NOTICE kv \u{1}AVATAR\u{1}"]
+        );
+    }
+
+    #[test]
+    fn an_invalid_new_nickname_is_never_notified() {
+        let now = Instant::now();
+        let mut peers = PeerAvatars::new(true, Some(URL.into()));
+        ask(&mut peers, "kv", now);
+        peers.lifecycle(&line(":kv!u@h NICK :#a"), &rosters(), ME);
+        peers.set_share(None);
+        let channel = PresenceIndex::from_rosters(&HashMap::from([(
+            "#a".to_owned(),
+            vec!["alice".into(), "#a".into()],
+        )]));
+        assert!(peers.tick(now, ME, &channel).send.is_empty());
+        assert!(peers.askers.is_empty());
     }
 
     #[test]
