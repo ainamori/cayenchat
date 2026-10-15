@@ -3,6 +3,7 @@
 
 mod accounts;
 mod cap;
+mod charsets;
 mod ctcp;
 mod echo;
 mod history;
@@ -16,6 +17,7 @@ mod tags;
 pub mod text;
 
 pub use cap::Ircv3Options;
+pub use charsets::ChannelEncoding;
 pub use history::{
     HISTORY_LIMIT, HistoryMessage, HistoryResume, MAX_HISTORY_LINES, MessageReference,
     OlderHistoryStatus,
@@ -38,7 +40,7 @@ use std::{
 };
 
 use cayenchat_model::names::CaseMapping;
-use encoding_rs::Encoding;
+use charsets::ChannelCharsets;
 use futures_util::StreamExt;
 use irc::{
     client::{
@@ -48,6 +50,7 @@ use irc::{
     },
     proto::{
         Command as IrcCommand, Message as IrcMessage, Prefix, Response,
+        charsets::{BodyCharsets, Fixed, encode_line},
         mode::{ChannelMode, Mode},
     },
 };
@@ -162,6 +165,9 @@ pub struct ConnectionConfig {
     /// (`CHATHISTORY TARGETS`): normally when the previous connection ended.
     /// `None` looks a day back; nothing goes further back than a week.
     pub history_targets_since: Option<SystemTime>,
+    /// Channels whose text uses another encoding than `encoding`; the
+    /// channel name and everything else on a line keep `encoding`.
+    pub channel_encodings: Vec<ChannelEncoding>,
 }
 
 impl fmt::Debug for ConnectionConfig {
@@ -188,6 +194,7 @@ impl fmt::Debug for ConnectionConfig {
             .field("shared_avatar", &self.shared_avatar)
             .field("resume_history", &self.resume_history.len())
             .field("history_targets_since", &self.history_targets_since)
+            .field("channel_encodings", &self.channel_encodings)
             .finish()
     }
 }
@@ -215,6 +222,7 @@ impl ConnectionConfig {
             shared_avatar: None,
             resume_history: Vec::new(),
             history_targets_since: None,
+            channel_encodings: Vec::new(),
         }
     }
 
@@ -310,6 +318,7 @@ impl ConnectionConfig {
         if let Some(url) = &self.shared_avatar {
             peer_avatar::shareable(url, self.encoding.eq_ignore_ascii_case("UTF-8"))?;
         }
+        ChannelCharsets::new(&self.channel_encodings)?;
         if let Some(password) = &self.server_password {
             if password.chars().any(|ch| matches!(ch, '\r' | '\n' | '\0')) {
                 return Err("Server password contains a protocol control character.".into());
@@ -362,24 +371,54 @@ fn check_realname(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `text` in the connection's encoding (a WHATWG label, as the line codec
-/// takes it), or why it cannot be sent: an unknown label, or a character the
-/// encoding cannot hold.
-fn encode_strict<'a>(text: &'a str, label: &str) -> Result<std::borrow::Cow<'a, [u8]>, String> {
-    let encoding = Encoding::for_label(label.as_bytes())
-        .filter(|encoding| encoding.output_encoding() == *encoding)
-        .ok_or_else(|| format!("Unsupported character encoding: {label}"))?;
-    let (bytes, _, unmappable) = encoding.encode(text);
-    if unmappable {
+/// How lines are written: the connection's encoding (a WHATWG label, as the
+/// line codec takes it) and the encodings some channels use for their text.
+/// A plain label stands for a connection without channel overrides.
+#[derive(Clone, Copy)]
+struct Wire<'a> {
+    label: &'a str,
+    charsets: Option<&'a dyn BodyCharsets>,
+}
+
+impl<'a> From<&'a str> for Wire<'a> {
+    fn from(label: &'a str) -> Self {
+        Self {
+            label,
+            charsets: None,
+        }
+    }
+}
+
+impl<'a> From<&'a String> for Wire<'a> {
+    fn from(label: &'a String) -> Self {
+        label.as_str().into()
+    }
+}
+
+/// `text` as it goes on the wire, or why it cannot be sent: an unknown label,
+/// or a character the encoding cannot hold.
+fn encode_strict<'a, 'w>(
+    text: &'a str,
+    wire: impl Into<Wire<'w>>,
+) -> Result<std::borrow::Cow<'a, [u8]>, String> {
+    let wire = wire.into();
+    let encoding = charsets::resolve(wire.label)?;
+    let (bytes, unmappable) = encode_line(text, encoding, wire.charsets);
+    if let Some(failed) = unmappable {
+        let name = if failed == encoding {
+            wire.label
+        } else {
+            failed.name()
+        };
         return Err(format!(
-            "Text contains a character that cannot be encoded as {label}."
+            "Text contains a character that cannot be encoded as {name}."
         ));
     }
     Ok(bytes)
 }
 
-fn validate_wire(wire: &str, label: &str) -> Result<(), String> {
-    let bytes = encode_strict(wire, label)?;
+fn validate_wire<'w>(wire: &str, encoding: impl Into<Wire<'w>>) -> Result<(), String> {
+    let bytes = encode_strict(wire, encoding)?;
     if bytes.len() > 512 {
         return Err("IRC command exceeds the 512-byte wire limit.".into());
     }
@@ -389,9 +428,14 @@ fn validate_wire(wire: &str, label: &str) -> Result<(), String> {
 /// [`validate_wire`] for a `PRIVMSG` or `NOTICE`: the line must also fit in
 /// 512 bytes once the server has put our `prefix_bytes` (`:nick!user@host `)
 /// in front of it, or the recipients get the end of it cut off.
-fn validate_relayed_wire(wire: &str, label: &str, prefix_bytes: usize) -> Result<(), String> {
-    validate_wire(wire, label)?;
-    let bytes = encode_strict(wire, label)?;
+fn validate_relayed_wire<'w>(
+    wire: &str,
+    encoding: impl Into<Wire<'w>>,
+    prefix_bytes: usize,
+) -> Result<(), String> {
+    let encoding = encoding.into();
+    validate_wire(wire, encoding)?;
+    let bytes = encode_strict(wire, encoding)?;
     // A text of one word goes out without the `:` that marks the last
     // parameter, but the server writes it when relaying.
     let relayed_colon = wire
@@ -419,17 +463,21 @@ const MAX_CLIENT_TAG_BYTES: usize = 4096;
 /// usual 512-byte limit, its tags against their own limit, and the whole
 /// line for characters the encoding cannot hold. Tag values are UTF-8 (the
 /// worker requests tags only on UTF-8 connections).
-fn validate_tagged_wire(message: &IrcMessage, label: &str) -> Result<(), String> {
+fn validate_tagged_wire<'w>(
+    message: &IrcMessage,
+    encoding: impl Into<Wire<'w>>,
+) -> Result<(), String> {
+    let encoding = encoding.into();
     let mut untagged = message.clone();
     untagged.tags = None;
-    validate_wire(&untagged.to_string(), label)?;
+    validate_wire(&untagged.to_string(), encoding)?;
     if let Some(tags) = &message.tags {
         if tags::tag_bytes(tags) > MAX_CLIENT_TAG_BYTES {
             return Err("Message tags exceed the 4094-byte limit.".into());
         }
         // The line as a whole, for encodability only: tags are not part of
         // the 512 bytes.
-        encode_strict(&message.to_string(), label)?;
+        encode_strict(&message.to_string(), encoding)?;
     }
     Ok(())
 }
@@ -1229,6 +1277,11 @@ enum Outgoing {
         text: String,
         display_text: String,
         notice: bool,
+        /// The encoding of `text` fixed when the connection handle accepted
+        /// the message (`None`: the server's), so the checks of the worker
+        /// and the bytes the codec writes agree with the one that accepted
+        /// it even if the channel's setting changes meanwhile.
+        encoder: Option<&'static encoding_rs::Encoding>,
     },
     Raw(IrcMessage),
     /// Publish (`Some`) or remove (`None`) our own avatar; `request`
@@ -1261,11 +1314,12 @@ fn validate_outgoing(outgoing: &Outgoing, encoding: &str) -> Result<(), String> 
 
 /// [`validate_outgoing`] where a message to others must also fit behind the
 /// `prefix_bytes` the server adds (see [`validate_relayed_wire`]).
-fn validate_outgoing_relayed(
+fn validate_outgoing_relayed<'w>(
     outgoing: &Outgoing,
-    encoding: &str,
+    encoding: impl Into<Wire<'w>>,
     prefix_bytes: usize,
 ) -> Result<(), String> {
+    let encoding = encoding.into();
     let message = match outgoing {
         Outgoing::Message {
             target,
@@ -1301,7 +1355,12 @@ fn validate_outgoing_relayed(
         Outgoing::Quit => return Ok(()),
         Outgoing::QuitWith(reason) => IrcMessage::from(IrcCommand::QUIT(Some(reason.clone()))),
     };
-    if matches!(outgoing, Outgoing::Message { .. }) {
+    if let Outgoing::Message { encoder, .. } = outgoing {
+        let fixed = Fixed(*encoder);
+        let encoding = Wire {
+            label: encoding.label,
+            charsets: Some(&fixed),
+        };
         validate_relayed_wire(&message.to_string(), encoding, prefix_bytes)
     } else {
         validate_wire(&message.to_string(), encoding)
@@ -1421,6 +1480,7 @@ fn parse_slash_command(line: &str, selected: Option<&str>) -> Result<Outgoing, S
                 text,
                 display_text: format!("* {action}"),
                 notice: false,
+                encoder: None,
             })
         }
         "MSG" | "PRIVMSG" | "NOTICE" => {
@@ -1447,6 +1507,7 @@ fn parse_slash_command(line: &str, selected: Option<&str>) -> Result<Outgoing, S
                 text: text.into(),
                 display_text: text.into(),
                 notice: verb == "NOTICE",
+                encoder: None,
             })
         }
         "PART" | "TOPIC" => {
@@ -1558,6 +1619,8 @@ pub struct Connection {
     /// `None` after [`Connection::take_events`].
     events: Option<Events>,
     encoding: String,
+    /// Channels with an encoding of their own for their text.
+    charsets: Arc<ChannelCharsets>,
     /// Reason for a `PART` that names none.
     part_message: Option<String>,
     /// The server's announced `MODES` limit; 0 until one is seen.
@@ -1583,6 +1646,8 @@ impl Connection {
             ensure_tls_crypto_provider()?;
         }
         let encoding = config.encoding.clone();
+        let charsets = Arc::new(ChannelCharsets::new(&config.channel_encodings)?);
+        let worker_charsets = charsets.clone();
         let part_message = config.wire_part_message();
         let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (event_tx, events) = mpsc::channel(EVENT_CAPACITY);
@@ -1621,6 +1686,7 @@ impl Connection {
                             worker_modes,
                             worker_relay_prefix,
                             worker_transcript,
+                            worker_charsets,
                         )),
                         Err(error) => {
                             let _ = event_tx.blocking_send(Event::Disconnected(error.to_string()));
@@ -1640,6 +1706,7 @@ impl Connection {
             quit,
             events: Some(Events(events)),
             encoding,
+            charsets,
             part_message,
             modes_per_line,
             relay_prefix,
@@ -1686,9 +1753,47 @@ impl Connection {
         self.events.as_ref().is_some_and(Events::is_closed)
     }
 
+    /// A message with the encoding its target uses now fixed in it; whatever
+    /// the setting becomes while it waits, it is checked and written with
+    /// this one.
+    fn pinned(&self, mut outgoing: Outgoing) -> Outgoing {
+        if let Outgoing::Message {
+            target, encoder, ..
+        } = &mut outgoing
+        {
+            *encoder = self.charsets.encoder(target);
+        }
+        outgoing
+    }
+
     fn validate(&self, outgoing: &Outgoing) -> Result<(), String> {
         let prefix = relay::published(&self.relay_prefix);
-        validate_outgoing_relayed(outgoing, &self.encoding, prefix)
+        let wire = Wire {
+            label: &self.encoding,
+            charsets: Some(&*self.charsets),
+        };
+        validate_outgoing_relayed(outgoing, wire, prefix)
+    }
+
+    /// Sets the encodings `channel` uses for the text of the messages it
+    /// receives (`decode`) and sends (`encode`), as WHATWG labels; a side
+    /// that is `None` follows the server's encoding, and both `None` removes
+    /// the override. Applies to the next line in either direction. Only the
+    /// text changes: the channel name keeps the server's encoding. Refused
+    /// when the server requires UTF-8 (`UTF8ONLY`) and a label is not UTF-8.
+    pub fn set_channel_encoding(
+        &self,
+        channel: &str,
+        decode: Option<&str>,
+        encode: Option<&str>,
+    ) -> Result<(), String> {
+        self.charsets.set(channel, decode, encode)
+    }
+
+    /// Whether the server announced `UTF8ONLY`, so channels can only use
+    /// UTF-8.
+    pub fn utf8_only(&self) -> bool {
+        self.charsets.utf8_only()
     }
 
     pub fn send_message(&self, channel: &str, text: &str, notice: bool) -> Result<(), String> {
@@ -1701,7 +1806,9 @@ impl Connection {
             text: text.to_owned(),
             display_text: text.to_owned(),
             notice,
+            encoder: None,
         };
+        let outgoing = self.pinned(outgoing);
         self.validate(&outgoing)?;
         self.commands
             .try_send(outgoing)
@@ -1723,7 +1830,9 @@ impl Connection {
             text: text.to_owned(),
             display_text: text.to_owned(),
             notice,
+            encoder: None,
         };
+        let outgoing = self.pinned(outgoing);
         self.validate(&outgoing)?;
         self.commands
             .try_send(outgoing)
@@ -1784,6 +1893,7 @@ impl Connection {
     pub fn send_command(&self, line: &str, selected_channel: Option<&str>) -> Result<(), String> {
         let outgoing = parse_slash_command(line, selected_channel)?;
         let outgoing = with_default_part_reason(outgoing, self.part_message.as_deref());
+        let outgoing = self.pinned(outgoing);
         self.validate(&outgoing)?;
         self.commands
             .try_send(outgoing)
@@ -1920,6 +2030,7 @@ async fn run(
     commands: mpsc::Receiver<Outgoing>,
     events: mpsc::Sender<Event>,
 ) {
+    let config_encodings = config.channel_encodings.clone();
     run_cancellable(
         config,
         commands,
@@ -1928,10 +2039,12 @@ async fn run(
         Arc::new(AtomicUsize::new(0)),
         Arc::new(AtomicUsize::new(0)),
         Arc::new(AtomicBool::new(true)),
+        Arc::new(ChannelCharsets::new(&config_encodings).expect("valid channel encodings")),
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_cancellable(
     config: ConnectionConfig,
     mut commands: mpsc::Receiver<Outgoing>,
@@ -1940,6 +2053,7 @@ async fn run_cancellable(
     modes_per_line: Arc<AtomicUsize>,
     relay_prefix: Arc<AtomicUsize>,
     transcript: Arc<AtomicBool>,
+    charsets: Arc<ChannelCharsets>,
 ) {
     let started = Instant::now();
     let transcript = Transcript {
@@ -2004,7 +2118,8 @@ async fn run_cancellable(
     let targets_since = config.history_targets_since;
     let registration_user = config.username.clone();
     let auto_join_channels = config.channels.clone();
-    let irc_config = library_config(&config);
+    let mut irc_config = library_config(&config);
+    irc_config.body_charsets = Some(irc::proto::charsets::BodyCharsetsHandle(charsets.clone()));
     let advertise_avatar = config.advertises_avatar();
     let registration_realname = config.wire_realname();
     let quit_message = config.wire_quit_message();
@@ -2178,6 +2293,7 @@ async fn run_cancellable(
         started,
         transcript,
         wire_encoding,
+        charsets,
         quit_message,
         advertise_avatar,
         auto_join_channels,
@@ -2207,6 +2323,7 @@ async fn run_cancellable(
         history_enabled: false,
         echoes: echo::Echoes::default(),
         next_local_id: 0,
+        reported_unsent: 0,
         accounts: accounts::Accounts::default(),
         targets_asked: false,
         // Last reported Event::HistoryAvailable.
@@ -2285,6 +2402,8 @@ struct Worker {
     started: Instant,
     transcript: Transcript,
     wire_encoding: String,
+    /// The channels with an encoding of their own for their text.
+    charsets: Arc<ChannelCharsets>,
     quit_message: String,
     // The avatar mark is fixed for the connection, also for SETNAME.
     advertise_avatar: bool,
@@ -2314,6 +2433,8 @@ struct Worker {
     history_enabled: bool,
     echoes: echo::Echoes,
     next_local_id: u64,
+    /// Queued lines `UTF8ONLY` kept from being written that were already reported.
+    reported_unsent: usize,
     accounts: accounts::Accounts,
     targets_asked: bool,
     history_available: bool,
@@ -2426,7 +2547,11 @@ impl Worker {
                 text,
                 display_text,
                 notice,
-            } => self.send_message(target, text, display_text, notice).await,
+                encoder,
+            } => {
+                self.send_message(target, text, display_text, notice, encoder)
+                    .await
+            }
             Outgoing::Raw(message) => self.send_raw(message).await,
             Outgoing::OwnAvatar { request, url } => self.set_own_avatar(request, url).await,
             Outgoing::ShareAvatar(url) => {
@@ -2460,6 +2585,14 @@ impl Worker {
         }
     }
 
+    /// How lines are written on this connection.
+    fn wire(&self) -> Wire<'_> {
+        Wire {
+            label: &self.wire_encoding,
+            charsets: Some(&*self.charsets),
+        }
+    }
+
     fn publish_relay_prefix(&self) {
         let bytes = self
             .own_mask
@@ -2473,6 +2606,7 @@ impl Worker {
         text: String,
         display_text: String,
         notice: bool,
+        encoder: Option<&'static encoding_rs::Encoding>,
     ) -> Flow {
         // With echo-message the local line is confirmed by
         // the server's echo; a label (labeled-response)
@@ -2505,8 +2639,31 @@ impl Worker {
         let line = self.transcript.line(&message);
         // Only the 512 bytes of our own line: the length once the server
         // relays it is checked by the connection handle before queuing.
-        let result = validate_tagged_wire(&message, &self.wire_encoding)
-            .and_then(|_| self.client.send(message).map_err(|error| error.to_string()));
+        let fixed = Fixed(encoder);
+        let wire = Wire {
+            label: &self.wire_encoding,
+            charsets: Some(&fixed),
+        };
+        // The codec writes this line later: it keeps the encoding that was
+        // checked, whatever the channel's setting becomes by then.
+        let written = irc::proto::IrcCodec::sanitize(message.to_string());
+        // The handle accepted the message before `UTF8ONLY` was known.
+        let refused = (self.charsets.utf8_only()
+            && encoder.is_some_and(|encoding| encoding != encoding_rs::UTF_8))
+        .then(|| {
+            "the server requires UTF-8 (UTF8ONLY); the message was accepted in another character encoding"
+                .to_owned()
+        });
+        let result = refused
+            .map_or(Ok(()), Err)
+            .and_then(|()| validate_tagged_wire(&message, wire))
+            .and_then(|_| {
+                self.charsets.pin(&written, encoder);
+                self.client.send(message).map_err(|error| {
+                    self.charsets.unpin(&written);
+                    error.to_string()
+                })
+            });
         let event = match result {
             Ok(()) => {
                 self.transcript.record(WireDirection::Sent, line).await;
@@ -2532,7 +2689,7 @@ impl Worker {
             IrcCommand::NICK(nickname) if !self.registered => Some(nickname.clone()),
             _ => None,
         };
-        let result = validate_wire(&message.to_string(), &self.wire_encoding)
+        let result = validate_wire(&message.to_string(), self.wire())
             .and_then(|_| self.client.send(message).map_err(|error| error.to_string()));
         match result {
             Ok(()) => {
@@ -2700,6 +2857,22 @@ impl Worker {
 
     async fn on_irc_message(&mut self, message: IrcMessage) -> Flow {
         self.record_received(&message).await;
+        if requires_utf8(&message) && self.charsets.set_utf8_only() {
+            self.note(
+                "Server requires UTF-8 (UTF8ONLY): the channels' other character encodings are not used.",
+            )
+            .await;
+        }
+        if requires_utf8(&message) {
+            let unsent = self.charsets.unsent_for_utf8_only();
+            if unsent > self.reported_unsent {
+                self.reported_unsent = unsent;
+                self.note(format!(
+                    "Server requires UTF-8 (UTF8ONLY): {unsent} queued message(s) accepted in another character encoding were not sent."
+                ))
+                .await;
+            }
+        }
         if !self.wire_encoding.eq_ignore_ascii_case("UTF-8") && requires_utf8(&message) {
             let _ = self
                 .events
@@ -2812,6 +2985,7 @@ impl Worker {
             && announced != self.casemapping
         {
             self.casemapping = announced;
+            self.charsets.set_casemapping(announced);
             self.metadata.set_casemapping(announced);
             self.roster.presence.set_casemapping(announced);
             self.history.set_casemapping(announced);

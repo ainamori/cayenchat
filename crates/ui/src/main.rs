@@ -8,6 +8,7 @@ mod avatar_editor;
 mod avatars;
 mod button_order;
 mod char_refs;
+mod charset_command;
 mod color_picker;
 mod compact_urls;
 mod conversation_log;
@@ -57,9 +58,9 @@ use cayenchat_app::{
     timeline::TimelineLine,
 };
 use cayenchat_irc_core::{
-    ChannelActivityKind, Connection, ConnectionConfig, Event, HistoryMessage, HistoryResume,
-    Ircv3Options, MemberCommand, MessageReference, OlderHistoryStatus, RealNameFailure,
-    SaslCredentials, WhoisInfo, WireDirection, valid_channel,
+    ChannelActivityKind, ChannelEncoding, Connection, ConnectionConfig, Event, HistoryMessage,
+    HistoryResume, Ircv3Options, MemberCommand, MessageReference, OlderHistoryStatus,
+    RealNameFailure, SaslCredentials, WhoisInfo, WireDirection, valid_channel,
 };
 use cayenchat_model::{
     ConversationId, Network, NetworkId, Provenance, TimeOfDay, Timestamp, display, names,
@@ -262,6 +263,7 @@ fn connection_config(
     config.verify_tls_certificates = profile.verify_tls_certificates;
     config.allow_plaintext_pass = profile.allow_plaintext_pass;
     config.encoding = profile.encoding.label().into();
+    config.channel_encodings = channel_encodings(profile);
     config.ircv3 = ircv3_options(profile.ircv3);
     config.shared_avatar = shared_peer_avatar(profile);
     if let Some(password) = server_password.filter(|value| !value.is_empty()) {
@@ -277,6 +279,20 @@ fn connection_config(
     }
     config.validate()?;
     Ok(config)
+}
+
+/// The channels of `profile` with an encoding of their own, as a connection
+/// takes them.
+fn channel_encodings(profile: &ServerProfile) -> Vec<ChannelEncoding> {
+    profile
+        .channel_charsets
+        .iter()
+        .map(|entry| ChannelEncoding {
+            channel: entry.channel.clone(),
+            decode: entry.decode.map(|encoding| encoding.label().to_owned()),
+            encode: entry.encode.map(|encoding| encoding.label().to_owned()),
+        })
+        .collect()
 }
 
 /// The IRCv3 extensions a connection asks for, from the server's opt-ins.
@@ -1784,6 +1800,7 @@ impl ChatWindow {
                     config.shared_avatar = shared.clone();
                     // The auto-join list too: reconnects join the saved one.
                     config.channels = profile.channels();
+                    config.channel_encodings = channel_encodings(profile);
                     // A new realname is sent at once with SETNAME when the
                     // connection has it; the server's answer says otherwise.
                     if config.realname != profile.realname {
@@ -2706,6 +2723,191 @@ impl ChatWindow {
         };
         self.set_feedback(feedback);
         cx.notify();
+    }
+
+    /// The text of a `/charset` line that cannot be run.
+    fn charset_problem(&self, problem: &charset_command::Problem) -> String {
+        match problem {
+            charset_command::Problem::UnknownEncoding(name) => self.i18n.format(
+                "charset_unknown",
+                &[
+                    ("name", &display::neutralize_bidi(name)),
+                    ("encodings", &charset_command::supported_names()),
+                ],
+            ),
+            charset_command::Problem::Usage => self.i18n.text("charset_usage"),
+        }
+    }
+
+    /// Runs `/charset` for the selected channel. The result is a line in
+    /// that channel's log; the override is saved with the server profile and
+    /// applies to the live connection at once, and to later ones through the
+    /// stored configuration. An error leaves everything as it was.
+    fn run_charset(
+        &mut self,
+        request: charset_command::Request,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let not_channel = || self.i18n.text("charset_not_channel");
+        let channel = self
+            .state
+            .selected_channel()
+            .filter(|channel| !channel.is_private())
+            .ok_or_else(not_channel)?;
+        let (conversation, name) = (channel.id, channel.name.clone());
+        let network = self.selected_network_id().ok_or_else(not_channel)?;
+        let profile_id = self
+            .sessions
+            .get(&network)
+            .map(|session| session.profile_id.clone())
+            .ok_or_else(not_channel)?;
+        let mapping = self.state.casemapping(network);
+        let same = |left: &str, right: &str| mapping.same(left, right);
+        let profile = self.saved.profile(&profile_id).ok_or_else(not_channel)?;
+        let server = profile.encoding;
+        let current = profile.channel_charset(&name, same).cloned();
+        let shown_name = display::neutralize_bidi(&name);
+        // An encoding with where it comes from.
+        let describe = |side: Option<cayenchat_storage::TextEncoding>| {
+            let (encoding, origin) = match side {
+                Some(encoding) => (encoding, "charset_channel"),
+                None => (server, "charset_server"),
+            };
+            format!("{} ({})", encoding.label(), self.i18n.text(origin))
+        };
+        let report = match request {
+            charset_command::Request::Help => self.i18n.format(
+                "charset_help",
+                &[("encodings", &charset_command::supported_names())],
+            ),
+            charset_command::Request::Show => {
+                let (decode, encode) = charset_command::apply(request, current.as_ref());
+                let mut shown = self.i18n.format(
+                    "charset_show",
+                    &[
+                        ("channel", &shown_name),
+                        ("decode", &describe(decode)),
+                        ("encode", &describe(encode)),
+                    ],
+                );
+                // On a UTF8ONLY connection the saved values are not in effect.
+                let ignored = [decode, encode]
+                    .into_iter()
+                    .flatten()
+                    .any(|encoding| encoding != cayenchat_storage::TextEncoding::Utf8);
+                let utf8_only = self
+                    .sessions
+                    .get(&network)
+                    .and_then(|session| session.irc.as_ref())
+                    .is_some_and(|connection| connection.utf8_only());
+                if ignored && utf8_only {
+                    shown.push(' ');
+                    shown.push_str(&self.i18n.text("charset_note_utf8only"));
+                }
+                shown
+            }
+            charset_command::Request::Reset if current.is_none() => self
+                .i18n
+                .format("charset_reset_none", &[("channel", &shown_name)]),
+            charset_command::Request::Reset | charset_command::Request::Set { .. } => {
+                let (decode, encode) = charset_command::apply(request, current.as_ref());
+                let label = |side: Option<cayenchat_storage::TextEncoding>| {
+                    side.map(cayenchat_storage::TextEncoding::label)
+                };
+                let (was_decode, was_encode) =
+                    charset_command::apply(charset_command::Request::Show, current.as_ref());
+                let connection = self
+                    .sessions
+                    .get(&network)
+                    .and_then(|session| session.irc.as_ref());
+                if let Some(connection) = connection {
+                    connection
+                        .set_channel_encoding(&name, label(decode), label(encode))
+                        .map_err(|error| {
+                            if connection.utf8_only() {
+                                self.i18n.text("charset_utf8only")
+                            } else {
+                                error
+                            }
+                        })?;
+                }
+                let revert = |this: &Self| {
+                    if let Some(connection) = this
+                        .sessions
+                        .get(&network)
+                        .and_then(|session| session.irc.as_ref())
+                    {
+                        let _ = connection.set_channel_encoding(
+                            &name,
+                            label(was_decode),
+                            label(was_encode),
+                        );
+                    }
+                };
+                // Start from the file, which a settings window may have
+                // updated (or from what this window knows, when the file
+                // does not have the server).
+                let mut settings = match settings_file::load() {
+                    Ok(Some(settings)) if settings.profile(&profile_id).is_some() => settings,
+                    Ok(_) => self.saved.clone(),
+                    Err(error) => {
+                        revert(self);
+                        return Err(error);
+                    }
+                };
+                let saved = settings
+                    .servers
+                    .iter_mut()
+                    .find(|profile| profile.id == profile_id)
+                    .ok_or_else(|| {
+                        revert(self);
+                        not_channel()
+                    })?;
+                if let Err(error) = saved.set_channel_charset(&name, decode, encode, same) {
+                    revert(self);
+                    return Err(error);
+                }
+                let channel_charsets = saved.channel_charsets.clone();
+                if let Err(error) = settings_file::save(&settings) {
+                    revert(self);
+                    return Err(error);
+                }
+                if let Some(profile) = self
+                    .saved
+                    .servers
+                    .iter_mut()
+                    .find(|profile| profile.id == profile_id)
+                {
+                    profile.channel_charsets = channel_charsets;
+                    if let Some(config) = self
+                        .sessions
+                        .get_mut(&network)
+                        .and_then(|session| session.active_config.as_mut())
+                    {
+                        config.channel_encodings = channel_encodings(profile);
+                    }
+                }
+                if decode.is_none() && encode.is_none() {
+                    self.i18n.format(
+                        "charset_reset",
+                        &[("channel", &shown_name), ("encoding", server.label())],
+                    )
+                } else {
+                    self.i18n.format(
+                        "charset_set",
+                        &[
+                            ("channel", &shown_name),
+                            ("decode", &describe(decode)),
+                            ("encode", &describe(encode)),
+                        ],
+                    )
+                }
+            }
+        };
+        self.state
+            .append_conversation_activity(conversation, report);
+        cx.notify();
+        Ok(())
     }
 
     fn move_menu_conversation(&mut self, to: MoveTo, cx: &mut Context<Self>) {
@@ -4518,7 +4720,15 @@ impl ChatWindow {
         let connection = network
             .and_then(|network| self.sessions.get(&network))
             .and_then(|session| session.irc.as_ref());
-        let result = if let Some(connection) = connection {
+        // Local to the application: nothing of it goes to the server, so it
+        // works before registration and while disconnected too.
+        let charset = charset_command::parse(&text);
+        let result = if let Some(parsed) = charset {
+            match parsed {
+                Ok(request) => self.run_charset(request, cx),
+                Err(problem) => Err(self.charset_problem(&problem)),
+            }
+        } else if let Some(connection) = connection {
             if network.and_then(|network| self.state.status(network))
                 != Some(&ConnectionStatus::Registered)
             {
@@ -7979,3 +8189,7 @@ mod menu_tests;
 #[cfg(test)]
 #[path = "main_tests/toolbar_tests.rs"]
 mod toolbar_tests;
+
+#[cfg(test)]
+#[path = "main_tests/charset_command_tests.rs"]
+mod charset_command_tests;

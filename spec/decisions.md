@@ -191,8 +191,9 @@ characters can contain those bytes. A local test uses `#がが`, whose encoded n
 contains comma bytes, and verifies one channel identity through JOIN and PRIVMSG.
 Server handling of those bytes varies; a Japanese IRCnet server patch historically
 addressed this, while an unpatched server may misinterpret the name. The current
-per-server choice does not support mixed encodings within one connection or preserve
-noncanonical incoming ISO-2022-JP byte variants.
+per-server choice does not preserve noncanonical incoming ISO-2022-JP byte
+variants. Mixed encodings within one connection are supported only for the text
+of channel messages (D050).
 
 Connection diagnostics report DNS, transport, and IRC registration stages plus
 directional, decoded IRC command/reply lines through core events. The chat window
@@ -1182,6 +1183,53 @@ insertion (its sync gap handling decides what is missing); the resume
 point's reference is IRC's concern and is not a generic sync token.
 Private-message recovery, persistence and echo-message reconciliation are
 future work. Details in `architecture.md` (Channel history).
+
+## D050 — Per-channel text encodings with `/charset` (#396)
+
+**Status:** Implemented
+
+The server profile's encoding is the server's default. A channel may override
+it for the text of its messages, per direction (`decode` for received text,
+`encode` for sent text), with the local command `/charset` (WeeChat syntax:
+`/charset`, `/charset <enc>`, `/charset decode|encode <enc>`, `/charset reset`,
+`/charset help`). The command is never sent to the server; it works only in a
+channel tab. The override is stored in the profile (`channel_charsets`, keyed
+by channel name, compared with the network's case mapping) and has no settings
+page. There is no re-decoding of lines already shown.
+
+- **Only the text changes.** The vendored codec (`irc-proto::charsets`) finds
+  the target and the text of a `PRIVMSG`/`NOTICE` from the ASCII structure of
+  the bytes and converts the text with the channel's encoding; tags, prefix,
+  command and the target keep the server's encoding, so channel identity,
+  JOIN targets, `!` safe channels and `#がが` on ISO-2022-JP do not change.
+  CTCP ACTION is part of the text. Other lines that carry text (TOPIC, PART,
+  KICK reasons, topic replies) use the server's encoding.
+- **Wire bytes are checked as sent.** The 512-byte and relayed-prefix (#330)
+  checks and the unrepresentable-character check encode the line with the same
+  function the codec uses, so they see the real bytes.
+- **A queued message keeps its encoding.** The connection handle fixes the
+  channel's `encode` encoding in the message when it accepts it (length,
+  relayed prefix, representability). The worker checks with that encoding and
+  pins it to the exact line for the codec, which uses the pin once when it
+  writes the line. A `/charset` change while messages wait therefore affects
+  only later messages. `UTF8ONLY` outranks a pin: a message accepted in another
+  encoding before the announcement is refused by the worker afterwards, a line
+  already queued for the codec is skipped (not written), and the connection
+  reports how many were not sent.
+- **Configured names are not merged early.** The overrides handed to a
+  connection are all kept until `CASEMAPPING` is announced, so names that only
+  the default mapping equates (`#a[` / `#a{` under `ascii`) stay separate.
+- **UTF8ONLY.** After `005 UTF8ONLY`, only UTF-8 overrides apply and `/charset`
+  refuses others; a legacy server encoding still ends the connection.
+- **One list.** `TextEncoding::ALL` (15 encodings: UTF-8, ISO-2022-JP,
+  Shift_JIS, EUC-JP, EUC-KR, Windows-1251, KOI8-R, KOI8-U, IBM866, ISO-8859-5,
+  x-mac-cyrillic, Windows-1254, Windows-1252, GBK, Big5) feeds the server
+  settings, `/charset` and its help. Aliases (`CP949`, `Windows-949`, `CP866`,
+  `MacCyrillic`, …) are input names only and map to the canonical one; an
+  unknown name is an error, never UTF-8. `ISO-8859-1` is not offered or
+  aliased: `encoding_rs` reads it as Windows-1252, which is a different table.
+- **Limits.** At most 256 overrides per server; entries read from a settings
+  file with an unusable name or no override are dropped.
 
 ## D049 — Direct input for ASCII-oriented fields (#379)
 

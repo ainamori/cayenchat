@@ -19,6 +19,9 @@ pub const MAX_LINE_BYTES: usize = 16 * 1024;
 pub struct LineCodec {
     #[cfg(feature = "encoding")]
     encoding: &'static Encoding,
+    /// Other encodings for the text of messages to some targets.
+    #[cfg(feature = "encoding")]
+    charsets: Option<std::sync::Arc<dyn crate::charsets::BodyCharsets>>,
     next_index: usize,
 }
 
@@ -40,8 +43,21 @@ impl LineCodec {
                     )));
                 }
             },
+            #[cfg(feature = "encoding")]
+            charsets: None,
             next_index: 0,
         })
+    }
+
+    /// Converts the text of messages to the targets `charsets` knows with
+    /// their own encodings, in both directions.
+    #[cfg(feature = "encoding")]
+    pub fn with_charsets(
+        mut self,
+        charsets: Option<std::sync::Arc<dyn crate::charsets::BodyCharsets>>,
+    ) -> LineCodec {
+        self.charsets = charsets;
+        self
     }
 }
 
@@ -69,8 +85,11 @@ impl Decoder for LineCodec {
             {
                 // Decode the line using the codec's encoding. Malformed bytes
                 // become U+FFFD, as with the replacing decoder before.
-                let (data, _) = self.encoding.decode_without_bom_handling(line.as_ref());
-                Ok(Some(data.into_owned()))
+                Ok(Some(crate::charsets::decode_line(
+                    line.as_ref(),
+                    self.encoding,
+                    self.charsets.as_deref(),
+                )))
             }
 
             #[cfg(not(feature = "encoding"))]
@@ -102,7 +121,22 @@ impl Encoder<String> for LineCodec {
             // Encode the message using the codec's encoding. Characters the
             // encoding cannot hold become numeric character references;
             // callers that care check encodability before sending.
-            let (data, _, _) = self.encoding.encode(&msg);
+            let pinned = match self
+                .charsets
+                .as_deref()
+                .and_then(|charsets| charsets.take_pin(&msg))
+            {
+                Some(crate::charsets::Pin::Skip) => return Ok(()),
+                Some(crate::charsets::Pin::Encoding(encoding)) => {
+                    Some(crate::charsets::Fixed(encoding))
+                }
+                None => None,
+            };
+            let charsets = match &pinned {
+                Some(fixed) => Some(fixed as &dyn crate::charsets::BodyCharsets),
+                None => self.charsets.as_deref(),
+            };
+            let (data, _) = crate::charsets::encode_line(&msg, self.encoding, charsets);
             dst.extend_from_slice(&data);
         }
 
@@ -175,6 +209,50 @@ mod tests {
         src.extend_from_slice("a".repeat(MAX_LINE_BYTES + 1).as_bytes());
         assert_eq!(codec.decode(&mut src).unwrap(), Some("PING x\r\n".into()));
         assert!(codec.decode(&mut src).is_err());
+    }
+
+    #[cfg(feature = "encoding")]
+    #[test]
+    fn a_pinned_line_is_written_with_its_pinned_encoding() {
+        use crate::charsets::BodyCharsets;
+        use std::sync::{Arc, Mutex};
+        use tokio_util::codec::Encoder;
+
+        struct Pinned(Mutex<Option<crate::charsets::Pin>>);
+        impl BodyCharsets for Pinned {
+            fn is_empty(&self) -> bool {
+                false
+            }
+            fn decoder(&self, _: &str) -> Option<&'static encoding_rs::Encoding> {
+                None
+            }
+            // What the setting has become since the line was queued.
+            fn encoder(&self, _: &str) -> Option<&'static encoding_rs::Encoding> {
+                Some(encoding_rs::UTF_8)
+            }
+            fn take_pin(&self, _: &str) -> Option<crate::charsets::Pin> {
+                self.0.lock().unwrap().take()
+            }
+        }
+
+        use crate::charsets::Pin;
+        let pins = Arc::new(Pinned(Mutex::new(Some(Pin::Encoding(Some(
+            encoding_rs::SHIFT_JIS,
+        ))))));
+        let mut codec = LineCodec::new("utf-8").unwrap().with_charsets(Some(pins));
+        let mut dst = BytesMut::new();
+        codec.encode("PRIVMSG #a :あ\r\n".into(), &mut dst).unwrap();
+        assert_eq!(&dst[..], b"PRIVMSG #a :\x82\xa0\r\n");
+        // The pin is used up: the next line follows the current setting.
+        let mut dst = BytesMut::new();
+        codec.encode("PRIVMSG #a :あ\r\n".into(), &mut dst).unwrap();
+        assert_eq!(&dst[..], "PRIVMSG #a :あ\r\n".as_bytes());
+        // A line the connection no longer allows is not written at all.
+        let pins = Arc::new(Pinned(Mutex::new(Some(Pin::Skip))));
+        let mut codec = LineCodec::new("utf-8").unwrap().with_charsets(Some(pins));
+        let mut dst = BytesMut::new();
+        codec.encode("PRIVMSG #a :あ\r\n".into(), &mut dst).unwrap();
+        assert!(dst.is_empty());
     }
 
     #[cfg(feature = "encoding")]

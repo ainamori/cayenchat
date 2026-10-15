@@ -4,6 +4,8 @@
 
 pub mod caps;
 pub mod chan;
+#[cfg(feature = "encoding")]
+pub mod charsets;
 pub mod colors;
 pub mod command;
 pub mod error;

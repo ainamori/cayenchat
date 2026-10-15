@@ -580,6 +580,14 @@ codec so protocol parameters, including channel names, and message text use the
 same wire charset. It strictly validates outgoing encoding and wire length before
 queueing, avoiding silent replacement and preserving a draft on rejection. A
 legacy-encoding connection disconnects if the server advertises `UTF8ONLY`.
+A channel may use another encoding for the text of its messages (D050,
+`/charset`): `ConnectionConfig::channel_encodings` and
+`Connection::set_channel_encoding` feed a shared `ChannelCharsets`, which the
+`irc-proto` codec asks per `PRIVMSG`/`NOTICE` target (`charsets` module; a
+connection without overrides pays one atomic read per line). The server's
+encoding still covers everything but that text. The UI keeps the overrides in
+`ServerProfile::channel_charsets` and copies them into the profile's active
+configuration so reconnects keep them.
 A `PRIVMSG` or `NOTICE` must also fit in 512 bytes once the server has put
 `:nick!user@host ` in front of it, or the recipients would get the end cut off
 (issue #330): the check counts the converted command plus CRLF plus that prefix,

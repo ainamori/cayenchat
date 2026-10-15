@@ -278,6 +278,17 @@ pub enum TextEncoding {
     Iso2022Jp,
     ShiftJis,
     EucJp,
+    EucKr,
+    Windows1251,
+    Koi8R,
+    Koi8U,
+    Ibm866,
+    Iso8859_5,
+    XMacCyrillic,
+    Windows1254,
+    Windows1252,
+    Gbk,
+    Big5,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,17 +344,108 @@ pub enum Language {
 }
 
 impl TextEncoding {
-    pub const ALL: [Self; 4] = [Self::Utf8, Self::Iso2022Jp, Self::ShiftJis, Self::EucJp];
+    /// Every supported character encoding in the order the server settings
+    /// list them. The server settings, `/charset` and its help all read this
+    /// one list.
+    pub const ALL: [Self; 15] = [
+        Self::Utf8,
+        Self::Iso2022Jp,
+        Self::ShiftJis,
+        Self::EucJp,
+        Self::EucKr,
+        Self::Windows1251,
+        Self::Koi8R,
+        Self::Koi8U,
+        Self::Ibm866,
+        Self::Iso8859_5,
+        Self::XMacCyrillic,
+        Self::Windows1254,
+        Self::Windows1252,
+        Self::Gbk,
+        Self::Big5,
+    ];
 
+    /// The canonical name, which is also a WHATWG label `encoding_rs`
+    /// understands.
     pub fn label(self) -> &'static str {
         match self {
             Self::Utf8 => "UTF-8",
             Self::Iso2022Jp => "ISO-2022-JP",
             Self::ShiftJis => "Shift_JIS",
             Self::EucJp => "EUC-JP",
+            Self::EucKr => "EUC-KR",
+            Self::Windows1251 => "Windows-1251",
+            Self::Koi8R => "KOI8-R",
+            Self::Koi8U => "KOI8-U",
+            Self::Ibm866 => "IBM866",
+            Self::Iso8859_5 => "ISO-8859-5",
+            Self::XMacCyrillic => "x-mac-cyrillic",
+            Self::Windows1254 => "Windows-1254",
+            Self::Windows1252 => "Windows-1252",
+            Self::Gbk => "GBK",
+            Self::Big5 => "Big5",
         }
     }
+
+    /// Other names accepted when typing an encoding, besides the label.
+    /// Matching ignores case, `-`, `_` and spaces.
+    fn aliases(self) -> &'static [&'static str] {
+        match self {
+            Self::Utf8 => &[],
+            Self::Iso2022Jp => &[],
+            Self::ShiftJis => &["sjis", "windows-31j", "cp932"],
+            Self::EucJp => &[],
+            Self::EucKr => &["cp949", "windows-949", "uhc"],
+            Self::Windows1251 => &["cp1251"],
+            Self::Koi8R => &[],
+            Self::Koi8U => &[],
+            Self::Ibm866 => &["cp866", "866"],
+            Self::Iso8859_5 => &[],
+            Self::XMacCyrillic => &["maccyrillic", "mac-cyrillic"],
+            Self::Windows1254 => &["cp1254"],
+            Self::Windows1252 => &["cp1252"],
+            Self::Gbk => &[],
+            Self::Big5 => &[],
+        }
+    }
+
+    /// The encoding a typed name stands for: a canonical label or one of its
+    /// aliases. `None` for anything else; an unknown name is never taken for
+    /// UTF-8. `ISO-8859-1` is not an alias: `encoding_rs` reads it as
+    /// Windows-1252, which is not the same table.
+    pub fn parse(name: &str) -> Option<Self> {
+        fn key(name: &str) -> String {
+            name.chars()
+                .filter(|ch| !matches!(ch, '-' | '_' | ' '))
+                .flat_map(char::to_lowercase)
+                .collect()
+        }
+        let wanted = key(name);
+        Self::ALL.into_iter().find(|encoding| {
+            key(encoding.label()) == wanted
+                || encoding.aliases().iter().any(|alias| key(alias) == wanted)
+        })
+    }
 }
+
+/// An encoding override for one channel of a server: the side that is set
+/// differs from the server's encoding, the other follows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelCharset {
+    pub channel: String,
+    /// Used for the text of messages received in the channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode: Option<TextEncoding>,
+    /// Used for the text of messages sent to the channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encode: Option<TextEncoding>,
+}
+
+/// Overrides kept per server. A settings file can hold more, but the extra
+/// entries are dropped when it is read.
+pub const MAX_CHANNEL_CHARSETS: usize = 256;
+/// The longest channel name an override is kept for, in bytes.
+const MAX_CHARSET_CHANNEL_BYTES: usize = 200;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -657,6 +759,12 @@ pub struct ServerProfile {
     /// change; files without it read as empty.
     #[serde(default)]
     pub peer_avatar_url: String,
+    /// Channels whose text uses another encoding than `encoding`, set with
+    /// `/charset` only (there is no settings page for it). A side that is
+    /// not set follows `encoding`. Added without a version change; files
+    /// without it read as empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channel_charsets: Vec<ChannelCharset>,
     /// Plaintext passwords saved by version 10 and earlier. Read only for
     /// migration into the credential store; never written back.
     #[serde(rename = "server_password", default, skip_serializing)]
@@ -696,6 +804,7 @@ impl ServerProfile {
             ircv3: Ircv3Preferences::default(),
             avatar_url: String::new(),
             peer_avatar_url: String::new(),
+            channel_charsets: Vec::new(),
             legacy_server_password: None,
             legacy_sasl_password: None,
         }
@@ -718,6 +827,74 @@ impl ServerProfile {
 
     pub fn set_auto_join_entries(&mut self, entries: &[AutoJoinEntry]) {
         self.channels = format_auto_join(entries);
+    }
+
+    /// The override kept for `channel`; `same` tells whether two names are
+    /// the same channel (the network's case mapping).
+    pub fn channel_charset(
+        &self,
+        channel: &str,
+        same: impl Fn(&str, &str) -> bool,
+    ) -> Option<&ChannelCharset> {
+        self.channel_charsets
+            .iter()
+            .find(|entry| same(&entry.channel, channel))
+    }
+
+    /// Replaces the override of `channel`; a side left `None` follows the
+    /// server's encoding, and none at all removes the entry. Fails when
+    /// there is no room for one more.
+    pub fn set_channel_charset(
+        &mut self,
+        channel: &str,
+        decode: Option<TextEncoding>,
+        encode: Option<TextEncoding>,
+        same: impl Fn(&str, &str) -> bool,
+    ) -> Result<(), String> {
+        let at = self
+            .channel_charsets
+            .iter()
+            .position(|entry| same(&entry.channel, channel));
+        match (at, decode.is_none() && encode.is_none()) {
+            (Some(at), true) => {
+                self.channel_charsets.remove(at);
+            }
+            (None, true) => {}
+            (Some(at), false) => {
+                let entry = &mut self.channel_charsets[at];
+                entry.decode = decode;
+                entry.encode = encode;
+            }
+            (None, false) => {
+                if self.channel_charsets.len() >= MAX_CHANNEL_CHARSETS {
+                    return Err(format!(
+                        "At most {MAX_CHANNEL_CHARSETS} channels can have their own character encoding."
+                    ));
+                }
+                self.channel_charsets.push(ChannelCharset {
+                    channel: channel.to_owned(),
+                    decode,
+                    encode,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Drops entries a settings file should not hold: no override, an
+    /// unusable name, a repeated name or more than the limit.
+    fn clean_channel_charsets(&mut self) {
+        let mut seen = HashSet::new();
+        self.channel_charsets.retain(|entry| {
+            (entry.decode.is_some() || entry.encode.is_some())
+                && entry.channel.len() <= MAX_CHARSET_CHANNEL_BYTES
+                && entry.channel.starts_with(['#', '&', '!'])
+                && !entry
+                    .channel
+                    .contains(|ch: char| ch.is_control() || ch.is_whitespace() || ch == ',')
+                && seen.insert(entry.channel.to_ascii_lowercase())
+        });
+        self.channel_charsets.truncate(MAX_CHANNEL_CHARSETS);
     }
 
     pub fn server_password_key(&self) -> SecretKey {
@@ -1114,6 +1291,7 @@ impl Settings {
             if !server.use_tls {
                 server.verify_tls_certificates = true;
             }
+            server.clean_channel_charsets();
             if !server.remember_passwords {
                 server.legacy_server_password = None;
                 server.legacy_sasl_password = None;
@@ -1474,6 +1652,130 @@ mod tests {
         profile.set_auto_join_entries(&entries);
         assert_eq!(profile.channels, "#c,-#xyz,#a");
         assert_eq!(profile.channels(), ["#c", "#a"]);
+    }
+
+    #[test]
+    fn encoding_names_parse_to_the_canonical_encoding() {
+        for encoding in TextEncoding::ALL {
+            assert_eq!(TextEncoding::parse(encoding.label()), Some(encoding));
+            assert_eq!(
+                TextEncoding::parse(&encoding.label().to_lowercase()),
+                Some(encoding)
+            );
+        }
+        let mut labels: Vec<_> = TextEncoding::ALL.map(TextEncoding::label).to_vec();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), 15);
+        for (name, expected) in [
+            ("shift-jis", TextEncoding::ShiftJis),
+            ("sjis", TextEncoding::ShiftJis),
+            ("CP949", TextEncoding::EucKr),
+            ("windows-949", TextEncoding::EucKr),
+            ("CP866", TextEncoding::Ibm866),
+            ("MacCyrillic", TextEncoding::XMacCyrillic),
+            ("utf8", TextEncoding::Utf8),
+            ("cp1251", TextEncoding::Windows1251),
+        ] {
+            assert_eq!(TextEncoding::parse(name), Some(expected), "{name}");
+        }
+        // Never taken for another encoding.
+        for name in ["", "latin1", "ISO-8859-1", "klingon", "utf-16"] {
+            assert_eq!(TextEncoding::parse(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn channel_charsets_are_set_replaced_removed_and_limited() {
+        let same = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+        let mut profile = ServerProfile::new("a".into(), "irc.example.net");
+        assert!(profile.channel_charset("#a", same).is_none());
+        profile
+            .set_channel_charset("#A", Some(TextEncoding::Koi8R), None, same)
+            .unwrap();
+        profile
+            .set_channel_charset("#a", None, Some(TextEncoding::Big5), same)
+            .unwrap();
+        assert_eq!(profile.channel_charsets.len(), 1);
+        let entry = profile.channel_charset("#A", same).unwrap();
+        assert_eq!(entry.decode, None);
+        assert_eq!(entry.encode, Some(TextEncoding::Big5));
+        profile.set_channel_charset("#a", None, None, same).unwrap();
+        assert!(profile.channel_charsets.is_empty());
+        for index in 0..MAX_CHANNEL_CHARSETS {
+            profile
+                .set_channel_charset(&format!("#c{index}"), Some(TextEncoding::Gbk), None, same)
+                .unwrap();
+        }
+        assert!(
+            profile
+                .set_channel_charset("#more", Some(TextEncoding::Gbk), None, same)
+                .is_err()
+        );
+        // An existing one can still change.
+        profile
+            .set_channel_charset("#c0", Some(TextEncoding::Big5), None, same)
+            .unwrap();
+    }
+
+    #[test]
+    fn channel_charsets_persist_per_server_and_unusable_entries_are_dropped() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let same = |a: &str, b: &str| a == b;
+        let mut settings = Settings::default();
+        settings.add_server("");
+        settings.selected_profile_mut().unwrap().host = "one.example.net".into();
+        settings
+            .selected_profile_mut()
+            .unwrap()
+            .set_channel_charset(
+                "#がが",
+                Some(TextEncoding::Iso2022Jp),
+                Some(TextEncoding::EucJp),
+                same,
+            )
+            .unwrap();
+        settings.add_server("");
+        settings.selected_profile_mut().unwrap().host = "two.example.net".into();
+        let profile = settings.selected_profile_mut().unwrap();
+        profile.channel_charsets = vec![
+            ChannelCharset {
+                channel: "#ok".into(),
+                decode: Some(TextEncoding::Gbk),
+                encode: None,
+            },
+            ChannelCharset {
+                channel: "#none".into(),
+                decode: None,
+                encode: None,
+            },
+            ChannelCharset {
+                channel: "nick".into(),
+                decode: Some(TextEncoding::Gbk),
+                encode: None,
+            },
+            ChannelCharset {
+                channel: "#a b".into(),
+                decode: Some(TextEncoding::Gbk),
+                encode: None,
+            },
+        ];
+        save_to(&path, &settings).unwrap();
+        let loaded = load_from(&path).unwrap().unwrap();
+        let [one, two] = loaded.servers.as_slice() else {
+            panic!("two servers");
+        };
+        assert_eq!(one.channel_charsets.len(), 1);
+        assert_eq!(one.channel_charsets[0].channel, "#がが");
+        assert_eq!(
+            one.channel_charsets[0].decode,
+            Some(TextEncoding::Iso2022Jp)
+        );
+        assert_eq!(one.channel_charsets[0].encode, Some(TextEncoding::EucJp));
+        assert_eq!(two.channel_charsets.len(), 1);
+        assert_eq!(two.channel_charsets[0].channel, "#ok");
+        assert!(two.channel_charset("#がが", same).is_none());
     }
 
     #[test]

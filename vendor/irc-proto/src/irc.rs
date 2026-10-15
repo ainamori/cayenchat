@@ -17,6 +17,18 @@ impl IrcCodec {
         LineCodec::new(label).map(|codec| IrcCodec { inner: codec })
     }
 
+    /// Like [`IrcCodec::new`], with other encodings for the text of messages
+    /// to some targets (see [`crate::charsets`]).
+    #[cfg(feature = "encoding")]
+    pub fn with_charsets(
+        label: &str,
+        charsets: Option<std::sync::Arc<dyn crate::charsets::BodyCharsets>>,
+    ) -> error::Result<IrcCodec> {
+        LineCodec::new(label).map(|codec| IrcCodec {
+            inner: codec.with_charsets(charsets),
+        })
+    }
+
     /// Sanitizes the input string by cutting up to (and including) the first occurence of a line
     /// terminiating phrase (`\r\n`, `\r`, or `\n`). This is used in sending messages through the
     /// codec to prevent the injection of additional commands.

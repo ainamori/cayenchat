@@ -324,6 +324,7 @@ fn closed_worker_keeps_buffered_diagnostics_readable() {
         quit: Arc::default(),
         events: Some(Events(events)),
         encoding: "UTF-8".into(),
+        charsets: Arc::new(ChannelCharsets::new(&[]).unwrap()),
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(0)),
         relay_prefix: Arc::new(AtomicUsize::new(0)),
@@ -348,6 +349,7 @@ fn member_modes_are_split_to_the_announced_limit_and_validated_first() {
         quit: Arc::default(),
         events: Some(Events(events)),
         encoding: "UTF-8".into(),
+        charsets: Arc::new(ChannelCharsets::new(&[]).unwrap()),
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(2)),
         relay_prefix: Arc::new(AtomicUsize::new(0)),
@@ -388,6 +390,7 @@ fn member_modes_are_not_sent_in_part_when_the_queue_is_nearly_full() {
         quit: Arc::default(),
         events: Some(Events(events)),
         encoding: "UTF-8".into(),
+        charsets: Arc::new(ChannelCharsets::new(&[]).unwrap()),
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(1)),
         relay_prefix: Arc::new(AtomicUsize::new(0)),
@@ -418,6 +421,7 @@ fn taken_events_can_be_awaited_until_the_worker_ends() {
         quit: Arc::default(),
         events: Some(Events(events)),
         encoding: "UTF-8".into(),
+        charsets: Arc::new(ChannelCharsets::new(&[]).unwrap()),
         part_message: None,
         modes_per_line: Arc::new(AtomicUsize::new(0)),
         relay_prefix: Arc::new(AtomicUsize::new(0)),
@@ -715,6 +719,278 @@ fn iso_2022_jp_channel_name_and_message_round_trip() {
     assert!(connection.send_message("#がが", "🙂", false).is_err());
     connection.send_message("#がが", "返事", false).unwrap();
     server.join().unwrap();
+}
+
+/// Reads lines until one starts with `prefix`.
+fn read_line_starting(reader: &mut BufReader<std::net::TcpStream>, prefix: &[u8]) -> Vec<u8> {
+    loop {
+        let mut line = Vec::new();
+        assert_ne!(reader.read_until(b'\n', &mut line).unwrap(), 0, "closed");
+        if line.starts_with(prefix) {
+            return line;
+        }
+    }
+}
+
+/// The next chat message event: its channel and text.
+fn next_channel_message(connection: &mut Connection) -> (String, String) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(Instant::now() < deadline, "no channel message");
+        match connection.try_recv() {
+            Some(Event::ChannelMessage { channel, text, .. }) => return (channel, text),
+            Some(Event::Disconnected(reason)) => panic!("unexpected disconnect: {reason}"),
+            _ => thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+fn registered_server(
+    listener: TcpListener,
+    extra: &'static [u8],
+) -> BufReader<std::net::TcpStream> {
+    let (mut socket, _) = listener.accept().unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut reader = BufReader::new(socket.try_clone().unwrap());
+    read_line_starting(&mut reader, b"USER ");
+    socket
+        .write_all(b":server 001 alice :Welcome\r\n:server 376 alice :End of MOTD\r\n")
+        .unwrap();
+    socket.write_all(extra).unwrap();
+    reader
+}
+
+/// Two channels of one UTF-8 server use different encodings for their text,
+/// in both directions, while the server's default stays for everything else
+/// and for a side that is not overridden.
+#[test]
+fn channels_of_one_server_use_their_own_text_encodings() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (seen, wait) = std_mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut reader = registered_server(
+            listener,
+            b":bob!u@h PRIVMSG #jp :\x1b$B$3$s$K$A$O\x1b(B\r\n\
+              :bob!u@h PRIVMSG #utf :\xe3\x81\x93\xe3\x82\x93\r\n\
+              :bob!u@h PRIVMSG #JP :\x1b$B$3$s\x1b(B\r\n\
+              :bob!u@h PRIVMSG #euc :\xa4\xb3\xa4\xf3\r\n",
+        );
+        assert_eq!(
+            read_line_starting(&mut reader, b"PRIVMSG #jp"),
+            b"PRIVMSG #jp \x1b$B$3$s\x1b(B\r\n"
+        );
+        assert_eq!(
+            read_line_starting(&mut reader, b"PRIVMSG #utf"),
+            "PRIVMSG #utf こん\r\n".as_bytes()
+        );
+        // Only the received side of #euc is overridden: it sends UTF-8.
+        assert_eq!(
+            read_line_starting(&mut reader, b"PRIVMSG #euc"),
+            "PRIVMSG #euc こん\r\n".as_bytes()
+        );
+        // The action is converted like any text.
+        assert_eq!(
+            read_line_starting(&mut reader, b"PRIVMSG #jp"),
+            b"PRIVMSG #jp :\x01ACTION \x1b$B$3\x1b(B\x01\r\n"
+        );
+        seen.send(()).unwrap();
+        // After a reset the server's encoding applies again.
+        assert_eq!(
+            read_line_starting(&mut reader, b"PRIVMSG #jp"),
+            "PRIVMSG #jp こ\r\n".as_bytes()
+        );
+    });
+    let mut config = ConnectionConfig::tls("127.0.0.1".into(), "alice".into(), Vec::new());
+    config.port = port;
+    config.use_tls = false;
+    config.channel_encodings = vec![
+        ChannelEncoding {
+            channel: "#jp".into(),
+            decode: Some("ISO-2022-JP".into()),
+            encode: Some("ISO-2022-JP".into()),
+        },
+        ChannelEncoding {
+            channel: "#euc".into(),
+            decode: Some("EUC-JP".into()),
+            encode: None,
+        },
+    ];
+    let mut connection = Connection::connect(config).unwrap();
+    for expected in [
+        ("#jp", "こんにちは"),
+        ("#utf", "こん"),
+        // The same channel under the server's case mapping.
+        ("#JP", "こん"),
+        ("#euc", "こん"),
+    ] {
+        assert_eq!(
+            next_channel_message(&mut connection),
+            (expected.0.to_owned(), expected.1.to_owned())
+        );
+    }
+    connection.send_message("#jp", "こん", false).unwrap();
+    connection.send_message("#utf", "こん", false).unwrap();
+    connection.send_message("#euc", "こん", false).unwrap();
+    connection.send_command("/me こ", Some("#jp")).unwrap();
+    // A character the channel's encoding cannot hold is refused, naming it.
+    let error = connection.send_message("#jp", "🙂", false).unwrap_err();
+    assert!(error.contains("ISO-2022-JP"), "{error}");
+    assert!(connection.send_message("#utf", "🙂", false).is_ok());
+    // The worker writes queued lines later; the override goes once it has.
+    wait.recv_timeout(Duration::from_secs(5)).unwrap();
+    connection.set_channel_encoding("#jp", None, None).unwrap();
+    connection.send_message("#jp", "こ", false).unwrap();
+    server.join().unwrap();
+}
+
+/// The channel name keeps the server's encoding, ISO-2022-JP here, while the
+/// channel's text uses another one.
+#[test]
+fn a_channel_override_leaves_the_channel_name_in_the_server_encoding() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let mut reader = registered_server(
+            listener,
+            b":bob!u@h PRIVMSG #\x1b$B$,$,\x1b(B :\xe3\x81\x93\xe3\x82\x93\r\n",
+        );
+        let join = read_line_starting(&mut reader, b"JOIN");
+        assert_eq!(join, b"JOIN #\x1b$B$,$,\x1b(B\r\n");
+        assert_eq!(
+            read_line_starting(&mut reader, b"PRIVMSG"),
+            b"PRIVMSG #\x1b$B$,$,\x1b(B \x82\xb1\x82\xf1\r\n"
+        );
+    });
+    let mut config =
+        ConnectionConfig::tls("127.0.0.1".into(), "alice".into(), vec!["#がが".into()]);
+    config.port = port;
+    config.use_tls = false;
+    config.encoding = "ISO-2022-JP".into();
+    config.channel_encodings = vec![ChannelEncoding {
+        channel: "#がが".into(),
+        decode: Some("UTF-8".into()),
+        encode: Some("Shift_JIS".into()),
+    }];
+    let mut connection = Connection::connect(config).unwrap();
+    assert_eq!(
+        next_channel_message(&mut connection),
+        ("#がが".to_owned(), "こん".to_owned())
+    );
+    connection.send_message("#がが", "こん", false).unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn utf8_only_switches_off_other_channel_encodings() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let mut reader = registered_server(
+            listener,
+            b":server 005 alice UTF8ONLY :are supported\r\n\
+              :bob!u@h PRIVMSG #jp :\xe3\x81\x93\r\n",
+        );
+        assert_eq!(
+            read_line_starting(&mut reader, b"PRIVMSG"),
+            "PRIVMSG #jp こ\r\n".as_bytes()
+        );
+    });
+    let mut config = ConnectionConfig::tls("127.0.0.1".into(), "alice".into(), Vec::new());
+    config.port = port;
+    config.use_tls = false;
+    config.channel_encodings = vec![ChannelEncoding {
+        channel: "#jp".into(),
+        decode: Some("ISO-2022-JP".into()),
+        encode: Some("ISO-2022-JP".into()),
+    }];
+    let mut connection = Connection::connect(config).unwrap();
+    assert_eq!(
+        next_channel_message(&mut connection),
+        ("#jp".to_owned(), "こ".to_owned())
+    );
+    assert!(connection.utf8_only());
+    connection.send_message("#jp", "こ", false).unwrap();
+    // Nothing but UTF-8 can be set from now on.
+    assert!(
+        connection
+            .set_channel_encoding("#x", Some("Shift_JIS"), None)
+            .is_err()
+    );
+    assert!(
+        connection
+            .set_channel_encoding("#x", Some("utf-8"), None)
+            .is_ok()
+    );
+    server.join().unwrap();
+}
+
+/// Every encoding the application offers is accepted by the connection and
+/// by a channel override, and its text survives the wire in both directions.
+#[test]
+fn every_offered_encoding_round_trips() {
+    use cayenchat_storage::TextEncoding;
+    let sample = |encoding: TextEncoding| match encoding {
+        TextEncoding::Utf8 => "日本語 🙂",
+        TextEncoding::Iso2022Jp | TextEncoding::ShiftJis | TextEncoding::EucJp => "こんにちは",
+        TextEncoding::EucKr => "한국어",
+        TextEncoding::Windows1254 => "Çağrı şİ",
+        TextEncoding::Windows1252 => "café €",
+        TextEncoding::Gbk | TextEncoding::Big5 => "你好",
+        TextEncoding::Koi8U => "Привіт ґ",
+        _ => "Привет",
+    };
+    for encoding in TextEncoding::ALL {
+        let label = encoding.label();
+        let text = sample(encoding);
+        let mut config = ConnectionConfig::tls("127.0.0.1".into(), "alice".into(), Vec::new());
+        config.encoding = label.into();
+        config.channel_encodings = vec![ChannelEncoding {
+            channel: "#c".into(),
+            decode: Some(label.into()),
+            encode: Some(label.into()),
+        }];
+        config
+            .validate()
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+        let line = format!("PRIVMSG #c :{text}\r\n");
+        let codec = ChannelCharsets::new(&config.channel_encodings).unwrap();
+        for charsets in [None, Some(&codec as &dyn BodyCharsets)] {
+            let wire = Wire { label, charsets };
+            let bytes =
+                encode_strict(&line, wire).unwrap_or_else(|error| panic!("{label}: {error}"));
+            let encoding_rs = charsets::resolve(label).unwrap();
+            let back = irc::proto::charsets::decode_line(&bytes, encoding_rs, charsets);
+            assert_eq!(back, line, "{label}");
+        }
+    }
+    // Names other than the canonical one stay input aliases only.
+    assert!(
+        charsets::resolve("ISO-8859-1").is_ok(),
+        "a WHATWG label, not an offered name"
+    );
+    assert_eq!(TextEncoding::parse("ISO-8859-1"), None);
+}
+
+#[test]
+fn channel_encodings_are_validated() {
+    let mut config = ConnectionConfig::tls("127.0.0.1".into(), "alice".into(), Vec::new());
+    let entry = |channel: &str, decode: Option<&str>| ChannelEncoding {
+        channel: channel.into(),
+        decode: decode.map(str::to_owned),
+        encode: None,
+    };
+    config.channel_encodings = vec![entry("#a", Some("Big5")), entry("#b", Some("windows-1251"))];
+    assert!(config.validate().is_ok());
+    config.channel_encodings = vec![entry("#a", Some("klingon"))];
+    assert!(config.validate().unwrap_err().contains("klingon"));
+    // Encodings that cannot be written are no encodings here.
+    config.channel_encodings = vec![entry("#a", Some("utf-16le"))];
+    assert!(config.validate().is_err());
+    config.channel_encodings = vec![entry("alice", Some("Big5"))];
+    assert!(config.validate().is_err());
 }
 
 /// A server that never ends its line is disconnected once the line passes
@@ -4582,6 +4858,7 @@ fn messages_are_limited_by_the_line_the_recipient_gets() {
         text: text.into(),
         display_text: text.into(),
         notice: false,
+        encoder: None,
     };
     // `PRIVMSG #test ` is 14 bytes and CRLF 2. A one-word text goes without
     // the colon, which the server adds when relaying, so it counts as a byte.
@@ -4603,6 +4880,7 @@ fn messages_are_limited_by_the_line_the_recipient_gets() {
         text: text.into(),
         display_text: text.into(),
         notice: true,
+        encoder: None,
     };
     assert!(validate_outgoing_relayed(&notice(&"x".repeat(room)), "UTF-8", prefix).is_ok());
     assert!(validate_outgoing_relayed(&notice(&"x".repeat(room + 1)), "UTF-8", prefix).is_err());
@@ -4625,6 +4903,40 @@ fn messages_are_limited_by_the_line_the_recipient_gets() {
     let kana = "あ".repeat(150);
     assert!(validate_outgoing_relayed(&message(&kana), "ISO-2022-JP", prefix).is_ok());
     assert!(validate_outgoing_relayed(&message(&kana), "UTF-8", prefix).is_err());
+}
+
+#[test]
+fn a_queued_message_keeps_the_encoding_it_was_accepted_with() {
+    let kana = "あ".repeat(145);
+    let charsets = ChannelCharsets::new(&[ChannelEncoding {
+        channel: "#test".into(),
+        decode: None,
+        encode: Some("Shift_JIS".into()),
+    }])
+    .unwrap();
+    let prefix = relay::OwnMask::default().prefix_bytes("alice", "UTF-8");
+    let accepted = |encoder| Outgoing::Message {
+        target: "#test".into(),
+        text: kana.clone(),
+        display_text: kana.clone(),
+        notice: false,
+        encoder,
+    };
+    let live = |outgoing: &Outgoing| {
+        let wire = Wire {
+            label: "UTF-8",
+            charsets: Some(&charsets),
+        };
+        validate_outgoing_relayed(outgoing, wire, prefix)
+    };
+    // Accepted as Shift_JIS (290 bytes), then the channel goes back to the
+    // server's UTF-8: the message is still judged, and written, as accepted.
+    let pinned = accepted(charsets.encoder("#test"));
+    charsets.set("#test", None, None).unwrap();
+    assert!(live(&pinned).is_ok());
+    // Accepted as UTF-8 (435 bytes), then Shift_JIS is set: still too long.
+    charsets.set("#test", None, Some("Shift_JIS")).unwrap();
+    assert!(live(&accepted(None)).is_err());
 }
 
 #[test]
@@ -4865,4 +5177,86 @@ fn channel_mode_in_a_history_batch_is_marked_replayed() {
         })
         .collect();
     assert_eq!(seen, [("old", true), ("live", false), ("svc", false)]);
+}
+
+/// Messages accepted in a channel's Shift_JIS before the server announces
+/// `UTF8ONLY` (the worker is busy delivering events) are never written in it.
+#[test]
+fn utf8_only_announced_after_acceptance_keeps_legacy_bytes_off_the_wire() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (flooded, flood_sent) = std_mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        read_line_starting(&mut reader, b"USER ");
+        socket
+            .write_all(b":server 001 alice :Welcome\r\n:server 376 alice :End of MOTD\r\n")
+            .unwrap();
+        for index in 0..EVENT_CAPACITY * 2 {
+            socket
+                .write_all(format!(":server NOTICE alice :flood {index}\r\n").as_bytes())
+                .unwrap();
+        }
+        socket
+            .write_all(b":server 005 alice UTF8ONLY :are supported\r\n")
+            .unwrap();
+        flooded.send(()).unwrap();
+        let mut sent = Vec::new();
+        loop {
+            let line = read_line_starting(&mut reader, b"PRIVMSG");
+            if line.ends_with(b"end\r\n") {
+                return sent;
+            }
+            sent.push(line);
+        }
+    });
+    let mut config = ConnectionConfig::tls("127.0.0.1".into(), "alice".into(), Vec::new());
+    config.port = port;
+    config.use_tls = false;
+    config.channel_encodings = vec![ChannelEncoding {
+        channel: "#jp".into(),
+        decode: None,
+        encode: Some("Shift_JIS".into()),
+    }];
+    let mut connection = Connection::connect(config).unwrap();
+    flood_sent.recv_timeout(Duration::from_secs(10)).unwrap();
+    // Events are not read, so the worker has not seen UTF8ONLY yet.
+    thread::sleep(Duration::from_millis(500));
+    assert!(!connection.utf8_only());
+    for _ in 0..60 {
+        connection.send_message("#jp", "あ", false).unwrap();
+    }
+    // The worker handles UTF8ONLY and the queued messages in either order:
+    // what it accepted before the announcement may go out as accepted,
+    // nothing after it may.
+    let mut announced = false;
+    let mut sent_end = false;
+    let mut accepted = 0;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "events did not arrive");
+        match connection.try_recv() {
+            Some(Event::Diagnostic { message, .. }) if message.contains("UTF8ONLY") => {
+                announced = true;
+            }
+            Some(Event::OutgoingAccepted { text, .. }) if text == "end" => break,
+            Some(Event::OutgoingAccepted { .. }) => {
+                assert!(!announced, "accepted after UTF8ONLY");
+                accepted += 1;
+            }
+            Some(_) => {}
+            None => thread::sleep(Duration::from_millis(10)),
+        }
+        if announced && !sent_end {
+            sent_end = true;
+            connection.send_message("#jp", "end", false).unwrap();
+        }
+    }
+    let sent = server.join().unwrap();
+    assert_eq!(sent.len(), accepted, "{sent:?}");
+    assert!(sent.iter().all(|line| line.contains(&0x82)));
 }

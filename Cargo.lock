@@ -882,6 +882,7 @@ version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "cayenchat-model",
+ "cayenchat-storage",
  "chrono",
  "encoding_rs",
  "futures-util",

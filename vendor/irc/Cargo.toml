@@ -163,6 +163,7 @@ features = [
 ]
 
 [features]
+body-charsets = ["irc-proto/encoding"]
 channel-lists = []
 ctcp = []
 default = [
