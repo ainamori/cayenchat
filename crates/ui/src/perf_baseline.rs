@@ -258,7 +258,9 @@ fn run(
     });
     let mut settings = settings(servers);
     settings.appearance.image_previews = images;
-    settings.appearance.user_avatars = avatars;
+    for server in &mut settings.servers {
+        server.user_avatars = avatars;
+    }
     settings.appearance.compact_urls = short_urls;
     let fetcher = memory_fetcher();
     let (chat, cx) = cx.add_window_view(|window, cx| {

@@ -706,9 +706,16 @@ Sources: [capability negotiation](https://ircv3.net/specs/extensions/capability-
 
 2026-09-27; revised 2026-09-28 to a single switch.
 
-- **Appearance → Show user avatars** (`Appearance::user_avatars`, off by
-  default, applies live, independent of image previews). It alone decides
-  whether avatars are displayed and their images downloaded. Off keeps the
+- **Connection settings → Show user avatars** (`ServerProfile::user_avatars`,
+  off by default, applies on Save without reconnecting, independent of
+  image previews). Revised 2026-10-15: it moved from the application-wide
+  `Appearance::user_avatars` to each server, with no shared setting, no
+  "follow the common setting" state and no default for new servers. It alone
+  decides, per server, whether that server's rows display avatars and
+  whether their images are downloaded. The shared image cache and fetcher
+  live while any server has it on and are dropped when all are off; turning
+  one server off only stops its rows from asking, and loads already started
+  may finish because the cache is shared by URL. Off keeps the
   compact layout exactly: no avatar column, no placeholder, no taller rows,
   no lookups, fetches or decodes. With it on, users without an avatar (or
   whose image failed) get a client-drawn default avatar (2026-09-28),
@@ -730,7 +737,10 @@ Sources: [capability negotiation](https://ircv3.net/specs/extensions/capability-
   `ircv3.metadata` field load without it.
 
 `user_avatars` was added without a settings version change (like batch),
-read as off when absent. The display layer is protocol-independent so a
+read as off when absent. On load, a file that still has `appearance.user_avatars`
+copies it into every server that has no `user_avatars` of its own and drops
+it, so the migration runs once and the old key is never written back; a
+missing old value reads as off, and servers added later start off. The display layer is protocol-independent so a
 future Matrix client can use it without an external upload provider.
 
 Specification followed: ircv3-specifications `extensions/metadata.md` at
@@ -1288,7 +1298,10 @@ The confirm button keeps its specific label ("Quit", "Delete", …).
   button is both). It is drawn in the chat window (`quit_dialog.rs`) with
   `button_order::row`; the focus starts on Cancel, so Enter, Space and Escape
   cancel, and quitting takes a click or Tab then Enter. Covered by UI tests
-  (keys, clicks, button positions for both orders).
+  (keys, clicks, button positions for both orders). The box sits near the top
+  of the window (like a browser dialog), is at most 360 px wide and as narrow
+  as its text; a detail longer than one line wraps at a fixed width, because
+  the shrink-to-fit box measured it as one line and let it overflow (#387).
 - **Rows drawn by the app** (member and nickname prompts, upload token,
   avatar editor) list the confirm button first and are wrapped in
   `button_order::row`, which reverses the row on macOS only, so source and

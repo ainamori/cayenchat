@@ -379,7 +379,8 @@ off for new and migrated settings (D018). Version 15 adds per-server IRCv3
 opt-ins (message tags and server timestamps), off for new and migrated
 settings (D022); the later batch and metadata (avatar) opt-ins are new
 fields of the same object without a version change, read as off when
-absent, and so is the Appearance `user_avatars` setting (D023), as are the
+absent, and so is the per-server `user_avatars` setting (D023; it was an
+Appearance setting, copied into each server on load), as are the
 peer avatar option and the per-server shared URL `peer_avatar_url` (D025),
 and the Appearance `saved_colors` palette (up to 24 `#RRGGBB` colors; invalid
 or repeated entries are dropped on load). The UI keeps the
