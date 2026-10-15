@@ -1288,7 +1288,10 @@ The confirm button keeps its specific label ("Quit", "Delete", …).
   button is both). It is drawn in the chat window (`quit_dialog.rs`) with
   `button_order::row`; the focus starts on Cancel, so Enter, Space and Escape
   cancel, and quitting takes a click or Tab then Enter. Covered by UI tests
-  (keys, clicks, button positions for both orders).
+  (keys, clicks, button positions for both orders). The box sits near the top
+  of the window (like a browser dialog), is at most 360 px wide and as narrow
+  as its text; a detail longer than one line wraps at a fixed width, because
+  the shrink-to-fit box measured it as one line and let it overflow (#387).
 - **Rows drawn by the app** (member and nickname prompts, upload token,
   avatar editor) list the confirm button first and are wrapped in
   `button_order::row`, which reverses the row on macOS only, so source and

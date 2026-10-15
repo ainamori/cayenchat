@@ -4080,3 +4080,11 @@ fn quit_question_box_is_no_wider_than_its_content(cx: &mut TestAppContext) {
     let buttons_right = cancel.right().max(confirm.right());
     assert!(buttons_right <= boxed.right());
 }
+
+#[gpui::test]
+fn quit_question_sits_near_the_top_of_the_window(cx: &mut TestAppContext) {
+    let (_chat, cx) = quit_dialog_window(cx);
+    let overlay = cx.debug_bounds("quit-dialog").unwrap();
+    let boxed = cx.debug_bounds("quit-dialog-box").unwrap();
+    assert!(boxed.origin.y - overlay.origin.y <= gpui::px(24.));
+}

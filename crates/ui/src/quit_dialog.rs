@@ -12,6 +12,10 @@ use gpui::{prelude::*, *};
 
 use crate::{ChatWindow, button_order, theme};
 
+const QUIT_BOX_MAX_WIDTH: Pixels = px(360.);
+/// Padding and border on both sides of the text inside the box.
+const QUIT_BOX_CHROME: Pixels = px(26.);
+
 /// Focus handles of the two buttons, and where the focus was before.
 pub(crate) struct QuitDialog {
     cancel: FocusHandle,
@@ -74,6 +78,23 @@ impl ChatWindow {
         } else {
             "quit_detail"
         });
+        // A box sized by its content measures wrapped text at the one-line
+        // width, so the wrapped lines overflow it. When the detail does not
+        // fit on one line it gets the width the capped box offers.
+        let detail_width = {
+            let style = window.text_style();
+            let run = style.to_run(detail.len());
+            window
+                .text_system()
+                .shape_line(
+                    detail.clone().into(),
+                    style.font_size.to_pixels(window.rem_size()),
+                    &[run],
+                    None,
+                )
+                .width
+        };
+        let wraps = detail_width > QUIT_BOX_MAX_WIDTH - QUIT_BOX_CHROME;
         let confirm = div()
             .id("quit-dialog-confirm")
             .debug_selector(|| "quit-dialog-confirm".into())
@@ -127,7 +148,7 @@ impl ChatWindow {
                 .justify_center()
                 // Without this the row stretches the box to the window height.
                 .items_start()
-                .pt(px(60.))
+                .pt(px(16.))
                 .bg(Rgba {
                     a: 0.6,
                     ..theme.surface
@@ -154,7 +175,7 @@ impl ChatWindow {
                     div()
                         .debug_selector(|| "quit-dialog-box".into())
                         // Fit the text; a fixed width left empty space beside it.
-                        .max_w(px(360.))
+                        .max_w(QUIT_BOX_MAX_WIDTH)
                         .h_auto()
                         .p_3()
                         .bg(theme.surface)
@@ -169,7 +190,11 @@ impl ChatWindow {
                                 .font_weight(FontWeight::BOLD)
                                 .child(self.i18n.text("quit_title")),
                         )
-                        .child(detail)
+                        .child(
+                            div()
+                                .when(wraps, |d| d.w(QUIT_BOX_MAX_WIDTH - QUIT_BOX_CHROME))
+                                .child(detail),
+                        )
                         .child(
                             button_order::row(div().flex().gap_2())
                                 .child(confirm)
