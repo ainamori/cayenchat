@@ -238,6 +238,8 @@
   "menu_paste": "Paste",
   "menu_select_all": "Select All",
   "menu_view": "View",
+  "menu_show_menu_bar": "Show Menu Bar",
+  "menu_hide_menu_bar": "Hide Menu Bar",
   "menu_show_toolbar": "Show Toolbar",
   "menu_hide_toolbar": "Hide Toolbar",
   "toolbar_join": "Join channel",

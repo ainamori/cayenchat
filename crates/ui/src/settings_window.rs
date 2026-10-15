@@ -1115,14 +1115,16 @@ impl SettingsWindow {
     /// values back. Edits this window could not save yet are kept.
     /// Takes over the server order the file has, keeping every other edit
     /// in the form, so that saving cannot put back an older order.
-    /// The toolbar's visibility, which the chat window's View menu changes
-    /// without this window, is taken over the same way.
+    /// The toolbar's and the menu bar's visibility, which the chat window's
+    /// View menu changes without this window, are taken over the same way.
     fn follow_saved_server_order(&mut self) {
         let Ok(Some(file)) = settings_file::load() else {
             return;
         };
         self.saved.show_toolbar = file.show_toolbar;
         self.settings.values.show_toolbar = file.show_toolbar;
+        self.saved.menu_bar_auto_hide = file.menu_bar_auto_hide;
+        self.settings.values.menu_bar_auto_hide = file.menu_bar_auto_hide;
         if follow_server_order(&mut self.saved.servers, &file.servers) {
             follow_server_order(&mut self.settings.values.servers, &file.servers);
         }
@@ -1398,8 +1400,7 @@ impl SettingsWindow {
                 apply_shortcuts(shortcuts, cx);
             }
             if menu_bar_changed {
-                owner.menu_bar.set_always(menu_bar_always);
-                cx.notify();
+                owner.set_menu_bar_auto_hide(!menu_bar_always, cx);
             }
             if toolbar_changed {
                 owner.set_toolbar_shown(show_toolbar, cx);

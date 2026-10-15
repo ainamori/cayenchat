@@ -238,6 +238,8 @@
   "menu_paste": "ペースト",
   "menu_select_all": "すべて選択",
   "menu_view": "表示",
+  "menu_show_menu_bar": "メニューバーを表示",
+  "menu_hide_menu_bar": "メニューバーを隠す",
   "menu_show_toolbar": "ツールバーを表示",
   "menu_hide_toolbar": "ツールバーを隠す",
   "toolbar_join": "チャンネルに参加",
