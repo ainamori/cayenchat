@@ -2020,10 +2020,15 @@ impl ChatWindow {
     }
 
     /// Whether Reconnect applies: the selected server has been connected in
-    /// this run.
+    /// this run and has no live connection (a scheduled retry may be skipped
+    /// ahead). Reconnecting a live one would drop it and register again before
+    /// the server noticed, which collides with our own nickname.
     fn can_reconnect_selected(&self) -> bool {
-        self.selected_network_id()
-            .is_some_and(|network| self.sessions.get(&network).is_some_and(ServerSession::used))
+        self.selected_network_id().is_some_and(|network| {
+            self.sessions
+                .get(&network)
+                .is_some_and(|session| session.used() && session.irc.is_none())
+        })
     }
 
     fn connect_action(&mut self, _: &Connect, window: &mut Window, cx: &mut Context<Self>) {
