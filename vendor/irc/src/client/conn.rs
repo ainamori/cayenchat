@@ -83,6 +83,25 @@ impl fmt::Debug for Connection {
 }
 
 impl Connection {
+    /// The line codec for the connection's encoding, with the per-target
+    /// encodings of the configuration.
+    fn codec(config: &Config) -> error::Result<IrcCodec> {
+        #[cfg(feature = "body-charsets")]
+        {
+            Ok(IrcCodec::with_charsets(
+                config.encoding(),
+                config
+                    .body_charsets
+                    .as_ref()
+                    .map(|handle| handle.0.clone()),
+            )?)
+        }
+        #[cfg(not(feature = "body-charsets"))]
+        {
+            Ok(IrcCodec::new(config.encoding())?)
+        }
+    }
+
     /// Creates a new `Connection` using the specified `Config`
     pub(crate) async fn new(
         config: &Config,
@@ -154,7 +173,7 @@ impl Connection {
         tx: UnboundedSender<Message>,
     ) -> error::Result<Transport<TcpStream>> {
         let stream = Self::new_stream(config).await?;
-        let framed = Framed::new(stream, IrcCodec::new(config.encoding())?);
+        let framed = Framed::new(stream, Self::codec(config)?);
 
         Ok(Transport::new(config, framed, tx))
     }
@@ -213,7 +232,7 @@ impl Connection {
 
         let stream = Self::new_stream(config).await?;
         let stream = connector.connect(domain, stream).await?;
-        let framed = Framed::new(stream, IrcCodec::new(config.encoding())?);
+        let framed = Framed::new(stream, Self::codec(config)?);
 
         Ok(Transport::new(config, framed, tx))
     }
@@ -382,7 +401,7 @@ impl Connection {
         let domain = ServerName::try_from(config.server()?)?.to_owned();
         let stream = Self::new_stream(config).await?;
         let stream = connector.connect(domain, stream).await?;
-        let framed = Framed::new(stream, IrcCodec::new(config.encoding())?);
+        let framed = Framed::new(stream, Self::codec(config)?);
 
         Ok(Transport::new(config, framed, tx))
     }
@@ -417,7 +436,7 @@ impl Connection {
             }
         };
         let stream = MockStream::new(&initial);
-        let framed = Framed::new(stream, IrcCodec::new(config.encoding())?);
+        let framed = Framed::new(stream, Self::codec(config)?);
 
         Ok(Transport::new(config, framed, tx))
     }

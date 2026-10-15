@@ -17,3 +17,7 @@ tokio.workspace = true
 futures-util.workspace = true
 base64.workspace = true
 chrono.workspace = true
+
+[dev-dependencies]
+# The encodings the application offers, round-tripped through the codec.
+cayenchat-storage = { path = "../storage" }

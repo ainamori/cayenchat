@@ -151,6 +151,11 @@ pub struct Config {
     /// This is typically UTF-8, but could be something else.
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub encoding: Option<String>,
+    /// Other encodings for the text of messages to some targets; not part
+    /// of any configuration file.
+    #[cfg(feature = "body-charsets")]
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub body_charsets: Option<irc_proto::charsets::BodyCharsetsHandle>,
     /// A list of channels to join on connection.
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     #[cfg_attr(feature = "serde", serde(default))]

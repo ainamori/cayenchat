@@ -19,6 +19,9 @@ pub const MAX_LINE_BYTES: usize = 16 * 1024;
 pub struct LineCodec {
     #[cfg(feature = "encoding")]
     encoding: &'static Encoding,
+    /// Other encodings for the text of messages to some targets.
+    #[cfg(feature = "encoding")]
+    charsets: Option<std::sync::Arc<dyn crate::charsets::BodyCharsets>>,
     next_index: usize,
 }
 
@@ -40,8 +43,21 @@ impl LineCodec {
                     )));
                 }
             },
+            #[cfg(feature = "encoding")]
+            charsets: None,
             next_index: 0,
         })
+    }
+
+    /// Converts the text of messages to the targets `charsets` knows with
+    /// their own encodings, in both directions.
+    #[cfg(feature = "encoding")]
+    pub fn with_charsets(
+        mut self,
+        charsets: Option<std::sync::Arc<dyn crate::charsets::BodyCharsets>>,
+    ) -> LineCodec {
+        self.charsets = charsets;
+        self
     }
 }
 
@@ -69,8 +85,11 @@ impl Decoder for LineCodec {
             {
                 // Decode the line using the codec's encoding. Malformed bytes
                 // become U+FFFD, as with the replacing decoder before.
-                let (data, _) = self.encoding.decode_without_bom_handling(line.as_ref());
-                Ok(Some(data.into_owned()))
+                Ok(Some(crate::charsets::decode_line(
+                    line.as_ref(),
+                    self.encoding,
+                    self.charsets.as_deref(),
+                )))
             }
 
             #[cfg(not(feature = "encoding"))]
@@ -102,7 +121,8 @@ impl Encoder<String> for LineCodec {
             // Encode the message using the codec's encoding. Characters the
             // encoding cannot hold become numeric character references;
             // callers that care check encodability before sending.
-            let (data, _, _) = self.encoding.encode(&msg);
+            let (data, _) =
+                crate::charsets::encode_line(&msg, self.encoding, self.charsets.as_deref());
             dst.extend_from_slice(&data);
         }
 
