@@ -1109,7 +1109,7 @@ impl ChatWindow {
             image_provider: saved.image_upload.provider.clone(),
             notification_rules: notification_rules(&saved.notifications),
             previews: previews::Previews::new(saved.appearance.image_previews),
-            avatars: avatars::Avatars::new(saved.appearance.user_avatars),
+            avatars: avatars::Avatars::new(saved.servers.iter().any(|p| p.user_avatars)),
             toolbar_shown: saved.show_toolbar,
             toolbar: None,
             saved,
@@ -1391,6 +1391,14 @@ impl ChatWindow {
         own
     }
 
+    /// Whether `network`'s server shows user avatars (its profile's setting).
+    fn avatars_shown(&self, network: NetworkId) -> bool {
+        self.sessions
+            .get(&network)
+            .and_then(|session| self.saved.profile(&session.profile_id))
+            .is_some_and(|profile| profile.user_avatars)
+    }
+
     /// Our own avatar on `network`, shown for our nickname instead of asking
     /// anyone for it: the one the server confirmed, else the one shared with
     /// peers. Read at draw time, so every row follows a change at once.
@@ -1529,8 +1537,6 @@ impl ChatWindow {
         // Off: no more requests, pending loads are cancelled or ignored and
         // decoded images are released on the next draw.
         self.previews.set_enabled(appearance.image_previews);
-        // Independent of previews; off also removes the avatar column.
-        self.avatars.set_enabled(appearance.user_avatars);
         self.appearance = appearance;
         self.theme_mode = mode;
         // Fonts and row styles are drawn by the cached panes.
@@ -1863,6 +1869,11 @@ impl ChatWindow {
         self.restore_channel_orders();
         self.forget_conversations(&removed);
         self.ensure_inputs(cx);
+        // The shared cache and fetcher live while any server shows avatars;
+        // a server turned off only stops asking (loads it started may finish,
+        // for the cache is shared by URL), and all off cancels everything.
+        self.avatars
+            .set_enabled(settings.servers.iter().any(|profile| profile.user_avatars));
         self.saved = settings;
         cx.notify();
     }
@@ -7069,7 +7080,7 @@ impl ChatWindow {
                 )
                 .into_any_element()
         };
-        let avatar = (!message.activity && self.avatars.enabled()).then(|| {
+        let avatar = (!message.activity && self.avatars_shown(network)).then(|| {
             self.avatar_slot(
                 self.own_avatar_for(network, &message.sender).or_else(|| {
                     self.state
@@ -7378,7 +7389,7 @@ impl ChatWindow {
         let network = channel.network;
         let conversation = channel.id;
         let private = channel.is_private();
-        let avatars_shown = self.avatars.enabled();
+        let avatars_shown = self.avatars_shown(network);
         (start..end)
             .map(|index| {
                 let member = participants.get(index).cloned().unwrap_or_default();

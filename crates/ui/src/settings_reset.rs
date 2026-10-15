@@ -33,7 +33,6 @@ impl SettingsWindow {
                     && (!cfg!(target_os = "linux")
                         || current.linux_display == defaults.linux_display)
                     && current.appearance.image_previews == defaults.appearance.image_previews
-                    && current.appearance.user_avatars == defaults.appearance.user_avatars
                     && current.appearance.reiwa_mode == defaults.appearance.reiwa_mode
                     && current.appearance.compact_urls == defaults.appearance.compact_urls
                     && current.appearance.decode_char_refs == defaults.appearance.decode_char_refs
@@ -44,7 +43,6 @@ impl SettingsWindow {
                 let appearance = Appearance {
                     saved_colors: current.appearance.saved_colors.clone(),
                     image_previews: current.appearance.image_previews,
-                    user_avatars: current.appearance.user_avatars,
                     reiwa_mode: current.appearance.reiwa_mode,
                     compact_urls: current.appearance.compact_urls,
                     decode_char_refs: current.appearance.decode_char_refs,
@@ -99,7 +97,6 @@ impl SettingsWindow {
                 }
                 let appearance = &mut values.appearance;
                 appearance.image_previews = defaults.appearance.image_previews;
-                appearance.user_avatars = defaults.appearance.user_avatars;
                 appearance.reiwa_mode = defaults.appearance.reiwa_mode;
                 appearance.compact_urls = defaults.appearance.compact_urls;
                 appearance.decode_char_refs = defaults.appearance.decode_char_refs;
@@ -109,7 +106,6 @@ impl SettingsWindow {
                 let appearance = Appearance {
                     saved_colors: std::mem::take(&mut current.saved_colors),
                     image_previews: current.image_previews,
-                    user_avatars: current.user_avatars,
                     reiwa_mode: current.reiwa_mode,
                     compact_urls: current.compact_urls,
                     decode_char_refs: current.decode_char_refs,

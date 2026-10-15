@@ -343,7 +343,9 @@ fn member_rows_do_not_overlap(cx: &mut TestAppContext) {
         });
         let mut settings = crate::settings_with_channels("#a");
         settings.menu_bar_auto_hide = true;
-        settings.appearance.user_avatars = avatars;
+        for server in &mut settings.servers {
+            server.user_avatars = avatars;
+        }
         let (chat, cx) = cx.add_window_view(|window, cx| {
             ChatWindow::with_settings(settings.clone(), None, window, cx)
         });

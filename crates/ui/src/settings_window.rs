@@ -456,7 +456,6 @@ impl SettingsForm {
                 .ok_or_else(|| i18n_error(settings.language, "url_tooltip_opacity_invalid"))?,
             alternate_rows: self.values.appearance.alternate_rows,
             image_previews: self.values.appearance.image_previews,
-            user_avatars: self.values.appearance.user_avatars,
             compact_urls: self.values.appearance.compact_urls,
             decode_char_refs: self.values.appearance.decode_char_refs,
             reiwa_mode: self.values.appearance.reiwa_mode,
@@ -2481,6 +2480,29 @@ impl SettingsWindow {
                         }
                         cx.notify();
                     })),
+            )
+            .child(
+                div()
+                    .id("user-avatars")
+                    .ml(px(158.))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .child(settings_theme::checkbox(profile.user_avatars, true, cx))
+                    .child(self.i18n.text("user_avatars"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(profile) = this.settings.values.selected_profile_mut() {
+                            profile.user_avatars = !profile.user_avatars;
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .ml(px(158.))
+                    .text_color(theme.text_secondary)
+                    .child(self.i18n.text("user_avatars_hint")),
             )
             .child(
                 div()

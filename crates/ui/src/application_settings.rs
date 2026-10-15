@@ -239,31 +239,6 @@ impl SettingsWindow {
             )
             .child(
                 div()
-                    .id("user-avatars")
-                    .ml(px(158.))
-                    .flex()
-                    .gap_2()
-                    .cursor_pointer()
-                    .child(settings_theme::checkbox(
-                        self.settings.values.appearance.user_avatars,
-                        true,
-                        cx,
-                    ))
-                    .child(self.i18n.text("user_avatars"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let value = &mut this.settings.values.appearance.user_avatars;
-                        *value = !*value;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                div()
-                    .ml(px(158.))
-                    .text_color(theme.text_secondary)
-                    .child(self.i18n.text("user_avatars_hint")),
-            )
-            .child(
-                div()
                     .id("reiwa-mode")
                     .ml(px(158.))
                     .flex()
