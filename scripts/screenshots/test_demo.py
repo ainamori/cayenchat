@@ -10,11 +10,12 @@ import demo  # noqa: E402
 
 
 class Settings(unittest.TestCase):
-    def test_previews_avatars_and_compact_urls_are_on_in_appearance(self):
+    def test_previews_and_compact_urls_are_on_and_avatars_on_for_the_server(self):
         for language, script in demo.SCRIPTS.items():
-            appearance = demo.settings(script, 1234, language, "light")["appearance"]
-            for key in ("image_previews", "user_avatars", "compact_urls"):
-                self.assertIs(appearance.get(key), True, f"{language}: {key}")
+            settings = demo.settings(script, 1234, language, "light")
+            for key in ("image_previews", "compact_urls"):
+                self.assertIs(settings["appearance"].get(key), True, f"{language}: {key}")
+            self.assertIs(settings["servers"][0].get("user_avatars"), True, language)
 
     def test_every_channel_is_joined_and_server_is_local(self):
         for language, script in demo.SCRIPTS.items():

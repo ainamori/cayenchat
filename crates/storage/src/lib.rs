@@ -483,12 +483,6 @@ pub struct Appearance {
     /// Inline thumbnails of direct image links in the main channel log
     /// (version 14). Off by default, also for settings saved before it existed.
     pub image_previews: bool,
-    /// Small user avatars beside main-log messages and in the member list,
-    /// with client-drawn defaults for users without one: the only avatar
-    /// switch, for every server and protocol. Independent of
-    /// `image_previews`. Added after version 15 without a version change;
-    /// files without it read as off.
-    pub user_avatars: bool,
     /// Show long URLs in the channel log in a short form; the text, links
     /// and copies keep the full URL. Added after version 15 without a version
     /// change; files without it read as off.
@@ -583,7 +577,6 @@ impl Default for Appearance {
             link_background: String::new(),
             alternate_rows: false,
             image_previews: false,
-            user_avatars: false,
             compact_urls: false,
             decode_char_refs: false,
             reiwa_mode: false,
@@ -743,6 +736,14 @@ pub struct ServerProfile {
     pub sasl_username: String,
     #[serde(default)]
     pub connect_on_startup: bool,
+    /// Show small user avatars beside main-log messages and in the member
+    /// list of this server, with client-drawn defaults for users without
+    /// one (D023). Independent per server and of `image_previews`; there is
+    /// no application-wide switch. Added after version 15 without a version
+    /// change; files without it read as off. A file that still has the old
+    /// `appearance.user_avatars` gets its value copied here on load.
+    #[serde(default)]
+    pub user_avatars: bool,
     /// Opt-in IRCv3 features for this server (version 15), off by default.
     #[serde(default)]
     pub ircv3: Ircv3Preferences,
@@ -801,6 +802,7 @@ impl ServerProfile {
             sasl_enabled: false,
             sasl_username: String::new(),
             connect_on_startup: false,
+            user_avatars: false,
             ircv3: Ircv3Preferences::default(),
             avatar_url: String::new(),
             peer_avatar_url: String::new(),
@@ -1561,6 +1563,34 @@ fn clear_saved_passwords_from(path: &Path, server_id: &str) -> Result<(), String
     Ok(())
 }
 
+/// Moves the old application-wide `appearance.user_avatars` into every server
+/// that has no value of its own, then drops it, so a file is migrated once
+/// and the old key is never written back (D023). A missing or non-boolean
+/// old value reads as off.
+fn move_legacy_user_avatars(value: &mut serde_json::Value) {
+    let Some(appearance) = value
+        .get_mut("appearance")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    let Some(old) = appearance.remove("user_avatars") else {
+        return;
+    };
+    let old = old.as_bool().unwrap_or(false);
+    let Some(servers) = value
+        .get_mut("servers")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for server in servers.iter_mut().filter_map(|s| s.as_object_mut()) {
+        server
+            .entry("user_avatars")
+            .or_insert(serde_json::Value::Bool(old));
+    }
+}
+
 /// Reads and migrates settings from `path`; `None` when there is no file.
 /// [`load`] uses the platform path; tests pass their own.
 pub fn load_from(path: &Path) -> Result<Option<Settings>, String> {
@@ -1571,6 +1601,8 @@ pub fn load_from(path: &Path) -> Result<Option<Settings>, String> {
     };
     let value: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|error| format!("Could not parse settings: {error}"))?;
+    let mut value = value;
+    move_legacy_user_avatars(&mut value);
     let version = value.get("version").and_then(serde_json::Value::as_u64);
     let settings = match version {
         Some(1) => serde_json::from_value::<OldSettings>(value)
@@ -2792,35 +2824,68 @@ mod tests {
     }
 
     #[test]
-    fn user_avatars_default_off_independently_of_previews_and_round_trip() {
-        let defaults = Settings::default();
-        assert!(!defaults.appearance.user_avatars);
+    fn user_avatars_are_per_server_default_off_and_round_trip() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("settings.json");
-        // A file written before the field existed keeps its previews choice.
-        let mut old = serde_json::to_value(&defaults).unwrap();
-        old["appearance"]["image_previews"] = true.into();
-        old["appearance"]
-            .as_object_mut()
-            .unwrap()
-            .remove("user_avatars");
-        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
-        let mut settings = load_from(&path).unwrap().unwrap();
-        assert!(settings.appearance.image_previews && !settings.appearance.user_avatars);
+        let mut settings = Settings::default();
+        settings.add_server("a.example");
+        settings.add_server("b.example");
+        assert!(settings.servers.iter().all(|s| !s.user_avatars));
+        settings.servers[0].user_avatars = true;
+        save_to(&path, &settings).unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(saved["appearance"].get("user_avatars").is_none());
+        let loaded = load_from(&path).unwrap().unwrap();
+        assert_eq!(
+            loaded
+                .servers
+                .iter()
+                .map(|s| s.user_avatars)
+                .collect::<Vec<_>>(),
+            [true, false]
+        );
+    }
 
-        for (previews, avatars) in [(false, true), (true, true), (false, false)] {
-            settings.appearance.image_previews = previews;
-            settings.appearance.user_avatars = avatars;
-            save_to(&path, &settings).unwrap();
-            let loaded = load_from(&path).unwrap().unwrap();
+    #[test]
+    fn old_global_user_avatars_is_copied_to_servers_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let mut settings = Settings::default();
+        settings.add_server("a.example");
+        settings.add_server("b.example");
+        for global in [true, false] {
+            let mut old = serde_json::to_value(&settings).unwrap();
+            old["appearance"]["user_avatars"] = global.into();
+            for server in old["servers"].as_array_mut().unwrap() {
+                server.as_object_mut().unwrap().remove("user_avatars");
+            }
+            fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+            let mut loaded = load_from(&path).unwrap().unwrap();
+            assert!(loaded.servers.iter().all(|s| s.user_avatars == global));
+            // Servers added afterwards start off.
+            assert!(!loaded.add_server("c.example").user_avatars);
+            loaded.servers[0].user_avatars = !global;
+            save_to(&path, &loaded).unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert!(saved["appearance"].get("user_avatars").is_none());
+            let again = load_from(&path).unwrap().unwrap();
             assert_eq!(
-                (
-                    loaded.appearance.image_previews,
-                    loaded.appearance.user_avatars
-                ),
-                (previews, avatars)
+                again
+                    .servers
+                    .iter()
+                    .map(|s| s.user_avatars)
+                    .collect::<Vec<_>>(),
+                [!global, global, false]
             );
         }
+        // A file with an old value and no servers loads and saves.
+        let mut empty = serde_json::to_value(Settings::default()).unwrap();
+        empty["appearance"]["user_avatars"] = true.into();
+        fs::write(&path, serde_json::to_vec(&empty).unwrap()).unwrap();
+        let loaded = load_from(&path).unwrap().unwrap();
+        assert!(loaded.servers.is_empty());
+        save_to(&path, &loaded).unwrap();
     }
 
     #[test]

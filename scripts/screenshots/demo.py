@@ -241,9 +241,10 @@ def settings(script, port, language, theme):
         "linux_display": "x11",
         "credential_backend": "local_file",
         "selected_server": "demo",
-        "appearance": {"image_previews": True, "user_avatars": True, "compact_urls": True},
+        "appearance": {"image_previews": True, "compact_urls": True},
         "servers": [{
             "id": "demo",
+            "user_avatars": True,
             "host": "127.0.0.1",
             "port": port,
             "use_tls": False,

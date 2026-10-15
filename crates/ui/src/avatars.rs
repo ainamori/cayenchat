@@ -371,7 +371,9 @@ mod tests {
             ));
         });
         let mut settings = crate::settings_with_channels("#a");
-        settings.appearance.user_avatars = avatars;
+        for server in &mut settings.servers {
+            server.user_avatars = avatars;
+        }
         settings.appearance.image_previews = previews;
         let fetcher: Arc<dyn Fetcher> = fetcher.clone();
         let (chat, cx) = cx.add_window_view(|window, cx| {
@@ -431,10 +433,11 @@ mod tests {
 
     fn set_avatars(chat: &Entity<ChatWindow>, cx: &mut VisualTestContext, on: bool) {
         chat.update(cx, |chat, cx| {
-            let mut appearance = chat.appearance.clone();
-            appearance.user_avatars = on;
-            let mode = chat.theme_mode;
-            chat.apply_appearance(appearance, mode, cx);
+            let mut settings = chat.saved.clone();
+            for server in &mut settings.servers {
+                server.user_avatars = on;
+            }
+            chat.apply_servers(settings, cx);
         });
         cx.run_until_parked();
     }
@@ -484,6 +487,38 @@ mod tests {
             assert!(chat.state.avatars().current(NetworkId(1), "bob").is_some());
         });
         assert!(fetcher.calls().is_empty());
+    }
+
+    #[gpui::test]
+    fn avatars_follow_each_servers_own_setting(cx: &mut TestAppContext) {
+        let fetcher = Arc::new(FakeFetcher::default());
+        let (chat, cx) = open(cx, false, false, &fetcher);
+        let ids = chat.update(cx, |chat, cx| {
+            let mut settings = chat.saved.clone();
+            settings.add_server("b.example");
+            chat.apply_servers(settings, cx);
+            let ids: Vec<_> = chat
+                .saved
+                .servers
+                .iter()
+                .map(|server| chat.network_of_profile(&server.id).unwrap())
+                .collect();
+            assert!(!chat.avatars.enabled());
+            assert!(ids.iter().all(|id| !chat.avatars_shown(*id)));
+            ids
+        });
+        for (first, second) in [(true, false), (false, true), (false, false)] {
+            chat.update(cx, |chat, cx| {
+                let mut settings = chat.saved.clone();
+                settings.servers[0].user_avatars = first;
+                settings.servers[1].user_avatars = second;
+                chat.apply_servers(settings, cx);
+                assert_eq!(chat.avatars_shown(ids[0]), first);
+                assert_eq!(chat.avatars_shown(ids[1]), second);
+                // The shared resources live while any server shows avatars.
+                assert_eq!(chat.avatars.enabled(), first || second);
+            });
+        }
     }
 
     #[gpui::test]

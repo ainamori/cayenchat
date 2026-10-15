@@ -1744,7 +1744,7 @@ mod own_avatar_tests {
             ));
         });
         let mut settings = crate::settings_with_channels("");
-        settings.appearance.user_avatars = true;
+        settings.servers[0].user_avatars = true;
         settings.servers[0].nickname = "me".into();
         settings.servers[0].ircv3.batch = true;
         let (chat, cx) = cx.add_window_view(|window, cx| {
@@ -1816,10 +1816,9 @@ mod own_avatar_tests {
 
         // Hiding avatars does not remove the published one.
         chat.update(cx, |chat, cx| {
-            let mut appearance = chat.appearance.clone();
-            appearance.user_avatars = false;
-            let mode = chat.theme_mode;
-            chat.apply_appearance(appearance, mode, cx);
+            let mut settings = chat.saved.clone();
+            settings.servers[0].user_avatars = false;
+            chat.apply_servers(settings, cx);
         });
         assert_eq!(status(&chat, cx).confirmed, Confirmed::Set(URL.into()));
 
