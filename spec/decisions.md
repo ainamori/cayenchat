@@ -1198,17 +1198,25 @@ candidates on #367.
 - **Buttons:** connect (`plug-zap`) or, while connecting, connected or waiting
   for a retry, disconnect (`unplug`) in the same place; reconnect
   (`refresh-cw`), enabled once the selected server has been connected in this
-  run | join or leave (`log-in` / `log-out`) | next unread channel
+  run | join or leave (`log-in` / `log-out`) | change topic
+  (`message-square-text`, the second candidate chosen on #367), change mode
+  (`sliders-horizontal`), change my nickname (`user-pen`) | next unread channel
   (`chevrons-down`) | WHOIS (`user-search`), upload image (`image-up`) | on
   Windows only, keep on top (`bring-to-front`, a toggle drawn pressed in while
-  on, whose tooltip says on or off) and settings. Topic, mode and nickname
-  (#370) and the next notification (#369) are added with those actions.
+  on, whose tooltip says on or off) and settings. The next notification
+  (#369) is added with that action.
 - **No new behavior:** a button calls the handler the menu item or shortcut
   calls (connect, disconnect, reconnect, settings, `Command::NextUnreadChannel`)
   or the helper the context menus use (join/part). WHOIS asks about the peer of
   a private conversation or the one member chosen in the member list. Keep on
   top saves `always_on_top` and applies it as the settings checkbox does; an
-  open settings window shows the new value.
+  open settings window shows the new value. Topic, mode and nickname (#370)
+  open the shared member prompt in the middle of the window, like the log's
+  right-click menu and the server menu: the topic starts from the current
+  topic and the nickname from the current one, all selected; only the
+  confirm sends `/topic`, `/mode` or the nickname change and a cancel sends
+  nothing, so a mode string with a channel key is never echoed. In 1.0 the
+  mode is a plain string input; checkbox mode editing is a separate issue.
 - **Upload:** the button first checks the upload service as a drop does. When it
   is not configured or needs its account again, the same prompt with the way to
   the settings appears and no file dialog opens. Otherwise the dialog opens,
@@ -1218,7 +1226,8 @@ candidates on #367.
   refuses other files.
 - **Unavailable:** a button that cannot act is dimmed and ignores clicks (for
   example Reconnect before the server was ever connected; join, leave and WHOIS off a channel
-  or while not registered; next unread with nothing unread).
+  or while not registered; topic and mode off a public channel; topic, mode
+  and nickname while not registered; next unread with nothing unread).
 - **Performance:** availability is the pure `toolbar::State`, recomputed when
   the chat window notifies; the bar is its own `AnyView::cached` view that
   redraws only when that value (or the theme) changes. Tooltips are built on
