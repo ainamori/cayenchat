@@ -201,6 +201,7 @@ actions!(
         ZoomWindow,
         ToggleDebug,
         ToggleToolbar,
+        ToggleMenuBar,
         CopyDiagnostics,
         CopyLogSelection,
         FocusNextField,
@@ -892,11 +893,7 @@ impl ChatWindow {
         for input in self.inputs.values() {
             input.update(cx, |input, cx| input.set_placeholder(&placeholder, cx));
         }
-        cx.set_menus(app_menus(
-            self.debug_enabled,
-            self.toolbar_shown,
-            &self.i18n,
-        ));
+        self.refresh_menus(cx);
         for handle in self.whois_windows.values() {
             let i18n = self.i18n.clone();
             let _ = handle.update(cx, |view, _, cx| view.set_localizer(i18n, cx));
@@ -3179,34 +3176,63 @@ impl ChatWindow {
     /// file, starting from the file, which a settings window may have updated.
     fn toggle_toolbar(&mut self, _: &ToggleToolbar, _: &mut Window, cx: &mut Context<Self>) {
         let shown = !self.toolbar_shown;
+        self.save_view_setting(|settings| settings.show_toolbar = shown);
+        self.set_toolbar_shown(shown, cx);
+    }
+
+    /// Hides the menu bar until Alt or F10 (the settings window's checkbox)
+    /// or shows it all the time, and remembers the choice.
+    fn toggle_menu_bar(&mut self, _: &ToggleMenuBar, _: &mut Window, cx: &mut Context<Self>) {
+        let auto_hide = self.menu_bar.always();
+        self.save_view_setting(|settings| settings.menu_bar_auto_hide = auto_hide);
+        self.set_menu_bar_auto_hide(auto_hide, cx);
+    }
+
+    /// Saves a View menu choice, starting from the settings file, which a
+    /// settings window may have updated.
+    fn save_view_setting(&mut self, apply: impl FnOnce(&mut Settings)) {
         let mut settings = match settings_file::load() {
             Ok(Some(settings)) => settings,
             Ok(None) => self.saved.clone(),
             Err(error) => {
                 self.set_feedback(Some(error));
-                self.set_toolbar_shown(shown, cx);
                 return;
             }
         };
-        settings.show_toolbar = shown;
+        apply(&mut settings);
         if let Err(error) = settings_file::save(&settings) {
             self.set_feedback(Some(error));
         }
-        self.saved.show_toolbar = shown;
-        self.set_toolbar_shown(shown, cx);
+        self.saved.show_toolbar = settings.show_toolbar;
+        self.saved.menu_bar_auto_hide = settings.menu_bar_auto_hide;
     }
 
     fn set_toolbar_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
         self.toolbar_shown = shown;
-        cx.set_menus(app_menus(self.debug_enabled, shown, &self.i18n));
+        self.refresh_menus(cx);
         cx.notify();
+    }
+
+    fn set_menu_bar_auto_hide(&mut self, auto_hide: bool, cx: &mut Context<Self>) {
+        self.menu_bar.set_always(!auto_hide);
+        self.refresh_menus(cx);
+        cx.notify();
+    }
+
+    fn refresh_menus(&self, cx: &mut Context<Self>) {
+        cx.set_menus(app_menus(
+            self.debug_enabled,
+            self.toolbar_shown,
+            !self.menu_bar.always(),
+            &self.i18n,
+        ));
     }
 
     /// Turns the debug transcript on or off. IRC lines are recorded after
     /// registration only while it is on.
     fn set_debug(&mut self, on: bool, cx: &mut Context<Self>) {
         self.debug_enabled = on;
-        cx.set_menus(app_menus(on, self.toolbar_shown, &self.i18n));
+        self.refresh_menus(cx);
         for connection in self
             .sessions
             .values()
@@ -6133,6 +6159,7 @@ impl ChatWindow {
             })
             .on_action(cx.listener(Self::toggle_debug))
             .on_action(cx.listener(Self::toggle_toolbar))
+            .on_action(cx.listener(Self::toggle_menu_bar))
             .on_action(cx.listener(Self::copy_diagnostics))
             .on_action(cx.listener(|this, _: &Quit, window, cx| this.request_quit(window, cx)))
             // The menu bar greys out an action no window handles, so the chat
@@ -7256,7 +7283,12 @@ fn menu_access_keys(i18n: &Localizer) -> menu_bar::AccessKeys {
     }
 }
 
-fn app_menus(debug_enabled: bool, toolbar_shown: bool, i18n: &Localizer) -> Vec<Menu> {
+fn app_menus(
+    debug_enabled: bool,
+    toolbar_shown: bool,
+    menu_bar_hidden: bool,
+    i18n: &Localizer,
+) -> Vec<Menu> {
     // macOS keeps Settings and Quit in the application menu; Windows and Linux
     // put them in File, with no application-named menu.
     // macOS also puts About first in the application menu; elsewhere it is
@@ -7283,6 +7315,39 @@ fn app_menus(debug_enabled: bool, toolbar_shown: bool, i18n: &Localizer) -> Vec<
         (i18n.text("menu_file"), "menu_exit")
     };
     app_items.push(MenuItem::action(i18n.text(quit_label), Quit));
+    let mut view_items = Vec::new();
+    // The macOS menu bar belongs to the system.
+    #[cfg(not(target_os = "macos"))]
+    view_items.push(MenuItem::action(
+        i18n.text(if menu_bar_hidden {
+            "menu_show_menu_bar"
+        } else {
+            "menu_hide_menu_bar"
+        }),
+        ToggleMenuBar,
+    ));
+    #[cfg(target_os = "macos")]
+    let _ = menu_bar_hidden;
+    view_items.extend([
+        MenuItem::action(
+            i18n.text(if toolbar_shown {
+                "menu_hide_toolbar"
+            } else {
+                "menu_show_toolbar"
+            }),
+            ToggleToolbar,
+        ),
+        MenuItem::separator(),
+        MenuItem::action(
+            if debug_enabled {
+                i18n.text("menu_hide_diagnostics")
+            } else {
+                i18n.text("menu_show_diagnostics")
+            },
+            ToggleDebug,
+        ),
+        MenuItem::action(i18n.text("menu_copy_diagnostics"), CopyDiagnostics),
+    ]);
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut menus = vec![
         Menu {
@@ -7314,26 +7379,7 @@ fn app_menus(debug_enabled: bool, toolbar_shown: bool, i18n: &Localizer) -> Vec<
         },
         Menu {
             name: i18n.text("menu_view").into(),
-            items: vec![
-                MenuItem::action(
-                    i18n.text(if toolbar_shown {
-                        "menu_hide_toolbar"
-                    } else {
-                        "menu_show_toolbar"
-                    }),
-                    ToggleToolbar,
-                ),
-                MenuItem::separator(),
-                MenuItem::action(
-                    if debug_enabled {
-                        i18n.text("menu_hide_diagnostics")
-                    } else {
-                        i18n.text("menu_show_diagnostics")
-                    },
-                    ToggleDebug,
-                ),
-                MenuItem::action(i18n.text("menu_copy_diagnostics"), CopyDiagnostics),
-            ],
+            items: view_items,
             menu_type: None,
         },
     ];
@@ -7569,6 +7615,7 @@ fn main() {
             cx.set_menus(app_menus(
                 false,
                 saved.show_toolbar,
+                saved.menu_bar_auto_hide,
                 &Localizer::new(Language::System),
             ));
             // Reached when no chat window handles it, e.g. from the settings
@@ -7674,7 +7721,12 @@ fn main() {
                     chat.channel_orders = cayenchat_storage::order::load_orders();
                     chat.restore_channel_orders();
                     chat.apply_layout(&layout);
-                    cx.set_menus(app_menus(false, chat.toolbar_shown, &chat.i18n));
+                    cx.set_menus(app_menus(
+                        false,
+                        chat.toolbar_shown,
+                        !chat.menu_bar.always(),
+                        &chat.i18n,
+                    ));
                     let startup = std::mem::take(&mut chat.startup_connections);
                     let mut settings_for = startup.is_empty().then(|| chat.selected_profile_id());
                     for (network, config) in startup {

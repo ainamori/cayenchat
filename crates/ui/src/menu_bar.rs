@@ -162,6 +162,11 @@ impl MenuBar {
         self.always = always;
     }
 
+    /// Whether the bar is shown all the time.
+    pub fn always(&self) -> bool {
+        self.always
+    }
+
     /// Whether the bar takes room on screen.
     fn shown(&self) -> bool {
         self.visible || self.always

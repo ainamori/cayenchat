@@ -7,7 +7,12 @@ use cayenchat_storage::Language;
 use gpui::{Action, MenuItem, TestAppContext};
 
 fn view_menu_label(toolbar_shown: bool) -> String {
-    let menus = app_menus(false, toolbar_shown, &Localizer::new(Language::English));
+    let menus = app_menus(
+        false,
+        toolbar_shown,
+        false,
+        &Localizer::new(Language::English),
+    );
     menus
         .iter()
         .flat_map(|menu| &menu.items)
@@ -24,6 +29,35 @@ fn view_menu_label(toolbar_shown: bool) -> String {
 fn the_view_menu_offers_to_show_or_hide_the_toolbar() {
     assert_eq!(view_menu_label(true), "Hide Toolbar");
     assert_eq!(view_menu_label(false), "Show Toolbar");
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn the_view_menu_offers_the_menu_bar_apart_from_the_toolbar() {
+    let label = |menu_bar_hidden, toolbar_shown| {
+        let menus = app_menus(
+            false,
+            toolbar_shown,
+            menu_bar_hidden,
+            &Localizer::new(Language::English),
+        );
+        menus
+            .iter()
+            .flat_map(|menu| &menu.items)
+            .find_map(|item| match item {
+                MenuItem::Action { name, action, .. }
+                    if action.name() == super::ToggleMenuBar.name() =>
+                {
+                    Some(name.to_string())
+                }
+                _ => None,
+            })
+            .expect("the View menu offers the menu bar")
+    };
+    assert_eq!(label(false, true), "Hide Menu Bar");
+    assert_eq!(label(true, true), "Show Menu Bar");
+    assert_eq!(label(false, false), "Hide Menu Bar");
+    assert_eq!(label(true, false), "Show Menu Bar");
 }
 
 #[gpui::test]
