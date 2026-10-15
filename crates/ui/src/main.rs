@@ -2782,14 +2782,29 @@ impl ChatWindow {
             ),
             charset_command::Request::Show => {
                 let (decode, encode) = charset_command::apply(request, current.as_ref());
-                self.i18n.format(
+                let mut shown = self.i18n.format(
                     "charset_show",
                     &[
                         ("channel", &shown_name),
                         ("decode", &describe(decode)),
                         ("encode", &describe(encode)),
                     ],
-                )
+                );
+                // On a UTF8ONLY connection the saved values are not in effect.
+                let ignored = [decode, encode]
+                    .into_iter()
+                    .flatten()
+                    .any(|encoding| encoding != cayenchat_storage::TextEncoding::Utf8);
+                let utf8_only = self
+                    .sessions
+                    .get(&network)
+                    .and_then(|session| session.irc.as_ref())
+                    .is_some_and(|connection| connection.utf8_only());
+                if ignored && utf8_only {
+                    shown.push(' ');
+                    shown.push_str(&self.i18n.text("charset_note_utf8only"));
+                }
+                shown
             }
             charset_command::Request::Reset if current.is_none() => self
                 .i18n

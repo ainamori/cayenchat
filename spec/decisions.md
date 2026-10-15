@@ -1207,6 +1207,15 @@ page. There is no re-decoding of lines already shown.
 - **Wire bytes are checked as sent.** The 512-byte and relayed-prefix (#330)
   checks and the unrepresentable-character check encode the line with the same
   function the codec uses, so they see the real bytes.
+- **A queued message keeps its encoding.** The connection handle fixes the
+  channel's `encode` encoding in the message when it accepts it (length,
+  relayed prefix, representability). The worker checks with that encoding and
+  pins it to the exact line for the codec, which uses the pin once when it
+  writes the line. A `/charset` change while messages wait therefore affects
+  only later messages.
+- **Configured names are not merged early.** The overrides handed to a
+  connection are all kept until `CASEMAPPING` is announced, so names that only
+  the default mapping equates (`#a[` / `#a{` under `ascii`) stay separate.
 - **UTF8ONLY.** After `005 UTF8ONLY`, only UTF-8 overrides apply and `/charset`
   refuses others; a legacy server encoding still ends the connection.
 - **One list.** `TextEncoding::ALL` (15 encodings: UTF-8, ISO-2022-JP,

@@ -22,6 +22,29 @@ pub trait BodyCharsets: Send + Sync {
     /// The encoding of text sent to `target`, if it differs from the
     /// connection's.
     fn encoder(&self, target: &str) -> Option<&'static Encoding>;
+    /// Takes the encoding fixed for exactly this `line` when it was queued
+    /// (`Some(None)`: the connection's), so a change made while the line
+    /// waits does not alter its bytes. Asked once for each line the codec
+    /// writes, before [`BodyCharsets::encoder`] is.
+    fn take_pin(&self, _line: &str) -> Option<Option<&'static Encoding>> {
+        None
+    }
+}
+
+/// An encoding fixed in advance for the text of every message to any target;
+/// `None` is the connection's.
+pub struct Fixed(pub Option<&'static Encoding>);
+
+impl BodyCharsets for Fixed {
+    fn is_empty(&self) -> bool {
+        false
+    }
+    fn decoder(&self, _target: &str) -> Option<&'static Encoding> {
+        None
+    }
+    fn encoder(&self, _target: &str) -> Option<&'static Encoding> {
+        self.0
+    }
 }
 
 /// A shared [`BodyCharsets`], carried by a client configuration.

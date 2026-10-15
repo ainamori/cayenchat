@@ -4858,6 +4858,7 @@ fn messages_are_limited_by_the_line_the_recipient_gets() {
         text: text.into(),
         display_text: text.into(),
         notice: false,
+        encoder: None,
     };
     // `PRIVMSG #test ` is 14 bytes and CRLF 2. A one-word text goes without
     // the colon, which the server adds when relaying, so it counts as a byte.
@@ -4879,6 +4880,7 @@ fn messages_are_limited_by_the_line_the_recipient_gets() {
         text: text.into(),
         display_text: text.into(),
         notice: true,
+        encoder: None,
     };
     assert!(validate_outgoing_relayed(&notice(&"x".repeat(room)), "UTF-8", prefix).is_ok());
     assert!(validate_outgoing_relayed(&notice(&"x".repeat(room + 1)), "UTF-8", prefix).is_err());
@@ -4901,6 +4903,40 @@ fn messages_are_limited_by_the_line_the_recipient_gets() {
     let kana = "あ".repeat(150);
     assert!(validate_outgoing_relayed(&message(&kana), "ISO-2022-JP", prefix).is_ok());
     assert!(validate_outgoing_relayed(&message(&kana), "UTF-8", prefix).is_err());
+}
+
+#[test]
+fn a_queued_message_keeps_the_encoding_it_was_accepted_with() {
+    let kana = "あ".repeat(145);
+    let charsets = ChannelCharsets::new(&[ChannelEncoding {
+        channel: "#test".into(),
+        decode: None,
+        encode: Some("Shift_JIS".into()),
+    }])
+    .unwrap();
+    let prefix = relay::OwnMask::default().prefix_bytes("alice", "UTF-8");
+    let accepted = |encoder| Outgoing::Message {
+        target: "#test".into(),
+        text: kana.clone(),
+        display_text: kana.clone(),
+        notice: false,
+        encoder,
+    };
+    let live = |outgoing: &Outgoing| {
+        let wire = Wire {
+            label: "UTF-8",
+            charsets: Some(&charsets),
+        };
+        validate_outgoing_relayed(outgoing, wire, prefix)
+    };
+    // Accepted as Shift_JIS (290 bytes), then the channel goes back to the
+    // server's UTF-8: the message is still judged, and written, as accepted.
+    let pinned = accepted(charsets.encoder("#test"));
+    charsets.set("#test", None, None).unwrap();
+    assert!(live(&pinned).is_ok());
+    // Accepted as UTF-8 (435 bytes), then Shift_JIS is set: still too long.
+    charsets.set("#test", None, Some("Shift_JIS")).unwrap();
+    assert!(live(&accepted(None)).is_err());
 }
 
 #[test]

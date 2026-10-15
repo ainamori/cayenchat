@@ -121,8 +121,16 @@ impl Encoder<String> for LineCodec {
             // Encode the message using the codec's encoding. Characters the
             // encoding cannot hold become numeric character references;
             // callers that care check encodability before sending.
-            let (data, _) =
-                crate::charsets::encode_line(&msg, self.encoding, self.charsets.as_deref());
+            let pinned = self
+                .charsets
+                .as_deref()
+                .and_then(|charsets| charsets.take_pin(&msg))
+                .map(crate::charsets::Fixed);
+            let charsets = match &pinned {
+                Some(fixed) => Some(fixed as &dyn crate::charsets::BodyCharsets),
+                None => self.charsets.as_deref(),
+            };
+            let (data, _) = crate::charsets::encode_line(&msg, self.encoding, charsets);
             dst.extend_from_slice(&data);
         }
 
@@ -195,6 +203,41 @@ mod tests {
         src.extend_from_slice("a".repeat(MAX_LINE_BYTES + 1).as_bytes());
         assert_eq!(codec.decode(&mut src).unwrap(), Some("PING x\r\n".into()));
         assert!(codec.decode(&mut src).is_err());
+    }
+
+    #[cfg(feature = "encoding")]
+    #[test]
+    fn a_pinned_line_is_written_with_its_pinned_encoding() {
+        use crate::charsets::BodyCharsets;
+        use std::sync::{Arc, Mutex};
+        use tokio_util::codec::Encoder;
+
+        struct Pinned(Mutex<Option<Option<&'static encoding_rs::Encoding>>>);
+        impl BodyCharsets for Pinned {
+            fn is_empty(&self) -> bool {
+                false
+            }
+            fn decoder(&self, _: &str) -> Option<&'static encoding_rs::Encoding> {
+                None
+            }
+            // What the setting has become since the line was queued.
+            fn encoder(&self, _: &str) -> Option<&'static encoding_rs::Encoding> {
+                Some(encoding_rs::UTF_8)
+            }
+            fn take_pin(&self, _: &str) -> Option<Option<&'static encoding_rs::Encoding>> {
+                self.0.lock().unwrap().take()
+            }
+        }
+
+        let pins = Arc::new(Pinned(Mutex::new(Some(Some(encoding_rs::SHIFT_JIS)))));
+        let mut codec = LineCodec::new("utf-8").unwrap().with_charsets(Some(pins));
+        let mut dst = BytesMut::new();
+        codec.encode("PRIVMSG #a :あ\r\n".into(), &mut dst).unwrap();
+        assert_eq!(&dst[..], b"PRIVMSG #a :\x82\xa0\r\n");
+        // The pin is used up: the next line follows the current setting.
+        let mut dst = BytesMut::new();
+        codec.encode("PRIVMSG #a :あ\r\n".into(), &mut dst).unwrap();
+        assert_eq!(&dst[..], "PRIVMSG #a :あ\r\n".as_bytes());
     }
 
     #[cfg(feature = "encoding")]

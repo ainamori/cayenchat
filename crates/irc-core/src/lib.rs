@@ -50,7 +50,7 @@ use irc::{
     },
     proto::{
         Command as IrcCommand, Message as IrcMessage, Prefix, Response,
-        charsets::{BodyCharsets, encode_line},
+        charsets::{BodyCharsets, Fixed, encode_line},
         mode::{ChannelMode, Mode},
     },
 };
@@ -1277,6 +1277,11 @@ enum Outgoing {
         text: String,
         display_text: String,
         notice: bool,
+        /// The encoding of `text` fixed when the connection handle accepted
+        /// the message (`None`: the server's), so the checks of the worker
+        /// and the bytes the codec writes agree with the one that accepted
+        /// it even if the channel's setting changes meanwhile.
+        encoder: Option<&'static encoding_rs::Encoding>,
     },
     Raw(IrcMessage),
     /// Publish (`Some`) or remove (`None`) our own avatar; `request`
@@ -1350,7 +1355,12 @@ fn validate_outgoing_relayed<'w>(
         Outgoing::Quit => return Ok(()),
         Outgoing::QuitWith(reason) => IrcMessage::from(IrcCommand::QUIT(Some(reason.clone()))),
     };
-    if matches!(outgoing, Outgoing::Message { .. }) {
+    if let Outgoing::Message { encoder, .. } = outgoing {
+        let fixed = Fixed(*encoder);
+        let encoding = Wire {
+            label: encoding.label,
+            charsets: Some(&fixed),
+        };
         validate_relayed_wire(&message.to_string(), encoding, prefix_bytes)
     } else {
         validate_wire(&message.to_string(), encoding)
@@ -1470,6 +1480,7 @@ fn parse_slash_command(line: &str, selected: Option<&str>) -> Result<Outgoing, S
                 text,
                 display_text: format!("* {action}"),
                 notice: false,
+                encoder: None,
             })
         }
         "MSG" | "PRIVMSG" | "NOTICE" => {
@@ -1496,6 +1507,7 @@ fn parse_slash_command(line: &str, selected: Option<&str>) -> Result<Outgoing, S
                 text: text.into(),
                 display_text: text.into(),
                 notice: verb == "NOTICE",
+                encoder: None,
             })
         }
         "PART" | "TOPIC" => {
@@ -1741,6 +1753,19 @@ impl Connection {
         self.events.as_ref().is_some_and(Events::is_closed)
     }
 
+    /// A message with the encoding its target uses now fixed in it; whatever
+    /// the setting becomes while it waits, it is checked and written with
+    /// this one.
+    fn pinned(&self, mut outgoing: Outgoing) -> Outgoing {
+        if let Outgoing::Message {
+            target, encoder, ..
+        } = &mut outgoing
+        {
+            *encoder = self.charsets.encoder(target);
+        }
+        outgoing
+    }
+
     fn validate(&self, outgoing: &Outgoing) -> Result<(), String> {
         let prefix = relay::published(&self.relay_prefix);
         let wire = Wire {
@@ -1781,7 +1806,9 @@ impl Connection {
             text: text.to_owned(),
             display_text: text.to_owned(),
             notice,
+            encoder: None,
         };
+        let outgoing = self.pinned(outgoing);
         self.validate(&outgoing)?;
         self.commands
             .try_send(outgoing)
@@ -1803,7 +1830,9 @@ impl Connection {
             text: text.to_owned(),
             display_text: text.to_owned(),
             notice,
+            encoder: None,
         };
+        let outgoing = self.pinned(outgoing);
         self.validate(&outgoing)?;
         self.commands
             .try_send(outgoing)
@@ -1864,6 +1893,7 @@ impl Connection {
     pub fn send_command(&self, line: &str, selected_channel: Option<&str>) -> Result<(), String> {
         let outgoing = parse_slash_command(line, selected_channel)?;
         let outgoing = with_default_part_reason(outgoing, self.part_message.as_deref());
+        let outgoing = self.pinned(outgoing);
         self.validate(&outgoing)?;
         self.commands
             .try_send(outgoing)
@@ -2514,7 +2544,11 @@ impl Worker {
                 text,
                 display_text,
                 notice,
-            } => self.send_message(target, text, display_text, notice).await,
+                encoder,
+            } => {
+                self.send_message(target, text, display_text, notice, encoder)
+                    .await
+            }
             Outgoing::Raw(message) => self.send_raw(message).await,
             Outgoing::OwnAvatar { request, url } => self.set_own_avatar(request, url).await,
             Outgoing::ShareAvatar(url) => {
@@ -2569,6 +2603,7 @@ impl Worker {
         text: String,
         display_text: String,
         notice: bool,
+        encoder: Option<&'static encoding_rs::Encoding>,
     ) -> Flow {
         // With echo-message the local line is confirmed by
         // the server's echo; a label (labeled-response)
@@ -2601,8 +2636,21 @@ impl Worker {
         let line = self.transcript.line(&message);
         // Only the 512 bytes of our own line: the length once the server
         // relays it is checked by the connection handle before queuing.
-        let result = validate_tagged_wire(&message, self.wire())
-            .and_then(|_| self.client.send(message).map_err(|error| error.to_string()));
+        let fixed = Fixed(encoder);
+        let wire = Wire {
+            label: &self.wire_encoding,
+            charsets: Some(&fixed),
+        };
+        // The codec writes this line later: it keeps the encoding that was
+        // checked, whatever the channel's setting becomes by then.
+        let written = irc::proto::IrcCodec::sanitize(message.to_string());
+        let result = validate_tagged_wire(&message, wire).and_then(|_| {
+            self.charsets.pin(&written, encoder);
+            self.client.send(message).map_err(|error| {
+                self.charsets.unpin(&written);
+                error.to_string()
+            })
+        });
         let event = match result {
             Ok(()) => {
                 self.transcript.record(WireDirection::Sent, line).await;

@@ -6,9 +6,12 @@
 //! line codec applies it ([`irc::proto::charsets`]), while everything else on
 //! the line, the channel name above all, keeps the server's encoding.
 
-use std::sync::{
-    RwLock,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{
+        Mutex, RwLock,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
 };
 
 use cayenchat_model::names::CaseMapping;
@@ -68,26 +71,77 @@ pub(crate) struct ChannelCharsets {
     /// Whether any override exists, so a connection without one does not
     /// take the lock for each line.
     any: AtomicBool,
+    /// The encoding fixed for each queued line until the codec writes it,
+    /// oldest first, so a change made while a message waits cannot alter
+    /// what was checked when it was accepted.
+    pins: Mutex<HashMap<String, VecDeque<Option<&'static Encoding>>>>,
+    /// How many pins `pins` holds, so the codec does not take its lock for
+    /// a line when there are none.
+    pinned: AtomicUsize,
 }
 
 impl ChannelCharsets {
+    /// The configured overrides are all kept as they are: until the network
+    /// announces its `CASEMAPPING` the names cannot be told apart reliably,
+    /// and merging two that only the default mapping equates (`#a[` and
+    /// `#a{`) would lose one for good.
     pub(crate) fn new(entries: &[ChannelEncoding]) -> Result<Self, String> {
-        let this = Self {
+        let mut kept: Vec<Entry> = Vec::new();
+        for entry in entries {
+            if !valid_channel(&entry.channel) {
+                return Err(format!("Invalid channel name: {}", entry.channel));
+            }
+            let decode = entry.decode.as_deref().map(resolve).transpose()?;
+            let encode = entry.encode.as_deref().map(resolve).transpose()?;
+            kept.retain(|other| other.channel != entry.channel);
+            if decode.is_some() || encode.is_some() {
+                kept.push(Entry {
+                    channel: entry.channel.clone(),
+                    decode,
+                    encode,
+                });
+            }
+        }
+        Ok(Self {
+            any: AtomicBool::new(!kept.is_empty()),
             state: RwLock::new(State {
                 mapping: CaseMapping::default(),
-                entries: Vec::new(),
+                entries: kept,
                 utf8_only: false,
             }),
-            any: AtomicBool::new(false),
-        };
-        for entry in entries {
-            this.set(
-                &entry.channel,
-                entry.decode.as_deref(),
-                entry.encode.as_deref(),
-            )?;
+            pins: Mutex::new(HashMap::new()),
+            pinned: AtomicUsize::new(0),
+        })
+    }
+
+    /// Fixes the encoding of the text of `line`, which is about to be queued
+    /// for the codec, until the codec writes it.
+    pub(crate) fn pin(&self, line: &str, encoding: Option<&'static Encoding>) {
+        if let Ok(mut pins) = self.pins.lock() {
+            pins.entry(line.to_owned()).or_default().push_back(encoding);
+            self.pinned.fetch_add(1, Ordering::Relaxed);
         }
-        Ok(this)
+    }
+
+    /// Takes the pin back when `line` could not be queued.
+    pub(crate) fn unpin(&self, line: &str) {
+        self.take(line, true);
+    }
+
+    /// The oldest pin of `line`, or the newest with `newest`.
+    fn take(&self, line: &str, newest: bool) -> Option<Option<&'static Encoding>> {
+        let mut pins = self.pins.lock().ok()?;
+        let queue = pins.get_mut(line)?;
+        let pin = if newest {
+            queue.pop_back()
+        } else {
+            queue.pop_front()
+        };
+        if queue.is_empty() {
+            pins.remove(line);
+        }
+        self.pinned.fetch_sub(1, Ordering::Relaxed);
+        pin
     }
 
     /// Replaces the overrides of `channel`; labels that are `None` follow the
@@ -161,7 +215,14 @@ impl ChannelCharsets {
 
 impl BodyCharsets for ChannelCharsets {
     fn is_empty(&self) -> bool {
-        !self.any.load(Ordering::Relaxed)
+        !self.any.load(Ordering::Relaxed) && self.pinned.load(Ordering::Relaxed) == 0
+    }
+
+    fn take_pin(&self, line: &str) -> Option<Option<&'static Encoding>> {
+        if self.pinned.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        self.take(line, false)
     }
 
     fn decoder(&self, target: &str) -> Option<&'static Encoding> {
@@ -200,6 +261,38 @@ mod tests {
         assert!(charsets.decoder("#a^").is_some());
         charsets.set_casemapping(CaseMapping::Ascii);
         assert!(charsets.decoder("#a^").is_none());
+    }
+
+    #[test]
+    fn configured_names_only_the_default_mapping_equates_stay_apart() {
+        let entry = |channel: &str, label: &str| ChannelEncoding {
+            channel: channel.into(),
+            decode: Some(label.into()),
+            encode: None,
+        };
+        let charsets =
+            ChannelCharsets::new(&[entry("#a[", "Shift_JIS"), entry("#a{", "UTF-8")]).unwrap();
+        charsets.set_casemapping(CaseMapping::Ascii);
+        assert_eq!(charsets.decoder("#a["), Some(encoding_rs::SHIFT_JIS));
+        assert_eq!(charsets.decoder("#a{"), Some(encoding_rs::UTF_8));
+        // The same name twice is one entry, the later one.
+        let charsets = ChannelCharsets::new(&[entry("#a", "Big5"), entry("#a", "GBK")]).unwrap();
+        assert_eq!(charsets.decoder("#a"), Some(encoding_rs::GBK));
+    }
+
+    #[test]
+    fn a_pin_outlives_changes_and_is_taken_once_in_order() {
+        let charsets = one("#a", None, Some("GBK"));
+        let line = "PRIVMSG #a :x\r\n";
+        charsets.pin(line, Some(encoding_rs::BIG5));
+        charsets.pin(line, None);
+        charsets.set("#a", None, None).unwrap();
+        assert!(!charsets.is_empty());
+        assert_eq!(charsets.take_pin("PRIVMSG #b :x\r\n"), None);
+        assert_eq!(charsets.take_pin(line), Some(Some(encoding_rs::BIG5)));
+        charsets.unpin(line);
+        assert_eq!(charsets.take_pin(line), None);
+        assert!(charsets.is_empty());
     }
 
     #[test]
