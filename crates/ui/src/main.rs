@@ -2490,6 +2490,9 @@ impl ChatWindow {
             always_on_top: self.toolbar_always_on_top_state(),
             joined: channel.is_some_and(|c| self.state.is_active_channel(c.id)),
             can_join_or_part: registered && channel.is_some(),
+            can_topic: registered && channel.is_some(),
+            can_mode: registered && channel.is_some(),
+            can_nick: registered,
             can_next_unread: self
                 .state
                 .conversations()
@@ -2542,6 +2545,84 @@ impl ChatWindow {
         let result = self.request_whois(network, &nickname, cx);
         self.set_feedback(result.err());
         cx.notify();
+    }
+
+    /// The place of a prompt opened from the toolbar, in the middle of the
+    /// window, where the member menu's prompts sit by default.
+    fn centered_prompt_position(window: &Window) -> Point<Pixels> {
+        let viewport = window.viewport_size();
+        point(
+            ((viewport.width - px(300.)) / 2.).max(px(0.)),
+            ((viewport.height - px(140.)) / 2.).max(px(0.)),
+        )
+    }
+
+    /// The toolbar's topic or mode change for the selected channel (#370):
+    /// the same prompt the log's right-click menu opens, in the middle of
+    /// the window.
+    fn toolbar_channel_prompt(
+        &mut self,
+        kind: MemberPromptKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(channel) = self.state.selected_channel().filter(|c| !c.is_private()) else {
+            return;
+        };
+        let topic = matches!(kind, MemberPromptKind::Topic);
+        let initial = if topic {
+            channel.topic.clone()
+        } else {
+            String::new()
+        };
+        self.show_member_prompt(
+            channel.network,
+            channel.name.clone(),
+            kind,
+            Self::centered_prompt_position(window),
+            window,
+            cx,
+        );
+        if let Some(prompt) = self.member_prompt.as_ref().filter(|_| !initial.is_empty()) {
+            prompt.input.update(cx, |input, cx| {
+                input.set_text(&initial, cx);
+                input.select_everything(cx);
+            });
+        }
+    }
+
+    fn toolbar_topic(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.toolbar_channel_prompt(MemberPromptKind::Topic, window, cx);
+    }
+
+    fn toolbar_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.toolbar_channel_prompt(MemberPromptKind::Mode, window, cx);
+    }
+
+    /// The toolbar's nickname change for the selected channel's network
+    /// (#370): the same prompt the server menu opens, in the middle of the
+    /// window.
+    fn toolbar_nick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(network) = self.selected_network_id() else {
+            return;
+        };
+        // The nickname in use, else the one the profile would connect with.
+        let nickname = self
+            .own_nickname(network)
+            .map(str::to_owned)
+            .or_else(|| {
+                let session = self.sessions.get(&network)?;
+                Some(self.saved.profile(&session.profile_id)?.nickname.clone())
+            })
+            .unwrap_or_default();
+        self.show_member_prompt(
+            network,
+            nickname,
+            MemberPromptKind::Nick,
+            Self::centered_prompt_position(window),
+            window,
+            cx,
+        );
     }
 
     /// Whether `channel` is an enabled auto-join entry of `network`'s server.

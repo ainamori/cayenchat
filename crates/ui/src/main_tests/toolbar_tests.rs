@@ -76,7 +76,14 @@ fn buttons_follow_the_connection_and_the_selection(cx: &mut TestAppContext) {
     });
     chat.update(cx, |chat, cx| {
         let state = chat.toolbar_state();
-        assert!(!state.connected && !state.can_join_or_part && !state.can_whois);
+        assert!(
+            !state.connected
+                && !state.can_join_or_part
+                && !state.can_whois
+                && !state.can_topic
+                && !state.can_mode
+                && !state.can_nick
+        );
         let events =
             |chat: &mut ChatWindow, events: Vec<Event>, cx: &mut gpui::Context<ChatWindow>| {
                 chat.handle_events(NetworkId(1), events, Worker::Running, cx);
@@ -97,7 +104,13 @@ fn buttons_follow_the_connection_and_the_selection(cx: &mut TestAppContext) {
         chat.state
             .dispatch(cayenchat_app::Command::SelectChannel(channel));
         let state = chat.toolbar_state();
-        assert!(state.can_join_or_part && state.joined);
+        assert!(
+            state.can_join_or_part
+                && state.joined
+                && state.can_topic
+                && state.can_mode
+                && state.can_nick
+        );
         // WHOIS needs one chosen member.
         assert!(!state.can_whois);
 
@@ -139,6 +152,10 @@ fn buttons_follow_the_connection_and_the_selection(cx: &mut TestAppContext) {
         let state = chat.toolbar_state();
         assert!(!state.joined, "after the connection ended");
         assert!(!state.can_join_or_part, "nothing to join through");
+        assert!(
+            !state.can_topic && !state.can_mode && !state.can_nick,
+            "unconnected has none of the three"
+        );
         // Reconnecting and joining again (auto-join).
         events(
             chat,
@@ -153,18 +170,205 @@ fn buttons_follow_the_connection_and_the_selection(cx: &mut TestAppContext) {
             cx,
         );
         let state = chat.toolbar_state();
-        assert!(state.can_join_or_part && state.joined, "after auto-join");
+        assert!(
+            state.can_join_or_part
+                && state.joined
+                && state.can_topic
+                && state.can_mode
+                && state.can_nick,
+            "after auto-join"
+        );
 
-        // Back on the server, a channel button has nothing to act on.
+        // Back on the server, the channel buttons have nothing to act on,
+        // but the nickname is the server's.
         let server = chat.state.networks()[0].id;
         chat.state
             .dispatch(cayenchat_app::Command::SelectServer(server));
-        assert!(!chat.toolbar_state().can_join_or_part);
+        let state = chat.toolbar_state();
+        assert!(!state.can_join_or_part && !state.can_topic && !state.can_mode && state.can_nick);
         // Selecting the channel again shows its state.
         chat.state
             .dispatch(cayenchat_app::Command::SelectChannel(channel));
         assert!(chat.toolbar_state().joined);
     });
+}
+
+#[gpui::test]
+fn topic_mode_and_nick_open_the_shared_prompt_from_the_toolbar(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let settings = crate::settings_with_channels("#a");
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    // A connection to a local listener that never registers: confirmed
+    // commands can be queued on it, nothing reaches a server.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut config =
+        cayenchat_irc_core::ConnectionConfig::tls("127.0.0.1".into(), "me".into(), Vec::new());
+    config.port = listener.local_addr().unwrap().port();
+    config.use_tls = false;
+    let connection = cayenchat_irc_core::Connection::connect(config).unwrap();
+    chat.update(cx, |chat, cx| {
+        chat.sessions.get_mut(&NetworkId(1)).unwrap().irc = Some(connection);
+        chat.handle_events(
+            NetworkId(1),
+            vec![
+                Event::Registered {
+                    nickname: "me".into(),
+                },
+                Event::Joined {
+                    channel: "#a".into(),
+                },
+            ],
+            Worker::Running,
+            cx,
+        );
+        let channel = chat.state.conversations()[0].id;
+        chat.state
+            .dispatch(cayenchat_app::Command::SelectChannel(channel));
+        chat.state.set_topic(NetworkId(1), "#a", "old topic");
+    });
+    chat.update_in(cx, |chat, window, cx| {
+        // Topic: the current topic, all selected, for the selected channel.
+        chat.toolbar_topic(window, cx);
+        let prompt = chat.member_prompt.as_ref().unwrap();
+        assert_eq!(prompt.nickname, "#a");
+        assert_eq!(prompt.input.read(cx).text(), "old topic");
+        assert_eq!(
+            prompt.position,
+            Some(ChatWindow::centered_prompt_position(window))
+        );
+        // A cancel sends nothing and closes the prompt.
+        chat.cancel_member_prompt(window, cx);
+        assert!(chat.member_prompt.is_none());
+        assert!(chat.feedback.is_none());
+
+        // Confirming a topic sends it.
+        chat.toolbar_topic(window, cx);
+        chat.member_prompt
+            .as_ref()
+            .unwrap()
+            .input
+            .update(cx, |input, cx| input.set_text("new topic", cx));
+        chat.submit_member_prompt(window, cx);
+        assert!(chat.member_prompt.is_none());
+        assert!(chat.feedback.is_none());
+
+        // Mode: an empty string input, sent as /mode only on confirm.
+        chat.toolbar_mode(window, cx);
+        let prompt = chat.member_prompt.as_ref().unwrap();
+        assert!(prompt.input.read(cx).text().is_empty());
+        prompt
+            .input
+            .update(cx, |input, cx| input.set_text("+m", cx));
+        chat.submit_member_prompt(window, cx);
+        assert!(chat.member_prompt.is_none());
+        assert!(chat.feedback.is_none());
+
+        // Nick: the own nickname of the selected channel's network.
+        chat.toolbar_nick(window, cx);
+        let prompt = chat.member_prompt.as_ref().unwrap();
+        assert_eq!(prompt.input.read(cx).text(), "me");
+        prompt
+            .input
+            .update(cx, |input, cx| input.set_text("me2", cx));
+        chat.submit_member_prompt(window, cx);
+        assert!(chat.member_prompt.is_none());
+        assert!(chat.feedback.is_none());
+
+        // With a server selected the channel buttons have nothing to act on;
+        // their handlers do nothing instead of guessing a channel.
+        let server = chat.state.networks()[0].id;
+        chat.state
+            .dispatch(cayenchat_app::Command::SelectServer(server));
+        chat.toolbar_topic(window, cx);
+        chat.toolbar_mode(window, cx);
+        assert!(chat.member_prompt.is_none());
+    });
+}
+
+#[gpui::test]
+fn a_toolbar_click_opens_the_prompt_and_an_unavailable_one_ignores_it(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let settings = crate::settings_with_channels("#a");
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1000.), gpui::px(700.)));
+    cx.run_until_parked();
+    // Unregistered on a channel: the topic button is drawn but dimmed, and
+    // its click does nothing.
+    let channel = chat.read_with(cx, |chat, _| chat.state.conversations()[0].id);
+    chat.update(cx, |chat, _| {
+        chat.state
+            .dispatch(cayenchat_app::Command::SelectChannel(channel))
+    });
+    cx.run_until_parked();
+    let topic = cx
+        .debug_bounds("toolbar-topic")
+        .expect("the topic button is drawn");
+    cx.simulate_click(topic.center(), gpui::Modifiers::default());
+    chat.read_with(cx, |chat, _| assert!(chat.member_prompt.is_none()));
+
+    // Registered and on the channel: the same click opens the shared prompt.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut config =
+        cayenchat_irc_core::ConnectionConfig::tls("127.0.0.1".into(), "me".into(), Vec::new());
+    config.port = listener.local_addr().unwrap().port();
+    config.use_tls = false;
+    let connection = cayenchat_irc_core::Connection::connect(config).unwrap();
+    chat.update(cx, |chat, cx| {
+        chat.sessions.get_mut(&NetworkId(1)).unwrap().irc = Some(connection);
+        chat.handle_events(
+            NetworkId(1),
+            vec![
+                Event::Registered {
+                    nickname: "me".into(),
+                },
+                Event::Joined {
+                    channel: "#a".into(),
+                },
+            ],
+            Worker::Running,
+            cx,
+        );
+        chat.state.set_topic(NetworkId(1), "#a", "old topic");
+    });
+    cx.run_until_parked();
+    let topic = cx
+        .debug_bounds("toolbar-topic")
+        .expect("the topic button is drawn");
+    cx.simulate_click(topic.center(), gpui::Modifiers::default());
+    let input = chat.read_with(cx, |chat, _| {
+        let prompt = chat
+            .member_prompt
+            .as_ref()
+            .expect("the click opened the prompt");
+        assert_eq!(prompt.nickname, "#a");
+        prompt.input.clone()
+    });
+    assert_eq!(
+        input.read_with(cx, |input, _| input.text().to_owned()),
+        "old topic"
+    );
+    assert!(
+        cx.debug_bounds("member-prompt").is_some(),
+        "the prompt is drawn"
+    );
 }
 
 #[gpui::test]
