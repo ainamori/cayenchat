@@ -561,8 +561,8 @@ mod tests {
         };
         assert_eq!(reconnect(false, false), Some(("refresh-cw", false, true)));
         assert_eq!(reconnect(true, false), Some(("refresh-cw", true, true)));
-        // It stays while connected, for a connection that seems stuck.
-        assert_eq!(reconnect(true, true), Some(("refresh-cw", true, true)));
+        // The caller greys it out while a connection is live.
+        assert_eq!(reconnect(false, true), Some(("refresh-cw", false, true)));
     }
 
     #[test]

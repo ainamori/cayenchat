@@ -1310,7 +1310,7 @@ candidates on #367.
 - **Buttons:** connect (`plug-zap`) or, while connecting, connected or waiting
   for a retry, disconnect (`unplug`) in the same place; reconnect
   (`refresh-cw`), enabled once the selected server has been connected in this
-  run | join or leave (`log-in` / `log-out`) | change topic
+  run and while it has no live connection | join or leave (`log-in` / `log-out`) | change topic
   (`message-square-text`, the second candidate chosen on #367), change mode
   (`sliders-horizontal`), change my nickname (`user-pen`) | next unread channel
   (`chevrons-down`) | WHOIS (`user-search`), upload image (`image-up`) | on
