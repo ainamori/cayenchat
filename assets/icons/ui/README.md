@@ -17,6 +17,9 @@ and record that here.
 | `unplug.svg` | `unplug` | 1.56.0 | Toolbar: disconnect |
 | `log-in.svg` | `log-in` | 1.56.0 | Toolbar: join the channel |
 | `log-out.svg` | `log-out` | 1.56.0 | Toolbar: leave the channel |
+| `message-square-text.svg` | `message-square-text` | 1.56.0 | Toolbar: change the channel topic |
+| `sliders-horizontal.svg` | `sliders-horizontal` | 1.56.0 | Toolbar: change the channel mode |
+| `user-pen.svg` | `user-pen` | 1.56.0 | Toolbar: change my nickname |
 | `chevrons-down.svg` | `chevrons-down` | 1.56.0 | Toolbar: next unread channel |
 | `user-search.svg` | `user-search` | 1.56.0 | Toolbar: WHOIS |
 | `image-up.svg` | `image-up` | 1.56.0 | Toolbar: upload an image |
