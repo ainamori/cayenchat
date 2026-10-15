@@ -7853,7 +7853,27 @@ fn rebind_shortcuts(cx: &mut App) {
     };
     cx.clear_key_bindings();
     input::bind_keys(emacs, cx);
-    cx.bind_keys(shortcut_bindings(prefs.channel_modifier, &prefs.overrides));
+    cx.bind_keys(themed_bindings(
+        prefs.channel_modifier,
+        &prefs.overrides,
+        emacs,
+    ));
+}
+
+/// `shortcut_bindings` for the text key theme in effect.
+fn themed_bindings(
+    channel_modifier: ChannelNumberModifier,
+    overrides: &shortcuts::Overrides,
+    emacs: bool,
+) -> Vec<KeyBinding> {
+    let mut bindings = shortcut_bindings(channel_modifier, overrides);
+    if cfg!(target_os = "linux") && emacs {
+        // Ctrl+F is "cursor right" in the Emacs key theme. A binding without
+        // a context outranks the input's, so search opens with F3 instead.
+        bindings.retain(|binding| !binding.action().partial_eq(&FindInLog));
+        bindings.push(KeyBinding::new("f3", FindInLog, None));
+    }
+    bindings
 }
 
 /// Standard Tab / Shift+Tab movement between settings fields (tab stops).
@@ -7889,8 +7909,8 @@ fn fixed_bindings(channel_modifier: ChannelNumberModifier) -> Vec<KeyBinding> {
         KeyBinding::new("tab", FocusNextField, Some("SettingsWindow")),
         KeyBinding::new("shift-tab", FocusPreviousField, Some("SettingsWindow")),
         KeyBinding::new("secondary-,", OpenSettings, None),
-        // Under the Emacs key theme on Linux a focused text input keeps
-        // Ctrl+F as "cursor right": its binding is more specific.
+        // Replaced by F3 under the Emacs key theme on Linux (see
+        // `rebind_shortcuts`).
         KeyBinding::new("secondary-f", FindInLog, None),
         KeyBinding::new("escape", CloseSearch, Some("LogSearch")),
         KeyBinding::new("shift-enter", SearchPrevious, Some("LogSearch")),

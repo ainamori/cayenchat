@@ -1841,9 +1841,12 @@ Incremental search over the logs the application holds in memory; saved
 history files, other clients and the server are not searched (the field's
 placeholder says "logs held in memory"). `app::search` is the engine and knows
 nothing of GPUI: a `Query` (case-folded term; a plain case-insensitive
-substring match, no patterns), a `Scan` over a list of sources (one
-conversation or server log, or every one of them) that the caller advances with
-`step(budget)` in slices of a bounded number of messages, and `Hit`s that name a
+substring match, no patterns; the text is read once front to back, Knuth-Morris-Pratt,
+so repeated characters in a long line cost no more than any other text), a
+`Scan` over a list of sources (one conversation or server log, or every one of
+them) that the caller advances with `step(budget)` in slices bounded by a cost
+(a message costs 1 plus its length in 64-byte units, so long lines use up the
+slice sooner), and `Hit`s that name a
 log and a `Message::sequence`, never a row index. A scan resumes each log by
 sequence, so lines that arrive, are trimmed or inserted above between slices are
 neither skipped nor read twice, and a log that vanished is skipped. Hits are
@@ -1859,23 +1862,32 @@ single row above the main log inside its pane, so the log is pushed down, not
 covered, and keeps its scroll position (the log list is bottom-anchored). It
 slides in over 120 ms. Ctrl+F (Cmd+F on macOS) or the toolbar's magnifier call
 the same `open_search`; with the bar open they focus the field. On Linux with
-the Emacs key theme a focused text input keeps Ctrl+F as "cursor right", since
-its binding is more specific; from the log it still opens the bar. The field is
+the Emacs key theme Ctrl+F stays "cursor right" in text inputs: a binding
+without a context outranks the input's, so under that theme the bar opens with
+F3 instead (`themed_bindings`). The field is
 a `TextInput`; the bar takes over Enter (next), Shift+Enter (previous), Up/Down,
 Ctrl+Enter and Tab so none reaches the draft, and Esc closes the bar and
 returns focus to the draft. The found line stays where it is on close.
 
 The field's change notifications start a new scan unless the input method is
 still composing (`TextInput::is_composing`), so a term is searched once it is
-committed. A scan starts after a 120 ms pause, reads 20,000 messages per slice
-on the executor, and a new term replaces the old task, so an old scan can never
-overwrite a newer one. When a scan finishes it checks `search::revision` (newest
-sequence and total retained lines, plus the selection for the "this channel"
-scope); if that changed, it scans again, so counts follow new lines, and while a
-scan runs nothing else is started. The first hit is the nearest one at or after
+committed (`TextInput::unmark_text` and losing focus while composing notify
+too). A scan starts after a 120 ms pause, reads a budget of 20,000 cost units
+per slice on the executor, and a new term replaces the old task, so an old scan
+can never overwrite a newer one. A finished scan is published at once: the
+count, the first hit and the jump do not wait for the logs to be quiet. Then
+`search::revision` (for the "this channel" scope the first and last sequence and
+length of that log only, plus the selection; for "all" the newest sequence and
+total retained lines) is compared with the one the scan began under, and if it
+changed a second scan (`pending`) is started after 500 ms; when it is done it
+replaces the shown one, so counts follow new lines at a few reads a second at
+most and a busy channel cannot keep the result at "…". Hits whose line has been
+trimmed meanwhile are skipped by Next and Previous. The first hit is the nearest one at or after
 the previous position (else the newest); Next and Previous wrap around.
 Moving to a hit in another conversation or a server log selects it with
-`dispatch_keeping_focus` and scrolls with `LogList::reveal_sequence`; hits
+`dispatch_keeping_focus` and scrolls the line to the top of the log with
+`LogList::scroll_to_sequence` (no rows are kept above it: a tall row above
+could push the match out of view); hits
 whose line is gone are skipped. The scope is "this channel" (the log of the
 selected channel, private conversation or, on a server tab, "this log") or
 "all" (every channel, private conversation and server log in memory). While the
