@@ -6,6 +6,7 @@ pub mod avatars;
 pub mod links;
 pub mod notifications;
 pub mod own_avatar;
+pub mod search;
 pub mod timeline;
 
 use std::{
