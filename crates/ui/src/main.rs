@@ -953,6 +953,14 @@ impl ChatWindow {
         let Some(network) = self.state.selected_network() else {
             return app.into();
         };
+        // Without a connection the server and channel names would suggest
+        // something that can be switched to, so show the state instead.
+        if matches!(
+            self.state.status(network.id),
+            None | Some(ConnectionStatus::Disconnected(_))
+        ) {
+            return format!("{} — {app}", self.i18n.text("title_not_connected"));
+        }
         let network_name = self.network_label(network);
         match self.state.selected_channel() {
             Some(channel) => {

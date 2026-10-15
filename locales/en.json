@@ -287,6 +287,7 @@
   "status_connected": "Connected",
   "status_disconnected": "Disconnected: {reason}",
   "status_unknown": "Unknown connection state",
+  "title_not_connected": "Not connected",
   "event_transport_connected": "Connection established; registering.",
   "event_registered": "Registered as {nickname}.",
   "event_joined": "Joined {channel}.",
