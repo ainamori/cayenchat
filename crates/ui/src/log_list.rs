@@ -168,15 +168,6 @@ impl LogList {
         }
     }
 
-    /// Scrolls so the row with `sequence` is near the top with `context`
-    /// rows above it; a line the list does not hold is ignored. Used to
-    /// bring a search hit into view.
-    pub fn reveal_sequence(&mut self, sequence: u64, context: usize) {
-        if let Ok(index) = self.sequences.binary_search(&sequence) {
-            self.scroll_to_row(self.prefix + index.saturating_sub(context), px(0.));
-        }
-    }
-
     /// How many message rows lie above row `visible_start` (the first row a
     /// scroll event reports as visible).
     pub fn message_rows_above(&self, visible_start: usize) -> usize {
@@ -235,6 +226,18 @@ mod tests {
 
         log.sync(0, &[]);
         assert_eq!(log.state.item_count(), 0);
+    }
+
+    #[test]
+    fn a_search_hit_goes_to_the_top_whatever_the_rows_above_it_are() {
+        let mut log = LogList::new();
+        log.sync(1, &[3, 7, 9, 10, 11]);
+        log.scroll_to_sequence(10);
+        let top = log.state.logical_scroll_top();
+        assert_eq!((top.item_ix, top.offset_in_item), (1 + 3, px(0.)));
+        // A line the list no longer holds leaves the position alone.
+        log.scroll_to_sequence(8);
+        assert_eq!(log.state.logical_scroll_top().item_ix, 4);
     }
 
     #[test]

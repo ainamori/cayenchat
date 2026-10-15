@@ -42,17 +42,36 @@ pub enum Scope {
 }
 
 /// A search term, case-folded once. Matching is a plain case-insensitive
-/// substring match (Unicode lowercase, no normalization, no patterns).
+/// substring match (Unicode lowercase, no normalization, no patterns). Text
+/// is read once, front to back (Knuth-Morris-Pratt), so a long line of
+/// repeated characters costs no more than any other line of that length.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Query {
     folded: Vec<char>,
+    /// For each prefix of `folded`, the length of its longest proper prefix
+    /// that is also a suffix.
+    fallback: Vec<usize>,
 }
 
 impl Query {
     /// `None` for an empty term, which searches nothing.
     pub fn new(term: &str) -> Option<Self> {
         let folded: Vec<char> = term.chars().flat_map(char::to_lowercase).collect();
-        (!folded.is_empty()).then_some(Self { folded })
+        if folded.is_empty() {
+            return None;
+        }
+        let mut fallback = vec![0; folded.len()];
+        let mut matched = 0;
+        for index in 1..folded.len() {
+            while matched > 0 && folded[index] != folded[matched] {
+                matched = fallback[matched - 1];
+            }
+            if folded[index] == folded[matched] {
+                matched += 1;
+            }
+            fallback[index] = matched;
+        }
+        Some(Self { folded, fallback })
     }
 
     pub fn is_match(&self, text: &str) -> bool {
@@ -70,31 +89,40 @@ impl Query {
         found
     }
 
+    /// The first match that starts at or after byte `from`. A match covers
+    /// whole characters: one that starts or ends inside the lowercase form of
+    /// a character (`\u{130}` lowercases to two) does not count.
     fn find_from(&self, text: &str, from: usize) -> Option<Range<usize>> {
-        let first = self.folded[0];
-        text[from..].char_indices().find_map(|(offset, ch)| {
-            // Most characters are rejected here without a second look.
-            if ch.to_lowercase().next() != Some(first) {
-                return None;
-            }
-            let start = from + offset;
-            self.match_at(text, start).map(|end| start..end)
-        })
-    }
-
-    /// The end of the match that starts at `start`. A match covers whole
-    /// characters: one whose lowercase form is longer than what is left of
-    /// the term does not match.
-    fn match_at(&self, text: &str, start: usize) -> Option<usize> {
-        let mut wanted = self.folded.iter();
-        for (offset, ch) in text[start..].char_indices() {
-            for lower in ch.to_lowercase() {
-                if wanted.next() != Some(&lower) {
-                    return None;
+        let wanted = self.folded.len();
+        let mut matched = 0;
+        for (offset, ch) in text[from..].char_indices() {
+            let mut lower = ch.to_lowercase().peekable();
+            while let Some(folded) = lower.next() {
+                while matched > 0 && (matched == wanted || self.folded[matched] != folded) {
+                    matched = self.fallback[matched - 1];
+                }
+                if self.folded[matched] == folded {
+                    matched += 1;
+                }
+                if matched == wanted && lower.peek().is_none() {
+                    let end = from + offset + ch.len_utf8();
+                    if let Some(start) = self.start_of_match(text, from, end) {
+                        return Some(start..end);
+                    }
                 }
             }
-            if wanted.as_slice().is_empty() {
-                return Some(start + offset + ch.len_utf8());
+        }
+        None
+    }
+
+    /// Where the match that ends at byte `end` begins, when it begins on a
+    /// character boundary of the folded text and not before `from`.
+    fn start_of_match(&self, text: &str, from: usize, end: usize) -> Option<usize> {
+        let mut remaining = self.folded.len();
+        for (start, ch) in text[from..end].char_indices().rev() {
+            remaining = remaining.checked_sub(ch.to_lowercase().count())?;
+            if remaining == 0 {
+                return Some(from + start);
             }
         }
         None
@@ -120,9 +148,23 @@ pub fn hit_message(state: &AppState, hit: Hit) -> Option<&Message> {
     Some(&messages[index])
 }
 
-/// A cheap value that changes whenever a retained log gained, lost or
-/// received lines, to tell a finished search that it is out of date.
-pub fn revision(state: &AppState) -> (u64, usize) {
+/// A cheap value that changes whenever a log `scope` covers gained or lost
+/// lines, to tell a finished search that it is out of date. Lines in other
+/// logs do not change it for [`Scope::Selected`].
+pub fn revision(state: &AppState, scope: Scope) -> (u64, u64, usize) {
+    if scope == Scope::Selected {
+        let source = match state.selection() {
+            Selection::Channel(id) => Some(Source::Conversation(id)),
+            Selection::Server(network) => Some(Source::Server(network)),
+            Selection::None => None,
+        };
+        let messages = source.map_or(&[][..], |source| messages(state, source));
+        return (
+            messages.first().map_or(0, |message| message.sequence),
+            messages.last().map_or(0, |message| message.sequence),
+            messages.len(),
+        );
+    }
     let conversations: usize = state
         .conversations()
         .iter()
@@ -133,7 +175,13 @@ pub fn revision(state: &AppState) -> (u64, usize) {
         .iter()
         .map(|network| state.server_messages(network.id).len())
         .sum();
-    (state.latest_sequence(), conversations + servers)
+    (0, state.latest_sequence(), conversations + servers)
+}
+
+/// What reading `message` costs against a step's budget: one unit, plus one
+/// per 64 bytes of text.
+fn message_cost(message: &Message) -> usize {
+    1 + message.text.len() / 64
 }
 
 /// A search in progress. Advance it with [`Scan::step`] until it is done;
@@ -195,9 +243,11 @@ impl Scan {
         &self.hits
     }
 
-    /// Reads at most `budget` more messages. Returns whether the scan is
-    /// done. A log that changed since the last step is read from where it
-    /// left off by sequence, so nothing is read twice or skipped.
+    /// Reads more messages until `budget` is spent: a message costs
+    /// [`message_cost`], so long lines count for more than short ones. Returns
+    /// whether the scan is done. A log that changed since the last step is
+    /// read from where it left off by sequence, so nothing is read twice or
+    /// skipped.
     pub fn step(&mut self, state: &AppState, mut budget: usize) -> bool {
         let before = self.hits.len();
         while self.cursor < self.sources.len() && budget > 0 {
@@ -210,7 +260,7 @@ impl Scan {
                     finished_source = false;
                     break;
                 }
-                budget -= 1;
+                budget = budget.saturating_sub(message_cost(message));
                 if !self.query.is_match(&message.text) {
                     continue;
                 }
@@ -318,6 +368,35 @@ mod tests {
         assert!(!query.is_match(&"a".repeat(49)));
         assert!(query.is_match(&"a".repeat(50)));
         assert!(!query.is_match(""));
+    }
+
+    #[test]
+    fn matching_is_linear_on_repeated_text_and_finds_overlapping_prefixes() {
+        // Restarting from every position would take minutes here.
+        let text = "a".repeat(200_000);
+        let query = Query::new(&format!("{}b", "a".repeat(2_000))).unwrap();
+        let start = std::time::Instant::now();
+        assert!(!query.is_match(&text));
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        let query = Query::new("aab").unwrap();
+        assert_eq!(query.ranges("aaaab aab"), vec![2..5, 6..9]);
+        let query = Query::new("abab").unwrap();
+        assert_eq!(query.ranges("ababab"), vec![0..4]);
+        assert_eq!(query.ranges("xababab abab"), vec![1..5, 8..12]);
+    }
+
+    #[test]
+    fn a_scan_step_costs_more_for_long_lines() {
+        let (mut state, a, _) = state_with_two_channels();
+        for _ in 0..4 {
+            state.append_conversation_activity(a, format!("{} needle", "x".repeat(640)));
+        }
+        let mut scan = Scan::new(&state, Scope::All, Query::new("needle").unwrap());
+        // Each line costs 11 units, so a budget of 15 reads two per step.
+        assert!(!scan.step(&state, 15));
+        assert_eq!(scan.hits().len(), 2);
+        while !scan.step(&state, 15) {}
+        assert_eq!(scan.hits().len(), 4);
     }
 
     #[test]
@@ -455,9 +534,17 @@ mod tests {
     #[test]
     fn revision_changes_with_added_lines() {
         let (mut state, a, _) = state_with_two_channels();
-        let before = revision(&state);
+        state.dispatch(crate::Command::SelectChannel(a));
+        let all = revision(&state, Scope::All);
+        let selected = revision(&state, Scope::Selected);
         state.append_conversation_activity(a, "x".into());
-        assert_ne!(revision(&state), before);
+        assert_ne!(revision(&state, Scope::All), all);
+        assert_ne!(revision(&state, Scope::Selected), selected);
+        // Another log's lines leave a search of the selected one alone.
+        let (_, b) = (a, state.conversations()[1].id);
+        let selected = revision(&state, Scope::Selected);
+        state.append_conversation_activity(b, "y".into());
+        assert_eq!(revision(&state, Scope::Selected), selected);
     }
 }
 
@@ -488,7 +575,14 @@ mod measurement {
                 );
             }
         }
-        for term in ["zzz", "Ordinary", "こんにちは"] {
+        // Long lines of one repeated character, the worst case for a naive
+        // matcher: 100 lines of 16,000 characters against a 512-character term.
+        let id = state.channel_id(NetworkId(1), "#c0").unwrap();
+        for _ in 0..100 {
+            state.append_conversation_activity(id, "a".repeat(16_000));
+        }
+        let repeated = format!("{}b", "a".repeat(512));
+        for term in ["zzz", "Ordinary", "こんにちは", repeated.as_str()] {
             let start = std::time::Instant::now();
             let mut scan = Scan::new(&state, Scope::All, Query::new(term).unwrap());
             let mut slices = 0;

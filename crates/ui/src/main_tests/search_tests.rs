@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-use super::{ChatWindow, FindInLog, Worker, shortcut_bindings};
+use super::{ChatWindow, FindInLog, Worker, themed_bindings};
 use cayenchat_app::{Kind, Selection, search::Scope};
 use cayenchat_irc_core::Event;
 use cayenchat_model::{NetworkId, Provenance};
@@ -14,6 +14,13 @@ const FIND: &str = if cfg!(target_os = "macos") {
 };
 
 fn open_chat(cx: &mut TestAppContext) -> (Entity<ChatWindow>, &mut VisualTestContext) {
+    open_chat_with_keys(cx, false)
+}
+
+fn open_chat_with_keys(
+    cx: &mut TestAppContext,
+    emacs: bool,
+) -> (Entity<ChatWindow>, &mut VisualTestContext) {
     cx.update(|cx| {
         crate::secrets::install_memory(cx);
         crate::theme::apply(
@@ -21,10 +28,11 @@ fn open_chat(cx: &mut TestAppContext) -> (Entity<ChatWindow>, &mut VisualTestCon
             &cayenchat_storage::Appearance::default(),
             cx,
         );
-        crate::input::bind_keys(false, cx);
-        cx.bind_keys(shortcut_bindings(
+        crate::input::bind_keys(emacs, cx);
+        cx.bind_keys(themed_bindings(
             ChannelNumberModifier::Ctrl,
             &Default::default(),
+            emacs,
         ));
     });
     let settings = crate::settings_with_channels("#a,#b");
@@ -289,4 +297,86 @@ fn lines_that_arrive_or_vanish_never_misdirect_the_search(cx: &mut TestAppContex
         chat.read_with(cx, |chat, _| chat.state.selection()),
         Selection::Channel(_)
     ));
+}
+
+#[gpui::test]
+fn lines_arriving_all_the_time_do_not_hold_the_result_back(cx: &mut TestAppContext) {
+    let (chat, cx) = open_chat(cx);
+    cx.simulate_keystrokes(FIND);
+    cx.simulate_input("needle");
+    // A busy channel: a new line every 100 ms while the search settles.
+    for n in 0..30 {
+        chat.update(cx, |chat, cx| {
+            chat.state.append_channel_message(
+                NetworkId(1),
+                "#a",
+                "bob",
+                &format!("chatter {n}"),
+                Kind::Message,
+                Provenance::Live,
+            );
+            cx.notify();
+        });
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+    }
+    let (count, current, _) = search_state(&chat, cx);
+    assert_eq!(count, 2);
+    assert!(current.is_some(), "the hit was chosen while lines arrived");
+    // A line in another channel does not even restart a search of this one.
+    let revision = chat.read_with(cx, |chat, _| chat.search_revision(Scope::Selected));
+    chat.update(cx, |chat, cx| {
+        chat.state.append_channel_message(
+            NetworkId(1),
+            "#b",
+            "bob",
+            "needle elsewhere",
+            Kind::Message,
+            Provenance::Live,
+        );
+        cx.notify();
+    });
+    assert_eq!(
+        chat.read_with(cx, |chat, _| chat.search_revision(Scope::Selected)),
+        revision
+    );
+}
+
+#[gpui::test]
+fn ending_a_composition_without_new_text_searches_what_is_shown(cx: &mut TestAppContext) {
+    let (chat, cx) = open_chat(cx);
+    chat.update_in(cx, |chat, window, cx| {
+        chat.open_search(&FindInLog, window, cx)
+    });
+    let input = chat.read_with(cx, |chat, _| chat.search.as_ref().unwrap().input().clone());
+    input.update_in(cx, |input, window, cx| {
+        input.replace_and_mark_text_in_range(None, "needle", None, window, cx)
+    });
+    settle(cx);
+    assert_eq!(search_state(&chat, cx).2, "");
+    input.update_in(cx, |input, window, cx| input.unmark_text(window, cx));
+    settle(cx);
+    assert_eq!(search_state(&chat, cx).2, "needle");
+    assert_eq!(search_state(&chat, cx).0, 2);
+}
+
+#[cfg(target_os = "linux")]
+#[gpui::test]
+fn the_emacs_key_theme_keeps_ctrl_f_for_the_cursor_and_opens_search_with_f3(
+    cx: &mut TestAppContext,
+) {
+    let (chat, cx) = open_chat_with_keys(cx, true);
+    cx.simulate_input("ab");
+    cx.simulate_keystrokes("ctrl-a ctrl-f");
+    assert!(chat.read_with(cx, |chat, _| chat.search.is_none()));
+    cx.simulate_input("X");
+    cx.update(|_, cx| {
+        chat.read_with(cx, |chat, cx| {
+            assert_eq!(chat.inputs[&chat.state.selection()].read(cx).text(), "aXb");
+        });
+    });
+    cx.simulate_keystrokes("f3");
+    assert!(chat.read_with(cx, |chat, _| {
+        chat.search.as_ref().is_some_and(|s| s.is_open())
+    }));
 }

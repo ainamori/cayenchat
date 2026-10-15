@@ -27,12 +27,14 @@ use crate::{
 pub const BAR_HEIGHT: f32 = 36.;
 /// Pause after the last change of the term before the logs are read.
 const DEBOUNCE: Duration = Duration::from_millis(120);
+/// Pause before the logs are read again after they changed, so a busy
+/// channel costs a few reads a second at most.
+const RESCAN: Duration = Duration::from_millis(500);
 /// How long the bar takes to slide into place.
 const SLIDE: Duration = Duration::from_millis(120);
-/// Messages read per slice, so one slice stays a few milliseconds.
+/// Budget per slice (see `Scan::step`), so one slice stays a few
+/// milliseconds: 20,000 short messages or about 1.3 MB of text.
 const SLICE: usize = 20_000;
-/// Lines context kept above a hit when scrolling to it.
-const CONTEXT_ROWS: usize = 2;
 
 /// Search state of one chat window. Created when the bar is first opened.
 pub struct LogSearch {
@@ -43,8 +45,14 @@ pub struct LogSearch {
     /// finished) and its matcher; `None` for an empty field.
     term: String,
     query: Option<Query>,
+    /// The search shown: its hits are what the count and the arrows use, from
+    /// the moment it is done until a newer one replaces it.
     scan: Option<Scan>,
-    /// What the logs looked like when `scan` began.
+    /// A second read of the logs after they changed. It takes the place of
+    /// `scan` when done, so lines arriving all the time never leave the
+    /// count unfinished.
+    pending: Option<Scan>,
+    /// What the logs looked like when the newest scan began.
     revision: Option<Revision>,
     /// The line the search stands on.
     current: Option<Hit>,
@@ -56,7 +64,7 @@ pub struct LogSearch {
     _input_changed: Subscription,
 }
 
-type Revision = ((u64, usize), Option<Selection>);
+type Revision = ((u64, u64, usize), Option<Selection>);
 
 impl LogSearch {
     /// The matcher to draw highlights with and the line to emphasize.
@@ -119,6 +127,7 @@ impl ChatWindow {
                 term: String::new(),
                 query: None,
                 scan: None,
+                pending: None,
                 revision: None,
                 current: None,
                 jump_pending: false,
@@ -160,9 +169,11 @@ impl ChatWindow {
         };
         search.open = false;
         search.scan = None;
+        search.pending = None;
         search.revision = None;
         search.task = None;
         search.running = false;
+        search.jump_pending = false;
         if let Some(input) = self.inputs.get(&self.state.selection()) {
             window.focus(&input.focus_handle(cx));
         }
@@ -203,9 +214,9 @@ impl ChatWindow {
         }
     }
 
-    fn search_revision(&self, scope: Scope) -> Revision {
+    pub(crate) fn search_revision(&self, scope: Scope) -> Revision {
         (
-            search::revision(&self.state),
+            search::revision(&self.state, scope),
             (scope == Scope::Selected).then(|| self.state.selection()),
         )
     }
@@ -219,6 +230,7 @@ impl ChatWindow {
         };
         search.task = None;
         search.running = false;
+        search.pending = None;
         let Some(query) = search.query.clone() else {
             search.scan = None;
             search.revision = None;
@@ -235,10 +247,21 @@ impl ChatWindow {
         search.scan = Some(scan);
         search.revision = Some(revision);
         search.jump_pending |= jump;
+        self.search_drive(DEBOUNCE, window, cx);
+    }
+
+    /// Runs the open scans in slices from the executor, after `delay`, until
+    /// the logs are read and no longer ahead of the count.
+    fn search_drive(&mut self, delay: Duration, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
         search.running = true;
         search.task = Some(cx.spawn_in(window, async move |this, cx| {
+            let mut delay = delay;
             loop {
-                cx.background_executor().timer(DEBOUNCE).await;
+                cx.background_executor().timer(delay).await;
+                delay = RESCAN;
                 loop {
                     let Ok(done) = this.update_in(cx, |this, _, cx| this.search_step(cx)) else {
                         return;
@@ -261,40 +284,36 @@ impl ChatWindow {
         cx.notify();
     }
 
-    /// Reads one slice; returns whether the scan is done.
+    /// Reads one slice of the newest scan; returns whether it is done. A
+    /// finished re-read replaces the scan shown.
     fn search_step(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(scan) = self.search.as_mut().and_then(|search| search.scan.as_mut()) else {
+        let Some(search) = self.search.as_mut() else {
             return true;
         };
-        let done = scan.step(&self.state, SLICE);
+        let done = match (search.pending.as_mut(), search.scan.as_mut()) {
+            (Some(pending), _) => {
+                let done = pending.step(&self.state, SLICE);
+                if done {
+                    search.scan = search.pending.take();
+                }
+                done
+            }
+            (None, Some(scan)) => scan.step(&self.state, SLICE),
+            (None, None) => true,
+        };
         cx.notify();
         done
     }
 
-    /// A scan finished. Returns whether the logs changed meanwhile, so the
-    /// driver reads them again.
+    /// The scan shown is complete: settle on a hit (and go to it when the
+    /// user asked for a search), then, when the logs have changed since the
+    /// scan began, start a re-read in the background. Returns whether the
+    /// driver goes on with it. The hits are published first, so a log that
+    /// keeps changing cannot hold the result back.
     fn search_finish(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(search) = self.search.as_ref() else {
-            return false;
-        };
-        let scope = search.scope;
-        if search.revision != Some(self.search_revision(scope)) {
-            let query = search.query.clone();
-            let Some(query) = query else {
-                return false;
-            };
-            let scan = Scan::new(&self.state, scope, query);
-            let revision = self.search_revision(scope);
-            if let Some(search) = self.search.as_mut() {
-                search.scan = Some(scan);
-                search.revision = Some(revision);
-            }
-            return true;
-        }
         let Some(search) = self.search.as_mut() else {
             return false;
         };
-        search.running = false;
         let hits = search.scan.as_ref().map_or(&[][..], |scan| scan.hits());
         let still_there = search
             .current
@@ -308,10 +327,34 @@ impl ChatWindow {
             }
         }
         cx.notify();
-        false
+        self.search_start_reread()
     }
 
-    /// Restarts a finished search whose logs have changed since, so the
+    /// Begins a re-read of the logs when they changed since the newest scan
+    /// began. Returns whether it did.
+    fn search_start_reread(&mut self) -> bool {
+        let Some(search) = self.search.as_ref() else {
+            return false;
+        };
+        let scope = search.scope;
+        let revision = self.search_revision(scope);
+        let Some(search) = self.search.as_mut() else {
+            return false;
+        };
+        let Some(query) = search.query.clone() else {
+            search.running = false;
+            return false;
+        };
+        if search.revision == Some(revision) {
+            search.running = false;
+            return false;
+        }
+        search.revision = Some(revision);
+        search.pending = Some(Scan::new(&self.state, scope, query));
+        true
+    }
+
+    /// Re-reads a finished search whose logs have changed since, so the
     /// count follows new lines. Called while drawing; cheap when nothing
     /// changed.
     pub(crate) fn search_refresh_if_stale(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -321,8 +364,8 @@ impl ChatWindow {
         if !search.open || search.query.is_none() || search.running {
             return;
         }
-        if search.revision != Some(self.search_revision(search.scope)) {
-            self.search_begin(false, window, cx);
+        if self.search_start_reread() {
+            self.search_drive(RESCAN, window, cx);
         }
     }
 
@@ -387,7 +430,9 @@ impl ChatWindow {
         }
         self.sync_log_lists();
         if let Some(list) = self.main_lists.get_mut(&selection) {
-            list.reveal_sequence(hit.sequence, CONTEXT_ROWS);
+            // The hit's own row goes to the top: rows above it may be taller
+            // than the log and would push the match out of view.
+            list.scroll_to_sequence(hit.sequence);
         }
         cx.notify();
     }
