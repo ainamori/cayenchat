@@ -4082,6 +4082,64 @@ fn quit_question_box_is_no_wider_than_its_content(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn quit_question_keeps_wrapped_connected_text_inside_its_box(cx: &mut TestAppContext) {
+    use cayenchat_irc_core::{Connection, ConnectionConfig};
+
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        crate::apply_shortcuts(crate::ShortcutPrefs::default(), cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let mut settings = crate::settings_with_channels("#a");
+    settings.language = cayenchat_storage::Language::English;
+    settings.confirm_quit = true;
+    let (chat, cx) =
+        cx.add_window_view(|window, cx| ChatWindow::with_settings(settings, None, window, cx));
+    // A connection to a local listener that never registers: only the
+    // "connected" wording of the question depends on it.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut config = ConnectionConfig::tls("127.0.0.1".into(), "alice".into(), Vec::new());
+    config.port = listener.local_addr().unwrap().port();
+    config.use_tls = false;
+    let connection = Connection::connect(config).unwrap();
+    chat.update(cx, |chat, _| {
+        chat.sessions.get_mut(&NetworkId(1)).unwrap().irc = Some(connection);
+    });
+    // Narrow enough that the long connected detail cannot stay on one line.
+    cx.simulate_resize(gpui::size(gpui::px(300.), gpui::px(400.)));
+    cx.run_until_parked();
+    cx.dispatch_action(super::Quit);
+    settle(cx);
+
+    let boxed = cx.debug_bounds("quit-dialog-box").unwrap();
+    let detail = cx.debug_bounds("quit-dialog-detail").unwrap();
+    let cancel = cx.debug_bounds("quit-dialog-cancel").unwrap();
+    let confirm = cx.debug_bounds("quit-dialog-confirm").unwrap();
+    let overlay = cx.debug_bounds("quit-dialog").unwrap();
+    assert!(
+        boxed.size.width <= overlay.size.width,
+        "{:?} in {:?}",
+        boxed.size,
+        overlay.size
+    );
+    // The text wrapped onto several lines, and the box grew with it.
+    assert!(detail.size.height > gpui::px(30.), "{:?}", detail.size);
+    for (name, inner) in [("detail", detail), ("cancel", cancel), ("confirm", confirm)] {
+        assert!(
+            inner.left() >= boxed.left()
+                && inner.right() <= boxed.right()
+                && inner.top() >= boxed.top()
+                && inner.bottom() <= boxed.bottom(),
+            "{name} {inner:?} outside {boxed:?}"
+        );
+    }
+}
+
+#[gpui::test]
 fn quit_question_sits_near_the_top_of_the_window(cx: &mut TestAppContext) {
     let (_chat, cx) = quit_dialog_window(cx);
     let overlay = cx.debug_bounds("quit-dialog").unwrap();
