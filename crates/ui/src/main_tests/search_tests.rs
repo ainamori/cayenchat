@@ -1,0 +1,292 @@
+// SPDX-License-Identifier: GPL-3.0-only
+use super::{ChatWindow, FindInLog, Worker, shortcut_bindings};
+use cayenchat_app::{Kind, Selection, search::Scope};
+use cayenchat_irc_core::Event;
+use cayenchat_model::{NetworkId, Provenance};
+use cayenchat_storage::ChannelNumberModifier;
+use gpui::{Entity, EntityInputHandler as _, Focusable as _, TestAppContext, VisualTestContext};
+use std::time::Duration;
+
+const FIND: &str = if cfg!(target_os = "macos") {
+    "cmd-f"
+} else {
+    "ctrl-f"
+};
+
+fn open_chat(cx: &mut TestAppContext) -> (Entity<ChatWindow>, &mut VisualTestContext) {
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        crate::theme::apply(
+            cayenchat_storage::ThemeMode::Light,
+            &cayenchat_storage::Appearance::default(),
+            cx,
+        );
+        crate::input::bind_keys(false, cx);
+        cx.bind_keys(shortcut_bindings(
+            ChannelNumberModifier::Ctrl,
+            &Default::default(),
+        ));
+    });
+    let settings = crate::settings_with_channels("#a,#b");
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    chat.update(cx, |chat, cx| {
+        let mut events = vec![Event::Registered {
+            nickname: "me".into(),
+        }];
+        for channel in ["#a", "#b"] {
+            events.push(Event::Joined {
+                channel: channel.into(),
+            });
+        }
+        chat.handle_events(NetworkId(1), events, Worker::Running, cx);
+        let first = chat.state.conversations()[0].id;
+        chat.state
+            .dispatch(cayenchat_app::Command::SelectChannel(first));
+        for (channel, text) in [
+            ("#a", "first needle"),
+            ("#b", "NEEDLE in b"),
+            ("#a", "nothing here"),
+            ("#a", "needle and Needle again"),
+        ] {
+            chat.state.append_channel_message(
+                NetworkId(1),
+                channel,
+                "bob",
+                text,
+                Kind::Message,
+                Provenance::Live,
+            );
+        }
+        cx.notify();
+    });
+    cx.run_until_parked();
+    (chat, cx)
+}
+
+/// Lets the debounce pass and the scan finish.
+fn settle(cx: &mut VisualTestContext) {
+    cx.executor().advance_clock(Duration::from_millis(500));
+    cx.run_until_parked();
+}
+
+fn selected_name(chat: &Entity<ChatWindow>, cx: &mut VisualTestContext) -> String {
+    chat.read_with(cx, |chat, _| {
+        chat.state.selected_channel().unwrap().name.clone()
+    })
+}
+
+fn search_state(
+    chat: &Entity<ChatWindow>,
+    cx: &mut VisualTestContext,
+) -> (usize, Option<u64>, String) {
+    chat.read_with(cx, |chat, _| {
+        let search = chat.search.as_ref().unwrap();
+        (
+            search.hits().len(),
+            search.current().map(|hit| hit.sequence),
+            search.term().to_owned(),
+        )
+    })
+}
+
+#[gpui::test]
+fn the_shortcut_opens_the_bar_and_focuses_its_field_without_a_search(cx: &mut TestAppContext) {
+    let (chat, cx) = open_chat(cx);
+    assert!(chat.read_with(cx, |chat, _| chat.search.is_none()));
+    cx.simulate_keystrokes(FIND);
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        chat.read_with(cx, |chat, cx| {
+            assert!(chat.search.as_ref().is_some_and(|s| s.is_open()));
+            let input = chat.search.as_ref().unwrap().input();
+            assert!(input.focus_handle(cx).is_focused(window));
+        });
+    });
+    // Opening again keeps the field focused and does not search anything.
+    cx.simulate_keystrokes(FIND);
+    assert_eq!(search_state(&chat, cx).0, 0);
+}
+
+#[gpui::test]
+fn typing_searches_this_channel_and_enter_steps_through_hits_without_sending(
+    cx: &mut TestAppContext,
+) {
+    let (chat, cx) = open_chat(cx);
+    let before = chat.read_with(cx, |chat, _| chat.state.latest_sequence());
+    cx.simulate_keystrokes(FIND);
+    cx.simulate_input("needle");
+    settle(cx);
+    let (count, current, term) = search_state(&chat, cx);
+    assert_eq!(
+        (count, term.as_str()),
+        (2, "needle"),
+        "#b's line is not in scope"
+    );
+    // The newest hit is chosen first.
+    let hits: Vec<u64> = chat.read_with(cx, |chat, _| {
+        chat.search
+            .as_ref()
+            .unwrap()
+            .hits()
+            .iter()
+            .map(|h| h.sequence)
+            .collect()
+    });
+    assert_eq!(current, hits.last().copied());
+
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        search_state(&chat, cx).1,
+        Some(hits[0]),
+        "wraps to the first"
+    );
+    cx.simulate_keystrokes("shift-enter");
+    assert_eq!(search_state(&chat, cx).1, Some(hits[1]), "and back");
+    cx.simulate_keystrokes("down");
+    assert_eq!(search_state(&chat, cx).1, Some(hits[0]));
+    // Nothing was sent or added to the log.
+    assert_eq!(
+        chat.read_with(cx, |chat, _| chat.state.latest_sequence()),
+        before
+    );
+    assert_eq!(selected_name(&chat, cx), "#a");
+}
+
+#[gpui::test]
+fn a_changed_or_empty_term_updates_the_hits_and_clears_them(cx: &mut TestAppContext) {
+    let (chat, cx) = open_chat(cx);
+    cx.simulate_keystrokes(FIND);
+    cx.simulate_input("needle and");
+    settle(cx);
+    assert_eq!(search_state(&chat, cx).0, 1);
+    cx.simulate_keystrokes("backspace backspace backspace backspace");
+    settle(cx);
+    let (count, current, _) = search_state(&chat, cx);
+    assert_eq!(count, 2, "{current:?}");
+    cx.simulate_input("zzz");
+    settle(cx);
+    assert_eq!(search_state(&chat, cx), (0, None, "needlezzz".into()));
+    // Clearing empties the field and keeps focus in it.
+    chat.update_in(cx, |chat, window, cx| chat.search_clear(window, cx));
+    settle(cx);
+    assert_eq!(search_state(&chat, cx), (0, None, String::new()));
+    chat.read_with(cx, |chat, _| {
+        assert!(chat.search_ranges("needle", 0).0.is_empty());
+    });
+}
+
+#[gpui::test]
+fn all_scope_moves_to_hits_in_other_conversations(cx: &mut TestAppContext) {
+    let (chat, cx) = open_chat(cx);
+    cx.simulate_keystrokes(FIND);
+    chat.update_in(cx, |chat, window, cx| {
+        chat.search_set_scope(Scope::All, window, cx)
+    });
+    cx.simulate_input("needle");
+    settle(cx);
+    assert_eq!(search_state(&chat, cx).0, 3);
+    // The chronologically second hit is in #b.
+    cx.simulate_keystrokes("enter");
+    assert_eq!(selected_name(&chat, cx), "#a");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(selected_name(&chat, cx), "#b");
+    cx.simulate_keystrokes("shift-enter");
+    assert_eq!(selected_name(&chat, cx), "#a");
+    // Focus stays in the search field across the selection change.
+    cx.update(|window, cx| {
+        chat.read_with(cx, |chat, cx| {
+            let input = chat.search.as_ref().unwrap().input();
+            assert!(input.focus_handle(cx).is_focused(window));
+        });
+    });
+    // The matches are drawn in whichever log is shown.
+    chat.read_with(cx, |chat, _| {
+        let sequence = chat.search.as_ref().unwrap().current().unwrap().sequence;
+        let (ranges, current) = chat.search_ranges("a Needle Needle", sequence);
+        assert_eq!(ranges, vec![2..8, 9..15]);
+        assert!(current);
+    });
+}
+
+#[gpui::test]
+fn escape_closes_the_bar_and_returns_focus_to_the_draft(cx: &mut TestAppContext) {
+    let (chat, cx) = open_chat(cx);
+    cx.simulate_keystrokes(FIND);
+    cx.simulate_input("needle");
+    settle(cx);
+    cx.simulate_keystrokes("escape");
+    cx.update(|window, cx| {
+        chat.read_with(cx, |chat, cx| {
+            assert!(!chat.search.as_ref().is_some_and(|s| s.is_open()));
+            let draft = &chat.inputs[&chat.state.selection()];
+            assert!(draft.focus_handle(cx).is_focused(window));
+            assert_eq!(
+                draft.read(cx).text(),
+                "",
+                "the keyword never reached the draft"
+            );
+            // A closed search draws no highlights.
+            assert!(chat.search_ranges("needle", 0).0.is_empty());
+        });
+    });
+}
+
+#[gpui::test]
+fn an_unfinished_composition_is_not_searched_until_it_is_committed(cx: &mut TestAppContext) {
+    let (chat, cx) = open_chat(cx);
+    chat.update_in(cx, |chat, window, cx| {
+        chat.open_search(&FindInLog, window, cx)
+    });
+    let input = chat.read_with(cx, |chat, _| chat.search.as_ref().unwrap().input().clone());
+    input.update_in(cx, |input, window, cx| {
+        input.replace_and_mark_text_in_range(None, "ne", None, window, cx)
+    });
+    settle(cx);
+    assert_eq!(search_state(&chat, cx).2, "", "still composing");
+    input.update_in(cx, |input, window, cx| {
+        input.replace_text_in_range(None, "needle", window, cx)
+    });
+    settle(cx);
+    assert_eq!(search_state(&chat, cx).2, "needle");
+    assert_eq!(search_state(&chat, cx).0, 2);
+}
+
+#[gpui::test]
+fn lines_that_arrive_or_vanish_never_misdirect_the_search(cx: &mut TestAppContext) {
+    let (chat, cx) = open_chat(cx);
+    cx.simulate_keystrokes(FIND);
+    cx.simulate_input("needle");
+    settle(cx);
+    let (_, current, _) = search_state(&chat, cx);
+    // A new matching line arrives: the count follows, the position stays.
+    chat.update(cx, |chat, cx| {
+        chat.state.append_channel_message(
+            NetworkId(1),
+            "#a",
+            "bob",
+            "another NEEDLE",
+            Kind::Message,
+            Provenance::Live,
+        );
+        cx.notify();
+    });
+    settle(cx);
+    let (count, now, _) = search_state(&chat, cx);
+    assert_eq!(count, 3);
+    assert_eq!(now, current);
+    // The conversation of the current hit goes away: stepping is a no-op or
+    // lands on a line that still exists, never a panic.
+    chat.update_in(cx, |chat, window, cx| {
+        let id = chat.state.conversations()[1].id;
+        chat.state.close_private(id);
+        chat.search_move(true, window, cx);
+        chat.search_move(false, window, cx);
+    });
+    settle(cx);
+    assert!(matches!(
+        chat.read_with(cx, |chat, _| chat.state.selection()),
+        Selection::Channel(_)
+    ));
+}

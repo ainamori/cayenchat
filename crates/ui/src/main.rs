@@ -25,6 +25,7 @@ mod key_recorder;
 mod list_keys;
 mod localization;
 mod log_list;
+mod log_search;
 mod member_selection;
 mod menu_bar;
 mod notifier;
@@ -205,6 +206,10 @@ actions!(
         ToggleMenuBar,
         CopyDiagnostics,
         CopyLogSelection,
+        FindInLog,
+        CloseSearch,
+        SearchNext,
+        SearchPrevious,
         FocusNextField,
         FocusPreviousField,
         Quit
@@ -630,6 +635,8 @@ struct ChatWindow {
     /// view, made when it is first drawn.
     toolbar_shown: bool,
     toolbar: Option<AnyView>,
+    /// The log search bar (#404), made when it is first opened.
+    search: Option<log_search::LogSearch>,
     appearance: Appearance,
     theme_mode: ThemeMode,
     i18n: Localizer,
@@ -1112,6 +1119,7 @@ impl ChatWindow {
             avatars: avatars::Avatars::new(saved.appearance.user_avatars),
             toolbar_shown: saved.show_toolbar,
             toolbar: None,
+            search: None,
             saved,
             i18n,
             log_focus: cx.focus_handle(),
@@ -4988,11 +4996,13 @@ fn default_time_font() -> &'static str {
 
 /// One log row's text with its styling: links underlined in the link color,
 /// shortened links on a tinted background, mentions and keywords bold in the
-/// highlight color, and the selection shaded.
+/// highlight color, search matches on a yellow background and the selection
+/// shaded.
 ///
 /// `prefix` (the sender and colon in the flowing layout) is drawn in the
 /// nickname color before `text`; every other range, and `selected`, is a
-/// byte offset into `text`.
+/// byte offset into `text`. `found` are the search matches, `found_current`
+/// says this row is the one the search stands on.
 #[allow(clippy::too_many_arguments)] // Each is one independent set of ranges.
 fn styled_log_text(
     prefix: &str,
@@ -5001,18 +5011,27 @@ fn styled_log_text(
     chips: &[std::ops::Range<usize>],
     decoded: &[std::ops::Range<usize>],
     highlights: &[std::ops::Range<usize>],
+    found: &[std::ops::Range<usize>],
+    found_current: bool,
     selected: Option<std::ops::Range<usize>>,
     theme: &Theme,
 ) -> StyledText {
     let shift = prefix.len();
     let moved = |range: &std::ops::Range<usize>| range.start + shift..range.end + shift;
+    let found: Vec<_> = found.iter().map(moved).collect();
     let urls: Vec<_> = urls.iter().map(|(range, _)| moved(range)).collect();
     let chips: Vec<_> = chips.iter().map(moved).collect();
     let decoded: Vec<_> = decoded.iter().map(moved).collect();
     let highlights: Vec<_> = highlights.iter().map(moved).collect();
     let selected = selected.as_ref().map(moved);
     let mut boundaries = vec![0, shift, shift + text.len()];
-    for range in urls.iter().chain(&highlights).chain(&chips).chain(&decoded) {
+    for range in urls
+        .iter()
+        .chain(&highlights)
+        .chain(&chips)
+        .chain(&decoded)
+        .chain(&found)
+    {
         boundaries.extend([range.start, range.end]);
     }
     if let Some(range) = &selected {
@@ -5038,41 +5057,67 @@ fn styled_log_text(
         let is_decoded = decoded
             .iter()
             .any(|span| span.start <= range.start && range.end <= span.end);
-        (is_prefix || is_url || is_chip || is_decoded || is_selected || is_highlight).then_some((
-            range,
-            HighlightStyle {
-                color: if is_prefix {
-                    Some(theme.nickname.into())
-                } else if is_url {
-                    Some(theme.panes.log_link.into())
-                } else {
-                    is_highlight.then_some(theme.panes.highlight.into())
+        let is_found = found
+            .iter()
+            .any(|span| span.start <= range.start && range.end <= span.end);
+        (is_prefix || is_url || is_chip || is_decoded || is_selected || is_highlight || is_found)
+            .then_some((
+                range,
+                HighlightStyle {
+                    color: if is_prefix {
+                        Some(theme.nickname.into())
+                    } else if is_url {
+                        Some(theme.panes.log_link.into())
+                    } else {
+                        is_highlight.then_some(theme.panes.highlight.into())
+                    },
+                    font_weight: is_highlight.then_some(FontWeight::BOLD),
+                    underline: is_url.then_some(UnderlineStyle {
+                        color: Some(theme.panes.log_link.into()),
+                        thickness: px(1.),
+                        wavy: false,
+                    }),
+                    background_color: if is_selected {
+                        Some(theme.selected.into())
+                    } else if is_found {
+                        Some(search_match_color(found_current).into())
+                    } else if is_decoded {
+                        // Neutral, so it is not mistaken for a link.
+                        Some(
+                            Rgba {
+                                a: 0.22,
+                                ..theme.text_secondary
+                            }
+                            .into(),
+                        )
+                    } else {
+                        link_background(theme, is_url, is_chip).map(Into::into)
+                    },
+                    ..Default::default()
                 },
-                font_weight: is_highlight.then_some(FontWeight::BOLD),
-                underline: is_url.then_some(UnderlineStyle {
-                    color: Some(theme.panes.log_link.into()),
-                    thickness: px(1.),
-                    wavy: false,
-                }),
-                background_color: if is_selected {
-                    Some(theme.selected.into())
-                } else if is_decoded {
-                    // Neutral, so it is not mistaken for a link.
-                    Some(
-                        Rgba {
-                            a: 0.22,
-                            ..theme.text_secondary
-                        }
-                        .into(),
-                    )
-                } else {
-                    link_background(theme, is_url, is_chip).map(Into::into)
-                },
-                ..Default::default()
-            },
-        ))
+            ))
     });
     StyledText::new(format!("{prefix}{text}")).with_highlights(highlights)
+}
+
+/// The background of a search match: yellow, orange on the line the search
+/// stands on. Translucent, so the text stays readable in light and dark.
+fn search_match_color(current: bool) -> Rgba {
+    if current {
+        Rgba {
+            r: 1.,
+            g: 0.55,
+            b: 0.,
+            a: 0.6,
+        }
+    } else {
+        Rgba {
+            r: 1.,
+            g: 0.85,
+            b: 0.,
+            a: 0.4,
+        }
+    }
 }
 
 /// The background behind a URL in a log: the configured color for any URL,
@@ -5670,6 +5715,8 @@ impl ChatWindow {
     fn render_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme::current(cx);
         self.sync_log_lists();
+        self.search_refresh_if_stale(window, cx);
+        let search_bar = self.render_search_bar(cx);
         let selection = self.state.selection();
         let mut origin = decorations::content_origin(window);
         origin.y += self.menu_bar.height();
@@ -5761,7 +5808,14 @@ impl ChatWindow {
             .child(self.input_to_draft(&self.members_focus, cx))
             .child(panes.members.clone().cached(pane_style()));
 
-        let mut main_pane = div().flex().flex_col().flex_1().min_h_0().child(main_log);
+        // The search bar sits above the log, inside its pane.
+        let mut main_pane = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .children(search_bar)
+            .child(main_log);
         main_pane.style().flex_grow = Some(self.log_split * 2.);
         // The bottom edge of the draft row is the handle between the logs;
         // a double click restores the even split.
@@ -6452,6 +6506,7 @@ impl ChatWindow {
             .on_action(cx.listener(Self::history_previous))
             .on_action(cx.listener(Self::history_next))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::open_search))
             .when(self.can_disconnect_selected(), |d| {
                 d.on_action(cx.listener(Self::disconnect_action))
             })
@@ -6913,6 +6968,24 @@ impl ChatWindow {
                     let Some(message) = self.state.server_messages(network).get(index) else {
                         return div().into_any_element();
                     };
+                    let (found, current) = self.search_ranges(&message.text, message.sequence);
+                    let text = if found.is_empty() {
+                        message.text.clone().into_any_element()
+                    } else {
+                        styled_log_text(
+                            "",
+                            &message.text,
+                            &[],
+                            &[],
+                            &[],
+                            &[],
+                            &found,
+                            current,
+                            None,
+                            &style.theme,
+                        )
+                        .into_any_element()
+                    };
                     div()
                         .w_full()
                         .flex()
@@ -6922,7 +6995,7 @@ impl ChatWindow {
                             d.bg(style.main_alt)
                         })
                         .child(style.time(message.time))
-                        .child(div().flex_1().min_w_0().child(message.text.clone()))
+                        .child(div().flex_1().min_w_0().child(text))
                         .into_any_element()
                 }
             },
@@ -6999,6 +7072,11 @@ impl ChatWindow {
             sender_prefix(message)
         };
         let prefix_len = prefix.len();
+        let (found, found_current) = self.search_ranges(&message.text, message.sequence);
+        let found: Vec<_> = found
+            .into_iter()
+            .map(|range| compact.shown_range(range))
+            .collect();
         let styled = styled_log_text(
             &prefix,
             compact.text(),
@@ -7006,6 +7084,8 @@ impl ChatWindow {
             &chips,
             &decoded,
             &highlights,
+            &found,
+            found_current,
             selected_range,
             &style.theme,
         );
@@ -7327,6 +7407,8 @@ impl ChatWindow {
             &[],
             &decoded,
             &highlights,
+            &[],
+            false,
             None,
             &style.theme,
         );
@@ -7796,6 +7878,11 @@ fn fixed_bindings(channel_modifier: ChannelNumberModifier) -> Vec<KeyBinding> {
         KeyBinding::new("tab", FocusNextField, Some("SettingsWindow")),
         KeyBinding::new("shift-tab", FocusPreviousField, Some("SettingsWindow")),
         KeyBinding::new("secondary-,", OpenSettings, None),
+        // Under the Emacs key theme on Linux a focused text input keeps
+        // Ctrl+F as "cursor right": its binding is more specific.
+        KeyBinding::new("secondary-f", FindInLog, None),
+        KeyBinding::new("escape", CloseSearch, Some("LogSearch")),
+        KeyBinding::new("shift-enter", SearchPrevious, Some("LogSearch")),
         KeyBinding::new("secondary-shift-d", ToggleDebug, None),
         KeyBinding::new("secondary-shift-l", CopyDiagnostics, None),
         KeyBinding::new("secondary-c", CopyLogSelection, Some("MainLog")),
@@ -8206,3 +8293,7 @@ mod toolbar_tests;
 #[cfg(test)]
 #[path = "main_tests/charset_command_tests.rs"]
 mod charset_command_tests;
+
+#[cfg(test)]
+#[path = "main_tests/search_tests.rs"]
+mod search_tests;

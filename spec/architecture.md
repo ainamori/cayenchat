@@ -1834,6 +1834,56 @@ text sent when the application quits; it is written before the channels are
 reset (#389).
 `Event::Topic` carries who changed the topic and the server time for it.
 
+## Log search (#404)
+
+Incremental search over the logs the application holds in memory; saved
+history files, other clients and the server are not searched (the field's
+placeholder says "logs held in memory"). `app::search` is the engine and knows
+nothing of GPUI: a `Query` (case-folded term; a plain case-insensitive
+substring match, no patterns), a `Scan` over a list of sources (one
+conversation or server log, or every one of them) that the caller advances with
+`step(budget)` in slices of a bounded number of messages, and `Hit`s that name a
+log and a `Message::sequence`, never a row index. A scan resumes each log by
+sequence, so lines that arrive, are trimmed or inserted above between slices are
+neither skipped nor read twice, and a log that vanished is skipped. Hits are
+capped at `MAX_HITS` (10,000; the count then shows `+`) and ascend by sequence,
+which is log order. Matching is against `Message::text` as received; the
+display conversions (shortened links, decoded numeric character references)
+are not searched, but match ranges are mapped to the drawn text with
+`Compact::shown_range`, so the highlight lands on the right characters.
+Sender names are not searched.
+
+`ui::log_search` owns the bar (`ChatWindow::search`, created on first open): a
+single row above the main log inside its pane, so the log is pushed down, not
+covered, and keeps its scroll position (the log list is bottom-anchored). It
+slides in over 120 ms. Ctrl+F (Cmd+F on macOS) or the toolbar's magnifier call
+the same `open_search`; with the bar open they focus the field. On Linux with
+the Emacs key theme a focused text input keeps Ctrl+F as "cursor right", since
+its binding is more specific; from the log it still opens the bar. The field is
+a `TextInput`; the bar takes over Enter (next), Shift+Enter (previous), Up/Down,
+Ctrl+Enter and Tab so none reaches the draft, and Esc closes the bar and
+returns focus to the draft. The found line stays where it is on close.
+
+The field's change notifications start a new scan unless the input method is
+still composing (`TextInput::is_composing`), so a term is searched once it is
+committed. A scan starts after a 120 ms pause, reads 20,000 messages per slice
+on the executor, and a new term replaces the old task, so an old scan can never
+overwrite a newer one. When a scan finishes it checks `search::revision` (newest
+sequence and total retained lines, plus the selection for the "this channel"
+scope); if that changed, it scans again, so counts follow new lines, and while a
+scan runs nothing else is started. The first hit is the nearest one at or after
+the previous position (else the newest); Next and Previous wrap around.
+Moving to a hit in another conversation or a server log selects it with
+`dispatch_keeping_focus` and scrolls with `LogList::reveal_sequence`; hits
+whose line is gone are skipped. The scope is "this channel" (the log of the
+selected channel, private conversation or, on a server tab, "this log") or
+"all" (every channel, private conversation and server log in memory). While the
+bar is open the term is highlighted in whatever main log is shown: yellow
+background, orange on the current line, under the selection and over mention,
+link and decoded-reference styling. The sub log (combined view) is not
+highlighted. Closing the bar drops the scan, the task and the highlights, so a
+closed search costs nothing per message or frame.
+
 ## Server-confirmed sending (D036)
 
 `irc-core::echo::Echoes` (worker) tracks each sent message until its echo,

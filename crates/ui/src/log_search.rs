@@ -1,0 +1,643 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//! The log search bar (#404): incremental search over the logs the
+//! application holds in memory.
+//!
+//! The data walk is `cayenchat_app::search`; this module owns what the user
+//! sees and does: the bar above the main log, the keys, the scan being
+//! driven in slices from the executor (never one long stretch on the UI
+//! thread), and moving to a hit, in another conversation if need be. A hit is
+//! a log and a message sequence, so lines that arrive, are trimmed or are
+//! inserted above cannot make it point at the wrong line.
+
+use std::time::Duration;
+
+use cayenchat_app::{
+    Command, Selection,
+    search::{self, Hit, Query, Scan, Scope, Source},
+};
+use gpui::{prelude::*, *};
+
+use crate::{
+    ChatWindow, CloseSearch, CompleteNickname, FindInLog, HistoryNext, HistoryPrevious, Notice,
+    SearchNext, SearchPrevious, SendMessage, input::TextInput, ircv3_settings::TextTooltip,
+    theme::Theme, yield_now,
+};
+
+/// Height of the bar, including its bottom border.
+pub const BAR_HEIGHT: f32 = 36.;
+/// Pause after the last change of the term before the logs are read.
+const DEBOUNCE: Duration = Duration::from_millis(120);
+/// How long the bar takes to slide into place.
+const SLIDE: Duration = Duration::from_millis(120);
+/// Messages read per slice, so one slice stays a few milliseconds.
+const SLICE: usize = 20_000;
+/// Lines context kept above a hit when scrolling to it.
+const CONTEXT_ROWS: usize = 2;
+
+/// Search state of one chat window. Created when the bar is first opened.
+pub struct LogSearch {
+    input: Entity<TextInput>,
+    open: bool,
+    scope: Scope,
+    /// The committed term (what is in the field, once any composition is
+    /// finished) and its matcher; `None` for an empty field.
+    term: String,
+    query: Option<Query>,
+    scan: Option<Scan>,
+    /// What the logs looked like when `scan` began.
+    revision: Option<Revision>,
+    /// The line the search stands on.
+    current: Option<Hit>,
+    /// The scan finished or was replaced: scroll to the hit it finds.
+    jump_pending: bool,
+    /// The slice driver is running.
+    running: bool,
+    task: Option<Task<()>>,
+    _input_changed: Subscription,
+}
+
+type Revision = ((u64, usize), Option<Selection>);
+
+impl LogSearch {
+    /// The matcher to draw highlights with and the line to emphasize.
+    pub fn highlight(&self) -> Option<(&Query, Option<u64>)> {
+        if !self.open {
+            return None;
+        }
+        self.query
+            .as_ref()
+            .map(|query| (query, self.current.map(|hit| hit.sequence)))
+    }
+}
+
+#[cfg(test)]
+impl LogSearch {
+    pub(crate) fn is_open(&self) -> bool {
+        self.open
+    }
+
+    pub(crate) fn term(&self) -> &str {
+        &self.term
+    }
+
+    pub(crate) fn hits(&self) -> &[Hit] {
+        self.scan.as_ref().map_or(&[][..], |scan| scan.hits())
+    }
+
+    pub(crate) fn current(&self) -> Option<Hit> {
+        self.current
+    }
+
+    pub(crate) fn input(&self) -> &Entity<TextInput> {
+        &self.input
+    }
+}
+
+impl ChatWindow {
+    /// Opens the bar and focuses its field; with the bar open already, only
+    /// focuses the field and selects its text.
+    pub(crate) fn open_search(
+        &mut self,
+        _: &FindInLog,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.server_menu = None;
+        self.member_menu = None;
+        self.channel_menu = None;
+        self.log_menu = None;
+        if self.search.is_none() {
+            let placeholder = self.i18n.text("search_placeholder");
+            let input = cx.new(|cx| TextInput::new_field(&placeholder, "", false, cx));
+            let subscription = cx.observe_in(&input, window, |this, _, window, cx| {
+                this.search_field_changed(window, cx)
+            });
+            self.search = Some(LogSearch {
+                input,
+                open: false,
+                scope: Scope::Selected,
+                term: String::new(),
+                query: None,
+                scan: None,
+                revision: None,
+                current: None,
+                jump_pending: false,
+                running: false,
+                task: None,
+                _input_changed: subscription,
+            });
+        }
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        let was_open = search.open;
+        search.open = true;
+        let input = search.input.clone();
+        let placeholder = self.i18n.text("search_placeholder");
+        input.update(cx, |input, cx| {
+            input.set_placeholder(&placeholder, cx);
+            input.select_everything(cx);
+        });
+        window.focus(&input.focus_handle(cx));
+        if !was_open {
+            // A term kept from last time is searched again, in the logs as
+            // they are now.
+            self.search_begin(false, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Closes the bar and returns to the draft. The line found stays where
+    /// it is in the log.
+    pub(crate) fn close_search(
+        &mut self,
+        _: &CloseSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(search) = self.search.as_mut().filter(|search| search.open) else {
+            return;
+        };
+        search.open = false;
+        search.scan = None;
+        search.revision = None;
+        search.task = None;
+        search.running = false;
+        if let Some(input) = self.inputs.get(&self.state.selection()) {
+            window.focus(&input.focus_handle(cx));
+        }
+        cx.notify();
+    }
+
+    /// The matches of the open search in a line's `text`, and whether the
+    /// line is the one the search stands on. Empty without a search, so a
+    /// log not being searched pays nothing.
+    pub(crate) fn search_ranges(
+        &self,
+        text: &str,
+        sequence: u64,
+    ) -> (Vec<std::ops::Range<usize>>, bool) {
+        match self.search.as_ref().and_then(LogSearch::highlight) {
+            Some((query, current)) => (query.ranges(text), current == Some(sequence)),
+            None => (Vec::new(), false),
+        }
+    }
+
+    /// Called when the field changed: a new term starts a new search, unless
+    /// the input method is still composing it.
+    fn search_field_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        let (term, composing) = {
+            let input = search.input.read(cx);
+            (input.text().to_owned(), input.is_composing())
+        };
+        if composing || term == search.term {
+            return;
+        }
+        search.query = Query::new(&term);
+        search.term = term;
+        if search.open {
+            self.search_begin(true, window, cx);
+        }
+    }
+
+    fn search_revision(&self, scope: Scope) -> Revision {
+        (
+            search::revision(&self.state),
+            (scope == Scope::Selected).then(|| self.state.selection()),
+        )
+    }
+
+    /// Starts a scan for the committed term, replacing any running one.
+    /// `jump`: scroll to a hit when it is found (the user typed) rather than
+    /// only counting (the logs changed).
+    fn search_begin(&mut self, jump: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        search.task = None;
+        search.running = false;
+        let Some(query) = search.query.clone() else {
+            search.scan = None;
+            search.revision = None;
+            search.current = None;
+            cx.notify();
+            return;
+        };
+        let scope = search.scope;
+        let scan = Scan::new(&self.state, scope, query);
+        let revision = self.search_revision(scope);
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        search.scan = Some(scan);
+        search.revision = Some(revision);
+        search.jump_pending |= jump;
+        search.running = true;
+        search.task = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(DEBOUNCE).await;
+                loop {
+                    let Ok(done) = this.update_in(cx, |this, _, cx| this.search_step(cx)) else {
+                        return;
+                    };
+                    if done {
+                        break;
+                    }
+                    yield_now().await;
+                }
+                let Ok(again) =
+                    this.update_in(cx, |this, window, cx| this.search_finish(window, cx))
+                else {
+                    return;
+                };
+                if !again {
+                    return;
+                }
+            }
+        }));
+        cx.notify();
+    }
+
+    /// Reads one slice; returns whether the scan is done.
+    fn search_step(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(scan) = self.search.as_mut().and_then(|search| search.scan.as_mut()) else {
+            return true;
+        };
+        let done = scan.step(&self.state, SLICE);
+        cx.notify();
+        done
+    }
+
+    /// A scan finished. Returns whether the logs changed meanwhile, so the
+    /// driver reads them again.
+    fn search_finish(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(search) = self.search.as_ref() else {
+            return false;
+        };
+        let scope = search.scope;
+        if search.revision != Some(self.search_revision(scope)) {
+            let query = search.query.clone();
+            let Some(query) = query else {
+                return false;
+            };
+            let scan = Scan::new(&self.state, scope, query);
+            let revision = self.search_revision(scope);
+            if let Some(search) = self.search.as_mut() {
+                search.scan = Some(scan);
+                search.revision = Some(revision);
+            }
+            return true;
+        }
+        let Some(search) = self.search.as_mut() else {
+            return false;
+        };
+        search.running = false;
+        let hits = search.scan.as_ref().map_or(&[][..], |scan| scan.hits());
+        let still_there = search
+            .current
+            .is_some_and(|current| search::position(hits, current).is_some());
+        let jump = std::mem::take(&mut search.jump_pending);
+        if jump || !still_there {
+            let chosen = search::initial_hit(hits, search.current);
+            search.current = chosen;
+            if let (true, Some(hit)) = (jump, chosen) {
+                self.search_goto(hit, window, cx);
+            }
+        }
+        cx.notify();
+        false
+    }
+
+    /// Restarts a finished search whose logs have changed since, so the
+    /// count follows new lines. Called while drawing; cheap when nothing
+    /// changed.
+    pub(crate) fn search_refresh_if_stale(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(search) = self.search.as_ref() else {
+            return;
+        };
+        if !search.open || search.query.is_none() || search.running {
+            return;
+        }
+        if search.revision != Some(self.search_revision(search.scope)) {
+            self.search_begin(false, window, cx);
+        }
+    }
+
+    /// Moves to the next or previous hit, wrapping at the ends.
+    pub(crate) fn search_move(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(search) = self.search.as_ref() else {
+            return;
+        };
+        let Some(scan) = search.scan.as_ref() else {
+            return;
+        };
+        let hits = scan.hits();
+        let mut at = search.current;
+        let mut found = None;
+        // Lines the log has dropped since the scan are skipped.
+        for _ in 0..hits.len().min(64) + 1 {
+            let next = if forward {
+                search::next_hit(hits, at)
+            } else {
+                search::previous_hit(hits, at)
+            };
+            let Some(next) = next else {
+                break;
+            };
+            at = Some(next);
+            if search::hit_message(&self.state, next).is_some() {
+                found = Some(next);
+                break;
+            }
+        }
+        let Some(hit) = found else {
+            return;
+        };
+        if let Some(search) = self.search.as_mut() {
+            search.current = Some(hit);
+        }
+        self.search_goto(hit, window, cx);
+    }
+
+    fn search_next(&mut self, _: &SearchNext, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_move(true, window, cx);
+    }
+
+    fn search_previous(&mut self, _: &SearchPrevious, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_move(false, window, cx);
+    }
+
+    /// Shows `hit`: selects its conversation or server log when that is not
+    /// the selected one, and scrolls to the line. Focus stays where it is.
+    fn search_goto(&mut self, hit: Hit, window: &mut Window, cx: &mut Context<Self>) {
+        let (selection, command) = match hit.source {
+            Source::Conversation(id) => (Selection::Channel(id), Command::SelectChannel(id)),
+            Source::Server(network) => (Selection::Server(network), Command::SelectServer(network)),
+        };
+        if self.state.selection() != selection {
+            self.dispatch_keeping_focus(command, window, cx);
+        }
+        self.sync_log_lists();
+        if let Some(list) = self.main_lists.get_mut(&selection) {
+            list.reveal_sequence(hit.sequence, CONTEXT_ROWS);
+        }
+        cx.notify();
+    }
+
+    /// Empties the field and puts the cursor back in it.
+    pub(crate) fn search_clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(search) = self.search.as_ref() else {
+            return;
+        };
+        let input = search.input.clone();
+        input.update(cx, |input, cx| input.set_text("", cx));
+        window.focus(&input.focus_handle(cx));
+    }
+
+    pub(crate) fn search_set_scope(
+        &mut self,
+        scope: Scope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        if search.scope != scope {
+            search.scope = scope;
+            self.search_begin(true, window, cx);
+        }
+        if let Some(search) = self.search.as_ref() {
+            window.focus(&search.input.focus_handle(cx));
+        }
+    }
+
+    /// "3/12", "0 matches", or "…" while the logs are being read.
+    fn search_status(&self) -> String {
+        let Some(search) = self.search.as_ref() else {
+            return String::new();
+        };
+        let (Some(_), Some(scan)) = (&search.query, &search.scan) else {
+            return String::new();
+        };
+        let hits = scan.hits();
+        if !scan.is_done() {
+            return "…".to_owned();
+        }
+        if hits.is_empty() {
+            return self.i18n.text("search_none");
+        }
+        let position = search
+            .current
+            .and_then(|current| search::position(hits, current))
+            .map_or("–".to_owned(), |position| position.to_string());
+        let more = if scan.is_truncated() { "+" } else { "" };
+        format!("{position}/{}{more}", hits.len())
+    }
+
+    /// The bar, or nothing while it is closed.
+    pub(crate) fn render_search_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let search = self.search.as_ref().filter(|search| search.open)?;
+        let theme = crate::theme::current(cx);
+        let scope = search.scope;
+        let input = search.input.clone();
+        let has_term = search.query.is_some();
+        let has_hits = search
+            .scan
+            .as_ref()
+            .is_some_and(|scan| !scan.hits().is_empty());
+        let status = self.search_status();
+        let on_server = matches!(self.state.selection(), Selection::Server(_));
+        let selected_label = self.i18n.text(if on_server {
+            "search_scope_log"
+        } else {
+            "search_scope_channel"
+        });
+        let all_label = self.i18n.text("search_scope_all");
+        let scope_button =
+            |id: &'static str, label: String, mine: Scope, cx: &mut Context<Self>| {
+                let active = scope == mine;
+                div()
+                    .id(id)
+                    .px(px(8.))
+                    .h(px(24.))
+                    .flex()
+                    .items_center()
+                    .flex_shrink_0()
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .when(active, |d| d.bg(theme.selected))
+                    .when(!active, |d| {
+                        d.text_color(theme.text_secondary)
+                            .hover(|style| style.bg(theme.hover_strong))
+                    })
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.search_set_scope(mine, window, cx)
+                    }))
+            };
+        let bar = div()
+            .id("log-search")
+            .key_context("LogSearch")
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .w_full()
+            .h(px(BAR_HEIGHT))
+            .flex_shrink_0()
+            .px(px(4.))
+            .bg(theme.surface)
+            .border_b_1()
+            .border_color(theme.border)
+            .text_color(theme.text)
+            // The field is an ordinary text input inside the chat window: its
+            // Enter, arrow and Tab keys would reach the draft, so the bar
+            // takes them.
+            .on_action(
+                cx.listener(|this, _: &SendMessage, window, cx| this.search_move(true, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &Notice, window, cx| this.search_move(true, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &HistoryNext, window, cx| this.search_move(true, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &HistoryPrevious, window, cx| {
+                this.search_move(false, window, cx)
+            }))
+            .on_action(cx.listener(|_, _: &CompleteNickname, _, _| {}))
+            .on_action(cx.listener(Self::search_next))
+            .on_action(cx.listener(Self::search_previous))
+            .on_action(cx.listener(Self::close_search))
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .child(
+                svg()
+                    .path("icons/ui/search.svg")
+                    .size(px(16.))
+                    .flex_shrink_0()
+                    .ml(px(4.))
+                    .text_color(theme.text_secondary),
+            )
+            .child(div().flex_1().min_w(px(80.)).child(input))
+            .child(scope_button(
+                "search-scope-selected",
+                selected_label,
+                Scope::Selected,
+                cx,
+            ))
+            .child(scope_button("search-scope-all", all_label, Scope::All, cx))
+            .child(
+                div()
+                    .min_w(px(48.))
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_center()
+                    .text_color(if has_term && status == self.i18n.text("search_none") {
+                        theme.warning
+                    } else {
+                        theme.text_secondary
+                    })
+                    .child(status),
+            )
+            .child(search_icon_button(
+                &theme,
+                "search-previous",
+                "chevron-up",
+                format!("{} (Shift+Enter)", self.i18n.text("search_previous")),
+                has_hits,
+                |this, window, cx| this.search_move(false, window, cx),
+                cx,
+            ))
+            .child(search_icon_button(
+                &theme,
+                "search-next",
+                "chevron-down",
+                format!("{} (Enter)", self.i18n.text("search_next")),
+                has_hits,
+                |this, window, cx| this.search_move(true, window, cx),
+                cx,
+            ))
+            .child(search_icon_button(
+                &theme,
+                "search-clear",
+                "circle-x",
+                self.i18n.text("search_clear"),
+                has_term,
+                |this, window, cx| this.search_clear(window, cx),
+                cx,
+            ))
+            .child(search_icon_button(
+                &theme,
+                "search-close",
+                "x",
+                format!("{} (Esc)", self.i18n.text("search_close")),
+                true,
+                |this, window, cx| this.close_search(&CloseSearch, window, cx),
+                cx,
+            ));
+        // The bar slides down from the top edge of the log: its box grows
+        // over a moment while the bar itself keeps its size, so the log below
+        // is pushed down rather than covered, and keeps its scroll position.
+        Some(
+            div()
+                .id("log-search-slide")
+                .w_full()
+                .flex_shrink_0()
+                .overflow_hidden()
+                .child(bar)
+                .with_animation(
+                    "log-search-slide-in",
+                    Animation::new(SLIDE).with_easing(ease_out_quint()),
+                    |slide, delta| slide.h(px(BAR_HEIGHT * delta)),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
+/// A square icon button in the bar.
+fn search_icon_button(
+    theme: &Theme,
+    id: &'static str,
+    icon: &'static str,
+    label: String,
+    enabled: bool,
+    on_click: fn(&mut ChatWindow, &mut Window, &mut Context<ChatWindow>),
+    cx: &mut Context<ChatWindow>,
+) -> impl IntoElement {
+    let hover = theme.hover_strong;
+    div()
+        .id(id)
+        .debug_selector(|| id.to_owned())
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .size(px(26.))
+        .rounded(px(4.))
+        .child(
+            svg()
+                .path(format!("icons/ui/{icon}.svg"))
+                .size(px(16.))
+                .text_color(if enabled {
+                    theme.text
+                } else {
+                    theme.text_muted
+                }),
+        )
+        .when(enabled, |button| {
+            button
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
+        })
+        .tooltip(move |_, cx| cx.new(|_| TextTooltip(label.clone().into())).into())
+}

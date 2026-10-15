@@ -168,6 +168,15 @@ impl LogList {
         }
     }
 
+    /// Scrolls so the row with `sequence` is near the top with `context`
+    /// rows above it; a line the list does not hold is ignored. Used to
+    /// bring a search hit into view.
+    pub fn reveal_sequence(&mut self, sequence: u64, context: usize) {
+        if let Ok(index) = self.sequences.binary_search(&sequence) {
+            self.scroll_to_row(self.prefix + index.saturating_sub(context), px(0.));
+        }
+    }
+
     /// How many message rows lie above row `visible_start` (the first row a
     /// scroll event reports as visible).
     pub fn message_rows_above(&self, visible_start: usize) -> usize {

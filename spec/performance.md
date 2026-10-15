@@ -1327,3 +1327,24 @@ unmodified fixture (no `--notify-every`) was not rerun; its lines never reach
 the queue. `--notify-every` prefixes the fixed nick `perfclient`, which is
 what `run_baseline.py` sets; a client with another nick would not be
 mentioned.
+
+## Log search (2026-10-15, issue #404)
+
+The search bar adds no work while it is closed: no scan, task or highlight
+exists, and the per-row hook (`ChatWindow::search_ranges`) returns an empty
+list without matching anything. While it is open and has a term, each drawn
+main-log row matches the term once (only the rows near the viewport are
+drawn), `render_chat` compares a revision (a sum over the conversations'
+lengths), and a scan reads the logs in slices of 20,000 messages on the
+executor after a 120 ms pause; nothing runs on a timer.
+
+Measured with the ignored `search_cost` test in `cayenchat-app` (50
+conversations of the 2,000 retained lines each, 100,000 lines of about 60
+characters, release build, Linux): a full scan of the "all" scope with no
+match took 37 ms in six slices, the longest 7.4 ms; a term matching everything
+stops at the 10,000-hit cap after 2 ms. The debug build takes about 250 ms in
+total and 55 ms for the longest slice. Memory is at most 10,000 hits of 16
+bytes each; no log is copied. The headless baseline of this document
+(`perf_baseline`, `run_baseline.py`) was not rerun: the receive path and the
+channel-switch path are unchanged, and a search that is closed does nothing in
+them.
