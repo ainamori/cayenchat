@@ -423,6 +423,11 @@ hover-revealed bar slides in and hides again once the pointer moves more than
 convention (it resembles macOS full-screen menus). A bar that is always shown
 has no slide-in animation (a frozen animation was one suspected cause of a
 half-drawn bar, issue #87) and Alt/F10 only move keyboard use in and out of it.
+View → Hide/Show Menu Bar (Windows/Linux only; macOS's bar is the system's, #391)
+flips the same `menu_bar_auto_hide` setting and saves it, independently of
+the toolbar item; its label follows the setting, and an open settings window
+follows the file. A hidden bar stays reachable by Alt, F10 and hover, and
+its View menu offers Show Menu Bar.
 The settings window has no bar (issue #145; its menus were all disabled).
 In it Escape (#339) closes one open layer per press (auto-join dialog, avatar
 editor, color or font picker, server, language or encoding list) and then the window

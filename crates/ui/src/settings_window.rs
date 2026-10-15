@@ -740,6 +740,16 @@ impl SettingsForm {
     }
 }
 
+/// Takes over a flag the settings file holds, unless the form value differs
+/// from the last saved one: that is an edit of this window, which a save
+/// right after must not lose.
+fn follow_file_flag(form: &mut bool, saved: &mut bool, file: bool) {
+    if *form == *saved {
+        *form = file;
+    }
+    *saved = file;
+}
+
 /// Arranges `servers` like `file` where both have a server, so a move made
 /// in the chat window (D041) is not undone by a window holding older
 /// settings. Servers the file lacks keep their relative order, at the end.
@@ -1115,14 +1125,22 @@ impl SettingsWindow {
     /// values back. Edits this window could not save yet are kept.
     /// Takes over the server order the file has, keeping every other edit
     /// in the form, so that saving cannot put back an older order.
-    /// The toolbar's visibility, which the chat window's View menu changes
-    /// without this window, is taken over the same way.
+    /// The toolbar's and the menu bar's visibility, which the chat window's
+    /// View menu changes without this window, are taken over the same way.
     fn follow_saved_server_order(&mut self) {
         let Ok(Some(file)) = settings_file::load() else {
             return;
         };
-        self.saved.show_toolbar = file.show_toolbar;
-        self.settings.values.show_toolbar = file.show_toolbar;
+        follow_file_flag(
+            &mut self.settings.values.show_toolbar,
+            &mut self.saved.show_toolbar,
+            file.show_toolbar,
+        );
+        follow_file_flag(
+            &mut self.settings.values.menu_bar_auto_hide,
+            &mut self.saved.menu_bar_auto_hide,
+            file.menu_bar_auto_hide,
+        );
         if follow_server_order(&mut self.saved.servers, &file.servers) {
             follow_server_order(&mut self.settings.values.servers, &file.servers);
         }
@@ -1398,8 +1416,7 @@ impl SettingsWindow {
                 apply_shortcuts(shortcuts, cx);
             }
             if menu_bar_changed {
-                owner.menu_bar.set_always(menu_bar_always);
-                cx.notify();
+                owner.set_menu_bar_auto_hide(!menu_bar_always, cx);
             }
             if toolbar_changed {
                 owner.set_toolbar_shown(show_toolbar, cx);
@@ -3514,6 +3531,28 @@ impl Render for SettingsWindow {
         let title = self.i18n.text("settings_title");
         let content = self.render_settings(window, cx).into_any_element();
         decorations::window_frame(window, cx, title, content)
+    }
+}
+
+#[cfg(test)]
+mod follow_file_flag_tests {
+    use super::follow_file_flag;
+
+    #[test]
+    fn unedited_form_follows_the_file() {
+        let (mut form, mut saved) = (false, false);
+        follow_file_flag(&mut form, &mut saved, true);
+        assert!(form && saved);
+    }
+
+    #[test]
+    fn edit_in_the_form_survives_an_older_file_value() {
+        // The user ticked the box (form true, saved false); the file still
+        // holds false.
+        let (mut form, mut saved) = (true, false);
+        follow_file_flag(&mut form, &mut saved, false);
+        assert!(form);
+        assert!(!saved);
     }
 }
 
