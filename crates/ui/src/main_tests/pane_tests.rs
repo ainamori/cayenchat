@@ -4059,3 +4059,17 @@ fn member_prompt_buttons_follow_the_os_order(cx: &mut TestAppContext) {
         !crate::button_order::cancel_first()
     );
 }
+
+#[gpui::test]
+fn quit_question_box_is_no_wider_than_its_content(cx: &mut TestAppContext) {
+    let (_chat, cx) = quit_dialog_window(cx);
+    let boxed = cx.debug_bounds("quit-dialog-box").unwrap();
+    let cancel = cx.debug_bounds("quit-dialog-cancel").unwrap();
+    let confirm = cx.debug_bounds("quit-dialog-confirm").unwrap();
+    assert!(boxed.size.width <= gpui::px(360.));
+    // The short English detail is narrower than the 360 px cap, so the
+    // box is narrower than the cap rather than padded out to it.
+    assert!(boxed.size.width < gpui::px(360.), "{:?}", boxed.size);
+    let buttons_right = cancel.right().max(confirm.right());
+    assert!(buttons_right <= boxed.right());
+}

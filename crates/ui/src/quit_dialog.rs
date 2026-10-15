@@ -152,7 +152,9 @@ impl ChatWindow {
                 }))
                 .child(
                     div()
-                        .w(px(360.))
+                        .debug_selector(|| "quit-dialog-box".into())
+                        // Fit the text; a fixed width left empty space beside it.
+                        .max_w(px(360.))
                         .h_auto()
                         .p_3()
                         .bg(theme.surface)
