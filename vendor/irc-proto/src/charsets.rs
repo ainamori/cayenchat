@@ -26,9 +26,19 @@ pub trait BodyCharsets: Send + Sync {
     /// (`Some(None)`: the connection's), so a change made while the line
     /// waits does not alter its bytes. Asked once for each line the codec
     /// writes, before [`BodyCharsets::encoder`] is.
-    fn take_pin(&self, _line: &str) -> Option<Option<&'static Encoding>> {
+    fn take_pin(&self, _line: &str) -> Option<Pin> {
         None
     }
+}
+
+/// What was fixed for a queued line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pin {
+    /// Write the text in this encoding (`None`: the connection's).
+    Encoding(Option<&'static Encoding>),
+    /// The connection no longer allows the encoding the line was checked
+    /// for: write nothing rather than bytes that were never checked.
+    Skip,
 }
 
 /// An encoding fixed in advance for the text of every message to any target;

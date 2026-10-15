@@ -2323,6 +2323,7 @@ async fn run_cancellable(
         history_enabled: false,
         echoes: echo::Echoes::default(),
         next_local_id: 0,
+        reported_unsent: 0,
         accounts: accounts::Accounts::default(),
         targets_asked: false,
         // Last reported Event::HistoryAvailable.
@@ -2432,6 +2433,8 @@ struct Worker {
     history_enabled: bool,
     echoes: echo::Echoes,
     next_local_id: u64,
+    /// Queued lines `UTF8ONLY` kept from being written that were already reported.
+    reported_unsent: usize,
     accounts: accounts::Accounts,
     targets_asked: bool,
     history_available: bool,
@@ -2644,13 +2647,23 @@ impl Worker {
         // The codec writes this line later: it keeps the encoding that was
         // checked, whatever the channel's setting becomes by then.
         let written = irc::proto::IrcCodec::sanitize(message.to_string());
-        let result = validate_tagged_wire(&message, wire).and_then(|_| {
-            self.charsets.pin(&written, encoder);
-            self.client.send(message).map_err(|error| {
-                self.charsets.unpin(&written);
-                error.to_string()
-            })
+        // The handle accepted the message before `UTF8ONLY` was known.
+        let refused = (self.charsets.utf8_only()
+            && encoder.is_some_and(|encoding| encoding != encoding_rs::UTF_8))
+        .then(|| {
+            "the server requires UTF-8 (UTF8ONLY); the message was accepted in another character encoding"
+                .to_owned()
         });
+        let result = refused
+            .map_or(Ok(()), Err)
+            .and_then(|()| validate_tagged_wire(&message, wire))
+            .and_then(|_| {
+                self.charsets.pin(&written, encoder);
+                self.client.send(message).map_err(|error| {
+                    self.charsets.unpin(&written);
+                    error.to_string()
+                })
+            });
         let event = match result {
             Ok(()) => {
                 self.transcript.record(WireDirection::Sent, line).await;
@@ -2849,6 +2862,16 @@ impl Worker {
                 "Server requires UTF-8 (UTF8ONLY): the channels' other character encodings are not used.",
             )
             .await;
+        }
+        if requires_utf8(&message) {
+            let unsent = self.charsets.unsent_for_utf8_only();
+            if unsent > self.reported_unsent {
+                self.reported_unsent = unsent;
+                self.note(format!(
+                    "Server requires UTF-8 (UTF8ONLY): {unsent} queued message(s) accepted in another character encoding were not sent."
+                ))
+                .await;
+            }
         }
         if !self.wire_encoding.eq_ignore_ascii_case("UTF-8") && requires_utf8(&message) {
             let _ = self

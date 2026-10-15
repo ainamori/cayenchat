@@ -1212,7 +1212,10 @@ page. There is no re-decoding of lines already shown.
   relayed prefix, representability). The worker checks with that encoding and
   pins it to the exact line for the codec, which uses the pin once when it
   writes the line. A `/charset` change while messages wait therefore affects
-  only later messages.
+  only later messages. `UTF8ONLY` outranks a pin: a message accepted in another
+  encoding before the announcement is refused by the worker afterwards, a line
+  already queued for the codec is skipped (not written), and the connection
+  reports how many were not sent.
 - **Configured names are not merged early.** The overrides handed to a
   connection are all kept until `CASEMAPPING` is announced, so names that only
   the default mapping equates (`#a[` / `#a{` under `ascii`) stay separate.

@@ -5178,3 +5178,85 @@ fn channel_mode_in_a_history_batch_is_marked_replayed() {
         .collect();
     assert_eq!(seen, [("old", true), ("live", false), ("svc", false)]);
 }
+
+/// Messages accepted in a channel's Shift_JIS before the server announces
+/// `UTF8ONLY` (the worker is busy delivering events) are never written in it.
+#[test]
+fn utf8_only_announced_after_acceptance_keeps_legacy_bytes_off_the_wire() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (flooded, flood_sent) = std_mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        read_line_starting(&mut reader, b"USER ");
+        socket
+            .write_all(b":server 001 alice :Welcome\r\n:server 376 alice :End of MOTD\r\n")
+            .unwrap();
+        for index in 0..EVENT_CAPACITY * 2 {
+            socket
+                .write_all(format!(":server NOTICE alice :flood {index}\r\n").as_bytes())
+                .unwrap();
+        }
+        socket
+            .write_all(b":server 005 alice UTF8ONLY :are supported\r\n")
+            .unwrap();
+        flooded.send(()).unwrap();
+        let mut sent = Vec::new();
+        loop {
+            let line = read_line_starting(&mut reader, b"PRIVMSG");
+            if line.ends_with(b"end\r\n") {
+                return sent;
+            }
+            sent.push(line);
+        }
+    });
+    let mut config = ConnectionConfig::tls("127.0.0.1".into(), "alice".into(), Vec::new());
+    config.port = port;
+    config.use_tls = false;
+    config.channel_encodings = vec![ChannelEncoding {
+        channel: "#jp".into(),
+        decode: None,
+        encode: Some("Shift_JIS".into()),
+    }];
+    let mut connection = Connection::connect(config).unwrap();
+    flood_sent.recv_timeout(Duration::from_secs(10)).unwrap();
+    // Events are not read, so the worker has not seen UTF8ONLY yet.
+    thread::sleep(Duration::from_millis(500));
+    assert!(!connection.utf8_only());
+    for _ in 0..60 {
+        connection.send_message("#jp", "あ", false).unwrap();
+    }
+    // The worker handles UTF8ONLY and the queued messages in either order:
+    // what it accepted before the announcement may go out as accepted,
+    // nothing after it may.
+    let mut announced = false;
+    let mut sent_end = false;
+    let mut accepted = 0;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "events did not arrive");
+        match connection.try_recv() {
+            Some(Event::Diagnostic { message, .. }) if message.contains("UTF8ONLY") => {
+                announced = true;
+            }
+            Some(Event::OutgoingAccepted { text, .. }) if text == "end" => break,
+            Some(Event::OutgoingAccepted { .. }) => {
+                assert!(!announced, "accepted after UTF8ONLY");
+                accepted += 1;
+            }
+            Some(_) => {}
+            None => thread::sleep(Duration::from_millis(10)),
+        }
+        if announced && !sent_end {
+            sent_end = true;
+            connection.send_message("#jp", "end", false).unwrap();
+        }
+    }
+    let sent = server.join().unwrap();
+    assert_eq!(sent.len(), accepted, "{sent:?}");
+    assert!(sent.iter().all(|line| line.contains(&0x82)));
+}

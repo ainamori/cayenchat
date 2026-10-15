@@ -16,7 +16,7 @@ use std::{
 
 use cayenchat_model::names::CaseMapping;
 use encoding_rs::Encoding;
-use irc::proto::charsets::BodyCharsets;
+use irc::proto::charsets::{BodyCharsets, Pin};
 
 use crate::valid_channel;
 
@@ -78,6 +78,8 @@ pub(crate) struct ChannelCharsets {
     /// How many pins `pins` holds, so the codec does not take its lock for
     /// a line when there are none.
     pinned: AtomicUsize,
+    /// Lines the codec skipped because of `UTF8ONLY`.
+    skipped: AtomicUsize,
 }
 
 impl ChannelCharsets {
@@ -111,6 +113,7 @@ impl ChannelCharsets {
             }),
             pins: Mutex::new(HashMap::new()),
             pinned: AtomicUsize::new(0),
+            skipped: AtomicUsize::new(0),
         })
     }
 
@@ -208,6 +211,18 @@ impl ChannelCharsets {
         })
     }
 
+    /// How many queued lines `UTF8ONLY` keeps from being written: those
+    /// still waiting and those the codec has already skipped.
+    pub(crate) fn unsent_for_utf8_only(&self) -> usize {
+        let waiting = self.pins.lock().map_or(0, |pins| {
+            pins.values()
+                .flatten()
+                .filter(|pin| pin.is_some_and(|encoding| encoding != encoding_rs::UTF_8))
+                .count()
+        });
+        waiting + self.skipped.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn utf8_only(&self) -> bool {
         self.state.read().is_ok_and(|state| state.utf8_only)
     }
@@ -218,11 +233,18 @@ impl BodyCharsets for ChannelCharsets {
         !self.any.load(Ordering::Relaxed) && self.pinned.load(Ordering::Relaxed) == 0
     }
 
-    fn take_pin(&self, line: &str) -> Option<Option<&'static Encoding>> {
+    fn take_pin(&self, line: &str) -> Option<Pin> {
         if self.pinned.load(Ordering::Relaxed) == 0 {
             return None;
         }
-        self.take(line, false)
+        let encoding = self.take(line, false)?;
+        // A pin keeps what the user set, not what the server allows: a line
+        // checked for another encoding before `UTF8ONLY` is not written.
+        if self.utf8_only() && encoding.is_some_and(|encoding| encoding != encoding_rs::UTF_8) {
+            self.skipped.fetch_add(1, Ordering::Relaxed);
+            return Some(Pin::Skip);
+        }
+        Some(Pin::Encoding(encoding))
     }
 
     fn decoder(&self, target: &str) -> Option<&'static Encoding> {
@@ -289,10 +311,31 @@ mod tests {
         charsets.set("#a", None, None).unwrap();
         assert!(!charsets.is_empty());
         assert_eq!(charsets.take_pin("PRIVMSG #b :x\r\n"), None);
-        assert_eq!(charsets.take_pin(line), Some(Some(encoding_rs::BIG5)));
+        assert_eq!(
+            charsets.take_pin(line),
+            Some(Pin::Encoding(Some(encoding_rs::BIG5)))
+        );
         charsets.unpin(line);
         assert_eq!(charsets.take_pin(line), None);
         assert!(charsets.is_empty());
+    }
+
+    #[test]
+    fn utf8_only_keeps_a_pinned_legacy_line_from_being_written() {
+        let charsets = one("#a", None, Some("Shift_JIS"));
+        let line = "PRIVMSG #a :x\r\n";
+        charsets.pin(line, Some(encoding_rs::SHIFT_JIS));
+        charsets.pin(line, Some(encoding_rs::UTF_8));
+        charsets.pin(line, None);
+        charsets.set_utf8_only();
+        assert_eq!(charsets.unsent_for_utf8_only(), 1);
+        assert_eq!(charsets.take_pin(line), Some(Pin::Skip));
+        assert_eq!(charsets.unsent_for_utf8_only(), 1);
+        assert_eq!(
+            charsets.take_pin(line),
+            Some(Pin::Encoding(Some(encoding_rs::UTF_8)))
+        );
+        assert_eq!(charsets.take_pin(line), Some(Pin::Encoding(None)));
     }
 
     #[test]
