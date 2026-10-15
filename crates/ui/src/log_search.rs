@@ -431,10 +431,29 @@ impl ChatWindow {
         self.sync_log_lists();
         if let Some(list) = self.main_lists.get_mut(&selection) {
             // The hit's own row goes to the top: rows above it may be taller
-            // than the log and would push the match out of view.
-            list.scroll_to_sequence(hit.sequence);
+            // than the log and would push the match out of view. A row taller
+            // than the log is then scrolled to where the match lies in it.
+            let fraction = search::hit_message(&self.state, hit)
+                .zip(self.search.as_ref().and_then(|s| s.highlight()))
+                .and_then(|(message, (query, _))| {
+                    let first = query.ranges(&message.text).into_iter().next()?;
+                    Some(first.start as f32 / message.text.len().max(1) as f32)
+                })
+                .unwrap_or(0.);
+            list.scroll_to_sequence_at(hit.sequence, fraction);
         }
         cx.notify();
+    }
+
+    /// Finishes a jump into a row taller than the log once the row has been
+    /// laid out; asks for another frame while it has not.
+    pub(crate) fn search_settle_scroll(&mut self, cx: &mut Context<Self>) {
+        let selection = self.state.selection();
+        if let Some(list) = self.main_lists.get_mut(&selection)
+            && list.settle()
+        {
+            cx.notify();
+        }
     }
 
     /// Empties the field and puts the cursor back in it.

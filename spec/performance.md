@@ -1338,8 +1338,12 @@ drawn), `render_chat` compares a revision (a sum over the conversations'
 lengths, or one log's ends for the "this channel" scope), and a scan reads the
 logs in slices of 20,000 cost units (a message costs 1 plus its bytes / 64) on
 the executor after a 120 ms pause; a re-read after the logs changed waits
-500 ms. Matching is linear in the text (Knuth-Morris-Pratt), also when drawing
-highlights. Review round 1 measured the earlier restart-at-every-position
+500 ms. Matching is linear in the text (Knuth-Morris-Pratt, with the byte
+origin of the last term-length lowercase characters kept in a ring so a match's
+start is known without walking back; a term opening inside the lowercase form
+of `İ` against 8,000 of them is covered by a test). Styling the matches of a
+row steps through them once (`styled_log_text`), so a line of thousands of
+matches costs no more than its length. Review round 1 measured the earlier restart-at-every-position
 matcher at 1.27 s for one slice (100 lines of 16,000 `a` against 128 `a` + `b`)
 and 5.11 s against 512 `a` + `b`.
 

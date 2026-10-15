@@ -5050,6 +5050,7 @@ fn styled_log_text(
     }
     boundaries.sort_unstable();
     boundaries.dedup();
+    let mut next_found = 0;
     let highlights = boundaries.windows(2).filter_map(|pair| {
         let range = pair[0]..pair[1];
         let is_prefix = range.end <= shift;
@@ -5068,9 +5069,17 @@ fn styled_log_text(
         let is_decoded = decoded
             .iter()
             .any(|span| span.start <= range.start && range.end <= span.end);
+        // Matches ascend and do not overlap, as do the segments: step past
+        // the ones already behind instead of testing them all each time.
+        while found
+            .get(next_found)
+            .is_some_and(|span| span.end <= range.start)
+        {
+            next_found += 1;
+        }
         let is_found = found
-            .iter()
-            .any(|span| span.start <= range.start && range.end <= span.end);
+            .get(next_found)
+            .is_some_and(|span| span.start <= range.start && range.end <= span.end);
         (is_prefix || is_url || is_chip || is_decoded || is_selected || is_highlight || is_found)
             .then_some((
                 range,
@@ -5727,6 +5736,7 @@ impl ChatWindow {
         let theme = theme::current(cx);
         self.sync_log_lists();
         self.search_refresh_if_stale(window, cx);
+        self.search_settle_scroll(cx);
         let search_bar = self.render_search_bar(cx);
         let selection = self.state.selection();
         let mut origin = decorations::content_origin(window);
@@ -7846,11 +7856,7 @@ fn rebind_shortcuts(cx: &mut App) {
         .try_global::<ShortcutPrefs>()
         .cloned()
         .unwrap_or_default();
-    let emacs = match prefs.text_keys {
-        TextKeyTheme::Auto => desktop::current(cx).emacs_keys,
-        TextKeyTheme::Standard => false,
-        TextKeyTheme::Emacs => true,
-    };
+    let emacs = emacs_keys_active(&prefs, cx);
     cx.clear_key_bindings();
     input::bind_keys(emacs, cx);
     cx.bind_keys(themed_bindings(
@@ -7858,6 +7864,29 @@ fn rebind_shortcuts(cx: &mut App) {
         &prefs.overrides,
         emacs,
     ));
+}
+
+/// Whether the Emacs text key theme is in effect.
+fn emacs_keys_active(prefs: &ShortcutPrefs, cx: &App) -> bool {
+    match prefs.text_keys {
+        TextKeyTheme::Auto => desktop::current(cx).emacs_keys,
+        TextKeyTheme::Standard => false,
+        TextKeyTheme::Emacs => true,
+    }
+}
+
+/// The key that opens the log search, as bound by [`themed_bindings`].
+fn find_in_log_key(cx: &App) -> &'static str {
+    let emacs = cx
+        .try_global::<ShortcutPrefs>()
+        .is_some_and(|prefs| emacs_keys_active(prefs, cx));
+    if cfg!(target_os = "macos") {
+        "cmd-f"
+    } else if cfg!(target_os = "linux") && emacs {
+        "f3"
+    } else {
+        "ctrl-f"
+    }
 }
 
 /// `shortcut_bindings` for the text key theme in effect.

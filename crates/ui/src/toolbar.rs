@@ -378,6 +378,11 @@ impl Toolbar {
                     .try_global::<crate::ShortcutPrefs>()
                     .map(|prefs| prefs.overrides.clone())
                     .unwrap_or_default();
+                // The search key follows the key theme (F3 under Emacs).
+                let keys = match keys {
+                    Keys::Fixed("ctrl-f" | "cmd-f") => Keys::Fixed(crate::find_in_log_key(cx)),
+                    other => other,
+                };
                 let mut text = tooltip_text(&name, &shown_keys(keys, &overrides));
                 if let Some(state) = state {
                     text = format!("{text}: {state}");

@@ -94,10 +94,25 @@ impl Query {
     /// a character (`\u{130}` lowercases to two) does not count.
     fn find_from(&self, text: &str, from: usize) -> Option<Range<usize>> {
         let wanted = self.folded.len();
+        let text_tail = &text[from..];
+        // A character lowercases to at most three characters.
+        if text_tail.len().saturating_mul(3) < wanted {
+            return None;
+        }
+        // For each of the last `wanted` folded characters: the byte offset
+        // of the character it came from, and whether it is that character's
+        // first folded character. Bounded by the term, so no match needs a
+        // backward walk to find where it starts.
+        let mut origins = vec![(0usize, false); wanted];
+        let mut count = 0usize;
         let mut matched = 0;
-        for (offset, ch) in text[from..].char_indices() {
+        for (offset, ch) in text_tail.char_indices() {
             let mut lower = ch.to_lowercase().peekable();
+            let mut first = true;
             while let Some(folded) = lower.next() {
+                origins[count % wanted] = (from + offset, first);
+                first = false;
+                count += 1;
                 while matched > 0 && (matched == wanted || self.folded[matched] != folded) {
                     matched = self.fallback[matched - 1];
                 }
@@ -105,24 +120,12 @@ impl Query {
                     matched += 1;
                 }
                 if matched == wanted && lower.peek().is_none() {
-                    let end = from + offset + ch.len_utf8();
-                    if let Some(start) = self.start_of_match(text, from, end) {
-                        return Some(start..end);
+                    // The oldest entry is where the match began.
+                    let (start, on_boundary) = origins[count % wanted];
+                    if on_boundary {
+                        return Some(start..from + offset + ch.len_utf8());
                     }
                 }
-            }
-        }
-        None
-    }
-
-    /// Where the match that ends at byte `end` begins, when it begins on a
-    /// character boundary of the folded text and not before `from`.
-    fn start_of_match(&self, text: &str, from: usize, end: usize) -> Option<usize> {
-        let mut remaining = self.folded.len();
-        for (start, ch) in text[from..end].char_indices().rev() {
-            remaining = remaining.checked_sub(ch.to_lowercase().count())?;
-            if remaining == 0 {
-                return Some(from + start);
             }
         }
         None
@@ -368,6 +371,23 @@ mod tests {
         assert!(!query.is_match(&"a".repeat(49)));
         assert!(query.is_match(&"a".repeat(50)));
         assert!(!query.is_match(""));
+    }
+
+    #[test]
+    fn matching_is_linear_when_candidates_start_inside_a_folded_character() {
+        // `İ` lowercases to `i` + U+0307. A term opening with U+0307 reaches
+        // its end again and again but never begins on a character boundary.
+        let text = "İ".repeat(8_000);
+        let term = format!("\u{307}{}", "i\u{307}".repeat(512));
+        let query = Query::new(&term).unwrap();
+        let start = std::time::Instant::now();
+        assert!(!query.is_match(&text));
+        assert!(query.ranges(&text).is_empty());
+        assert!(start.elapsed() < std::time::Duration::from_millis(500));
+        // Whole characters still match.
+        let query = Query::new("i\u{307}i\u{307}").unwrap();
+        assert_eq!(query.ranges("xİİx"), vec![1..5]);
+        assert!(Query::new("\u{307}i").unwrap().ranges("İİ").is_empty());
     }
 
     #[test]

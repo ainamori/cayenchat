@@ -380,3 +380,25 @@ fn the_emacs_key_theme_keeps_ctrl_f_for_the_cursor_and_opens_search_with_f3(
         chat.search.as_ref().is_some_and(|s| s.is_open())
     }));
 }
+
+#[test]
+fn styling_a_line_full_of_matches_takes_linear_time() {
+    use crate::theme::Theme;
+    use cayenchat_storage::{Appearance, ThemeMode};
+    use gpui::WindowAppearance;
+
+    let theme = Theme::new(
+        ThemeMode::Light,
+        WindowAppearance::Light,
+        &Appearance::default(),
+    );
+    let text = "a ".repeat(8_000);
+    // Separate matches, so none merge into one run.
+    let found = cayenchat_app::search::Query::new("a")
+        .unwrap()
+        .ranges(&text);
+    assert_eq!(found.len(), 8_000);
+    let start = std::time::Instant::now();
+    let _ = super::styled_log_text("", &text, &[], &[], &[], &[], &found, true, None, &theme);
+    assert!(start.elapsed() < Duration::from_millis(500));
+}

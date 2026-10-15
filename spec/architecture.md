@@ -1886,8 +1886,12 @@ trimmed meanwhile are skipped by Next and Previous. The first hit is the nearest
 the previous position (else the newest); Next and Previous wrap around.
 Moving to a hit in another conversation or a server log selects it with
 `dispatch_keeping_focus` and scrolls the line to the top of the log with
-`LogList::scroll_to_sequence` (no rows are kept above it: a tall row above
-could push the match out of view); hits
+`LogList::scroll_to_sequence_at` (no rows are kept above it: a tall row above
+could push the match out of view). When that row is itself taller than the
+log, `LogList::settle` (called from `render_chat` once the row is measured)
+moves on inside it to the place the match's byte offset suggests, as a
+fraction of the row's height, a third of the log below the top. This is an
+estimate (wrapping is not measured per match), good to a few lines; hits
 whose line is gone are skipped. The scope is "this channel" (the log of the
 selected channel, private conversation or, on a server tab, "this log") or
 "all" (every channel, private conversation and server log in memory). While the

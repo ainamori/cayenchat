@@ -20,6 +20,7 @@ pub struct LogList {
     prefix: usize,
     sequences: Vec<u64>,
     scroll_handler: bool,
+    pending_inner: Option<(u64, f32, u8)>,
 }
 
 impl LogList {
@@ -38,6 +39,7 @@ impl LogList {
             prefix: 0,
             sequences: Vec::new(),
             scroll_handler: false,
+            pending_inner: None,
         }
     }
 
@@ -166,6 +168,43 @@ impl LogList {
         if let Ok(index) = self.sequences.binary_search(&sequence) {
             self.scroll_to_row(self.prefix + index, px(0.));
         }
+    }
+
+    /// Like [`scroll_to_sequence`](Self::scroll_to_sequence), and when the row
+    /// turns out taller than the viewport, moves on inside it to where
+    /// `fraction` (0 to 1, the match's place in the text) estimates the match
+    /// to be. Finished by [`settle`](Self::settle) once the row is measured.
+    pub fn scroll_to_sequence_at(&mut self, sequence: u64, fraction: f32) {
+        self.scroll_to_sequence(sequence);
+        self.pending_inner = Some((sequence, fraction.clamp(0., 1.), 0));
+    }
+
+    /// Carries out a pending [`scroll_to_sequence_at`](Self::scroll_to_sequence_at)
+    /// as soon as the row has a measured height. Returns whether it needs
+    /// another frame to do so.
+    pub fn settle(&mut self) -> bool {
+        let Some((sequence, fraction, tries)) = self.pending_inner else {
+            return false;
+        };
+        let Ok(index) = self.sequences.binary_search(&sequence) else {
+            self.pending_inner = None;
+            return false;
+        };
+        let row = self.prefix + index;
+        let Some(bounds) = self.state.bounds_for_item(row) else {
+            // Not laid out yet; give it a few frames.
+            self.pending_inner = (tries < 3).then_some((sequence, fraction, tries + 1));
+            return self.pending_inner.is_some();
+        };
+        self.pending_inner = None;
+        let viewport = self.state.viewport_bounds().size.height;
+        let height = bounds.size.height;
+        if height > viewport && viewport > px(0.) {
+            // A third of the way down leaves a little of what precedes it.
+            let offset = (height * fraction - viewport / 3.).clamp(px(0.), height - viewport);
+            self.scroll_to_row(row, offset);
+        }
+        false
     }
 
     /// How many message rows lie above row `visible_start` (the first row a
