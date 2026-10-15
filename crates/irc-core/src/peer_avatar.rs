@@ -98,17 +98,48 @@ pub(crate) fn realname(base: &str, advertise: bool) -> String {
     }
 }
 
-/// A realname without KVIrc's leading mark (ETX, a digit, SI), as the user
-/// configured it.
+/// Whether a connection in `encoding` (a WHATWG label) can carry KVIrc's
+/// mark. ISO-2022-JP cannot: SI (0x0F) is its shift-in code and
+/// `encoding_rs` turns it into U+FFFD on receiving and `&#65533;` on
+/// sending.
+pub(crate) fn carries_mark(encoding: &str) -> bool {
+    encoding_rs::Encoding::for_label(encoding.as_bytes()) != Some(encoding_rs::ISO_2022_JP)
+}
+
+/// CayenChat's own mark, recognized when receiving only: the text
+/// `\x03<digit>\x03` (nine printable ASCII characters, not control
+/// characters) at the start of a realname. It survives every encoding and
+/// Tiarra; we never add it, a user who wants it types it into the realname.
+const TEXT_MARK_PREFIX: &str = "\\x03";
+const TEXT_MARK_SUFFIX: &str = "\\x03";
+
+/// The digit of the textual mark at the start of `realname`, and the
+/// length of the mark.
+fn text_mark(realname: &str) -> Option<(u8, usize)> {
+    let rest = realname.strip_prefix(TEXT_MARK_PREFIX)?;
+    let (&digit, rest) = rest.as_bytes().split_first()?;
+    (digit.is_ascii_digit() && rest.starts_with(TEXT_MARK_SUFFIX.as_bytes()))
+        .then_some((digit, TEXT_MARK_PREFIX.len() + 1 + TEXT_MARK_SUFFIX.len()))
+}
+
+/// A realname without a leading mark (KVIrc's ETX, a digit, SI, or the
+/// textual `\x03<digit>\x03`), as the user configured it.
 pub(crate) fn without_mark(realname: &str) -> &str {
+    if let Some((_, len)) = text_mark(realname) {
+        return &realname[len..];
+    }
     match realname.as_bytes() {
         [0x03, b'0'..=b'7', 0x0f, ..] => &realname[3..],
         _ => realname,
     }
 }
 
-/// Whether a realname starts with KVIrc's mark for an avatar.
+/// Whether a realname starts with a mark for an avatar: KVIrc's, or the
+/// textual one, whose digit must also have the fours place set.
 pub(crate) fn advertises_avatar(realname: &str) -> bool {
+    if let Some((digit, _)) = text_mark(realname) {
+        return matches!(digit, b'4'..=b'7');
+    }
     match realname.as_bytes() {
         [0x03, digit @ b'0'..=b'7', 0x0f, ..] => (digit - b'0') & AVATAR_BIT != 0,
         _ => false,
@@ -765,6 +796,60 @@ mod tests {
         .unwrap();
         assert_eq!(avatars(&handled.events), [format!("kv={url}")]);
         peers
+    }
+
+    #[test]
+    fn the_textual_mark_advertises_an_avatar_at_the_start_only() {
+        for digit in ['4', '5', '6', '7'] {
+            assert!(
+                advertises_avatar(&format!("\\x03{digit}\\x03Name")),
+                "{digit}"
+            );
+        }
+        for real in [
+            "\\x030\\x03Name",
+            "\\x033\\x03Name",
+            "\\x038\\x03Name",
+            "\\X034\\x03Name",
+            "\\x034\\X03Name",
+            "\\x03a\\x03Name",
+            "\\x0344\\x03Name",
+            "\\x034Name",
+            "Name \\x034\\x03",
+            " \\x034\\x03Name",
+            "\\x034",
+        ] {
+            assert!(!advertises_avatar(real), "{real:?}");
+        }
+        assert!(advertises_avatar("\\x034\\x03"));
+    }
+
+    #[test]
+    fn both_marks_are_stripped_to_show_the_realname() {
+        assert_eq!(without_mark("\\x034\\x03Alice"), "Alice");
+        assert_eq!(without_mark("\\x030\\x03Alice"), "Alice");
+        assert_eq!(without_mark("\\x034\\x03"), "");
+        assert_eq!(without_mark("\\X034\\x03Alice"), "\\X034\\x03Alice");
+        assert_eq!(without_mark("Alice \\x034\\x03"), "Alice \\x034\\x03");
+    }
+
+    #[test]
+    fn iso_2022_jp_cannot_carry_the_kvirc_mark_but_the_textual_one_survives() {
+        assert!(carries_mark("UTF-8"));
+        assert!(carries_mark("Shift_JIS"));
+        assert!(carries_mark("EUC-JP"));
+        assert!(!carries_mark("ISO-2022-JP"));
+        let marked = realname("名前", true);
+        let (bytes, _, _) = encoding_rs::ISO_2022_JP.encode(&marked);
+        let (back, _) = encoding_rs::ISO_2022_JP.decode_without_bom_handling(&bytes);
+        assert!(!advertises_avatar(&back), "the KVIrc mark is broken");
+        let text = "\\x034\\x03日本語";
+        let (bytes, _, lost) = encoding_rs::ISO_2022_JP.encode(text);
+        assert!(!lost);
+        let (back, _) = encoding_rs::ISO_2022_JP.decode_without_bom_handling(&bytes);
+        assert_eq!(back, text);
+        assert!(advertises_avatar(&back));
+        assert_eq!(without_mark(&back), "日本語");
     }
 
     #[test]

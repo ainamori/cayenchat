@@ -227,9 +227,12 @@ impl ConnectionConfig {
     }
 
     /// Whether registration marks the realname as having an avatar: only
-    /// with peer exchange on and a URL explicitly shared.
+    /// with peer exchange on, a URL explicitly shared and an encoding that
+    /// can carry KVIrc's mark (not ISO-2022-JP).
     pub fn advertises_avatar(&self) -> bool {
-        self.ircv3.peer_avatars && self.shared_avatar.is_some()
+        self.ircv3.peer_avatars
+            && self.shared_avatar.is_some()
+            && peer_avatar::carries_mark(&self.encoding)
     }
 
     /// The realname as sent in `USER` and `SETNAME`: the configured value
@@ -1350,7 +1353,10 @@ fn validate_outgoing_relayed<'w>(
         )),
         Outgoing::SetName(realname) => IrcMessage::from(IrcCommand::Raw(
             "SETNAME".into(),
-            vec![peer_avatar::realname(base_realname(realname), true)],
+            vec![peer_avatar::realname(
+                base_realname(realname),
+                peer_avatar::carries_mark(encoding.label),
+            )],
         )),
         Outgoing::Quit => return Ok(()),
         Outgoing::QuitWith(reason) => IrcMessage::from(IrcCommand::QUIT(Some(reason.clone()))),

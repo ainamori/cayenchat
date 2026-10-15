@@ -1081,7 +1081,9 @@ pub(crate) fn peer_avatar_url_problem(text: &str, utf8: bool) -> Option<&'static
 pub(crate) fn peer_reconnect_needed(status: &OwnAvatarStatus, profile: &ServerProfile) -> bool {
     status.connected
         && (status.peer.enabled != profile.ircv3.peer_avatars
-            || status.peer.advertised != crate::shared_peer_avatar(profile).is_some())
+            || status.peer.advertised
+                != (crate::shared_peer_avatar(profile).is_some()
+                    && profile.encoding != TextEncoding::Iso2022Jp))
 }
 
 /// Makes `draft` the URL `profile` shares with other clients. `Err` is a
@@ -1277,6 +1279,11 @@ mod tests {
         assert!(!peer_reconnect_needed(&connected(true, true), profile));
         // Stopped: the mark stays until reconnecting.
         profile.peer_avatar_url.clear();
+        assert!(peer_reconnect_needed(&connected(true, true), profile));
+        // ISO-2022-JP never carries the mark, so sharing needs no reconnect.
+        profile.peer_avatar_url = "https://example.com/me.png".into();
+        profile.encoding = cayenchat_storage::TextEncoding::Iso2022Jp;
+        assert!(!peer_reconnect_needed(&connected(true, false), profile));
         assert!(peer_reconnect_needed(&connected(true, true), profile));
     }
 

@@ -4465,6 +4465,16 @@ fn the_configured_realname_is_registered_with_the_avatar_mark_only_on_the_wire()
         "Alice Liddell"
     );
     assert!(config.validate().is_ok());
+    config.encoding = "ISO-2022-JP".into();
+    assert!(
+        !config.advertises_avatar(),
+        "SI does not survive ISO-2022-JP"
+    );
+    assert_eq!(config.wire_realname(), "Alice Liddell");
+    assert!(config.validate().is_ok());
+    config.realname = "\\x034\\x03Alice".into();
+    assert_eq!(config.wire_realname(), "\\x034\\x03Alice", "sent as typed");
+    config.encoding = "UTF-8".into();
     config.realname = "a\r\nQUIT".into();
     assert!(config.validate().is_err());
     assert!(
