@@ -22,6 +22,13 @@ fn the_title_shows_the_member_count_of_a_channel(cx: &mut TestAppContext) {
         ChatWindow::with_settings(settings.clone(), None, window, cx)
     });
     chat.update(cx, |chat, cx| {
+        // Before any connection the title names no server or channel.
+        assert!(
+            chat.window_title().starts_with("Not connected — ")
+                || chat.window_title().starts_with("未接続 — "),
+            "{}",
+            chat.window_title()
+        );
         chat.handle_events(
             NetworkId(1),
             vec![
