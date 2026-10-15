@@ -402,3 +402,37 @@ fn styling_a_line_full_of_matches_takes_linear_time() {
     let _ = super::styled_log_text("", &text, &[], &[], &[], &[], &found, true, None, &theme);
     assert!(start.elapsed() < Duration::from_millis(500));
 }
+
+#[gpui::test]
+fn a_match_far_down_a_tall_line_is_scrolled_into_view_without_another_key(cx: &mut TestAppContext) {
+    let (chat, cx) = open_chat(cx);
+    chat.update(cx, |chat, cx| {
+        let text = format!("{}INNER_TARGET", "long ".repeat(20_000));
+        for text in [text.as_str(), "short last line"] {
+            chat.state.append_channel_message(
+                NetworkId(1),
+                "#a",
+                "bob",
+                text,
+                Kind::Message,
+                Provenance::Live,
+            );
+        }
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes(FIND);
+    cx.simulate_input("INNER_TARGET");
+    settle(cx);
+    // Frames, as the window would draw them; no key is pressed meanwhile.
+    for _ in 0..4 {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+    let (count, current, _) = search_state(&chat, cx);
+    assert_eq!((count, current.is_some()), (1, true));
+    chat.read_with(cx, |chat, _| {
+        let search = chat.search.as_ref().unwrap();
+        assert!(search.revealed(), "the match was painted inside the log");
+    });
+}

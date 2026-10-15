@@ -9,7 +9,7 @@
 //! a log and a message sequence, so lines that arrive, are trimmed or are
 //! inserted above cannot make it point at the wrong line.
 
-use std::time::Duration;
+use std::{cell::Cell, rc::Rc, time::Duration};
 
 use cayenchat_app::{
     Command, Selection,
@@ -58,6 +58,14 @@ pub struct LogSearch {
     current: Option<Hit>,
     /// The scan finished or was replaced: scroll to the hit it finds.
     jump_pending: bool,
+    /// A jump to this line is not finished: its first match must still be
+    /// scrolled into view (the line may be taller than the log).
+    reveal: Option<Reveal>,
+    /// The last jump brought its match into view (rather than giving up).
+    reveal_shown: bool,
+    /// Where the line being revealed painted its first match, written during
+    /// paint and read by the next frame.
+    probe: Rc<Cell<Option<Probe>>>,
     /// The slice driver is running.
     running: bool,
     task: Option<Task<()>>,
@@ -65,6 +73,21 @@ pub struct LogSearch {
 }
 
 type Revision = ((u64, u64, usize), Option<Selection>);
+
+/// A jump whose match may still be out of view, and how many frames were
+/// spent bringing it in.
+#[derive(Clone, Copy)]
+struct Reveal {
+    sequence: u64,
+    tries: u8,
+}
+
+/// Where a line painted its first match: the line's sequence, the top of the
+/// match in window coordinates and the height of a text line.
+pub(crate) type Probe = (u64, Pixels, Pixels);
+
+/// Frames a reveal may take before it gives up (each scrolls closer).
+const REVEAL_TRIES: u8 = 8;
 
 impl LogSearch {
     /// The matcher to draw highlights with and the line to emphasize.
@@ -90,6 +113,11 @@ impl LogSearch {
 
     pub(crate) fn hits(&self) -> &[Hit] {
         self.scan.as_ref().map_or(&[][..], |scan| scan.hits())
+    }
+
+    /// The last jump saw its match painted inside the log.
+    pub(crate) fn revealed(&self) -> bool {
+        self.reveal_shown
     }
 
     pub(crate) fn current(&self) -> Option<Hit> {
@@ -131,6 +159,9 @@ impl ChatWindow {
                 revision: None,
                 current: None,
                 jump_pending: false,
+                reveal: None,
+                reveal_shown: false,
+                probe: Rc::default(),
                 running: false,
                 task: None,
                 _input_changed: subscription,
@@ -174,6 +205,7 @@ impl ChatWindow {
         search.task = None;
         search.running = false;
         search.jump_pending = false;
+        search.reveal = None;
         if let Some(input) = self.inputs.get(&self.state.selection()) {
             window.focus(&input.focus_handle(cx));
         }
@@ -431,28 +463,66 @@ impl ChatWindow {
         self.sync_log_lists();
         if let Some(list) = self.main_lists.get_mut(&selection) {
             // The hit's own row goes to the top: rows above it may be taller
-            // than the log and would push the match out of view. A row taller
-            // than the log is then scrolled to where the match lies in it.
-            let fraction = search::hit_message(&self.state, hit)
-                .zip(self.search.as_ref().and_then(|s| s.highlight()))
-                .and_then(|(message, (query, _))| {
-                    let first = query.ranges(&message.text).into_iter().next()?;
-                    Some(first.start as f32 / message.text.len().max(1) as f32)
-                })
-                .unwrap_or(0.);
-            list.scroll_to_sequence_at(hit.sequence, fraction);
+            // than the log and would push the match out of view. If the row
+            // itself is taller than the log, `search_reveal_step` moves on to
+            // where the row painted the match.
+            list.scroll_to_sequence(hit.sequence);
+            if let Some(search) = self.search.as_mut() {
+                search.probe.set(None);
+                search.reveal_shown = false;
+                search.reveal = Some(Reveal {
+                    sequence: hit.sequence,
+                    tries: 0,
+                });
+            }
         }
         cx.notify();
     }
 
-    /// Finishes a jump into a row taller than the log once the row has been
-    /// laid out; asks for another frame while it has not.
-    pub(crate) fn search_settle_scroll(&mut self, cx: &mut Context<Self>) {
+    /// Where the line `sequence` is to report its first match when painted,
+    /// while a jump to it is being finished.
+    pub(crate) fn search_probe(&self, sequence: u64) -> Option<Rc<Cell<Option<Probe>>>> {
+        let search = self.search.as_ref()?;
+        search
+            .reveal
+            .is_some_and(|reveal| reveal.sequence == sequence)
+            .then(|| search.probe.clone())
+    }
+
+    /// Finishes a jump: reads where the line painted its first match in the
+    /// last frame (from the real wrapped layout) and scrolls until that is
+    /// inside the log. Asks for another frame while the match is not in view
+    /// or the line has not been painted yet, a few times at most.
+    pub(crate) fn search_reveal_step(&mut self, window: &mut Window) {
         let selection = self.state.selection();
-        if let Some(list) = self.main_lists.get_mut(&selection)
-            && list.settle()
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        let Some(mut reveal) = search.reveal else {
+            return;
+        };
+        let Some(list) = self.main_lists.get(&selection) else {
+            search.reveal = None;
+            return;
+        };
+        let viewport = list.state.viewport_bounds();
+        if let Some((sequence, y, line)) = search.probe.take()
+            && sequence == reveal.sequence
+            && viewport.size.height > px(0.)
         {
-            cx.notify();
+            let (top, bottom) = (viewport.origin.y, viewport.origin.y + viewport.size.height);
+            if y >= top && y + line <= bottom {
+                search.reveal = None;
+                search.reveal_shown = true;
+                return;
+            }
+            // A third of the way down leaves a little of what precedes it.
+            list.state.scroll_by(y - (top + viewport.size.height / 3.));
+        }
+        reveal.tries += 1;
+        search.reveal = (reveal.tries < REVEAL_TRIES).then_some(reveal);
+        if search.reveal.is_some() {
+            window.request_animation_frame();
         }
     }
 

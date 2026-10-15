@@ -1886,13 +1886,18 @@ trimmed meanwhile are skipped by Next and Previous. The first hit is the nearest
 the previous position (else the newest); Next and Previous wrap around.
 Moving to a hit in another conversation or a server log selects it with
 `dispatch_keeping_focus` and scrolls the line to the top of the log with
-`LogList::scroll_to_sequence_at` (no rows are kept above it: a tall row above
-could push the match out of view). When that row is itself taller than the
-log, `LogList::settle` (called from `render_chat` once the row is measured)
-moves on inside it to the place the match's byte offset suggests, as a
-fraction of the row's height, a third of the log below the top. This is an
-estimate (wrapping is not measured per match), good to a few lines; hits
-whose line is gone are skipped. The scope is "this channel" (the log of the
+`LogList::scroll_to_sequence` (no rows are kept above it: a tall row above
+could push the match out of view). The jump then stays pending (`Reveal`)
+until the match is seen inside the log: the hit's row adds a zero-size canvas
+that, when painted, asks the row's own `TextLayout::position_for_index` for
+the first match (in the displayed text, after short-URL and character
+reference conversion) and stores its window y in a probe; `render_chat` calls
+`search_reveal_step`, which reads the probe of the last frame and, while the
+match lies outside the log, scrolls by the difference (target: a third of the
+log below the top) and requests another frame. It ends when the match is
+inside the log or after 8 frames (a row never painted, or gone). The position
+comes from the real wrapped layout, so character widths do not matter, and
+only the one selected row is measured. Hits whose line is gone are skipped. The scope is "this channel" (the log of the
 selected channel, private conversation or, on a server tab, "this log") or
 "all" (every channel, private conversation and server log in memory). While the
 bar is open the term is highlighted in whatever main log is shown: yellow

@@ -5736,7 +5736,7 @@ impl ChatWindow {
         let theme = theme::current(cx);
         self.sync_log_lists();
         self.search_refresh_if_stale(window, cx);
-        self.search_settle_scroll(cx);
+        self.search_reveal_step(window);
         let search_bar = self.render_search_bar(cx);
         let selection = self.state.selection();
         let mut origin = decorations::content_origin(window);
@@ -7098,6 +7098,7 @@ impl ChatWindow {
             .into_iter()
             .map(|range| compact.shown_range(range))
             .collect();
+        let first_found_start = found.first().map(|range| range.start);
         let styled = styled_log_text(
             &prefix,
             compact.text(),
@@ -7111,6 +7112,24 @@ impl ChatWindow {
             &style.theme,
         );
         let layout = styled.layout().clone();
+        // While a search jump to this line is unfinished, report where its
+        // first match is painted (the layout is only valid once painted).
+        let probe = self
+            .search_probe(message.sequence)
+            .zip(first_found_start.map(|start| start + prefix_len))
+            .map(|(probe, index)| {
+                let (layout, sequence) = (layout.clone(), message.sequence);
+                canvas(
+                    |_, _, _| {},
+                    move |_, _, _, _| {
+                        if let Some(position) = layout.position_for_index(index) {
+                            probe.set(Some((sequence, position.y, layout.line_height())));
+                        }
+                    },
+                )
+                .absolute()
+                .size_0()
+            });
         let down_layout = layout.clone();
         let move_layout = layout.clone();
         let click_layout = layout;
@@ -7242,6 +7261,7 @@ impl ChatWindow {
                     CursorStyle::IBeam
                 })
                 .child(styled)
+                .children(probe)
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, event: &MouseDownEvent, window, cx| {
