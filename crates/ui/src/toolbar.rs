@@ -35,6 +35,11 @@ pub struct State {
     pub joined: bool,
     pub can_join_or_part: bool,
     pub can_next_unread: bool,
+    /// The selected public channel's topic or mode can be changed, and the
+    /// selected network's own nickname (#370).
+    pub can_topic: bool,
+    pub can_mode: bool,
+    pub can_nick: bool,
     pub can_whois: bool,
     pub can_upload: bool,
     /// The windows are kept on top (Windows only).
@@ -47,6 +52,9 @@ enum Click {
     Disconnect,
     Reconnect,
     JoinOrPart,
+    Topic,
+    Mode,
+    Nick,
     NextUnread,
     Whois,
     Upload,
@@ -79,8 +87,7 @@ struct Button {
 
 impl State {
     /// The buttons in order, with `None` for a separator between groups.
-    /// Topic, mode and nickname changes and the next notification join the
-    /// groups when those actions exist (#369, #370).
+    /// The next notification joins the groups when that action exists (#369).
     fn layout(&self) -> Vec<Option<Button>> {
         self.layout_with(cfg!(target_os = "windows"))
     }
@@ -146,6 +153,31 @@ impl State {
                     Click::JoinOrPart,
                 )
             }),
+            None,
+            Some(button(
+                "topic",
+                "message-square-text",
+                "toolbar_topic",
+                Keys::None,
+                self.can_topic,
+                Click::Topic,
+            )),
+            Some(button(
+                "mode",
+                "sliders-horizontal",
+                "toolbar_mode",
+                Keys::None,
+                self.can_mode,
+                Click::Mode,
+            )),
+            Some(button(
+                "nick",
+                "user-pen",
+                "toolbar_nick",
+                Keys::None,
+                self.can_nick,
+                Click::Nick,
+            )),
             None,
             Some(button(
                 "next-unread",
@@ -303,6 +335,9 @@ impl Toolbar {
                             Click::Reconnect => chat.reconnect_action(&Reconnect, window, cx),
                             Click::AlwaysOnTop => chat.toolbar_always_on_top(window, cx),
                             Click::JoinOrPart => chat.toolbar_join_or_part(cx),
+                            Click::Topic => chat.toolbar_topic(window, cx),
+                            Click::Mode => chat.toolbar_mode(window, cx),
+                            Click::Nick => chat.toolbar_nick(window, cx),
                             Click::NextUnread => {
                                 chat.dispatch(Command::NextUnreadChannel, window, cx)
                             }
@@ -394,8 +429,16 @@ const ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../../../assets/icons/ui/log-out.svg"),
     ),
     (
+        "icons/ui/message-square-text.svg",
+        include_bytes!("../../../assets/icons/ui/message-square-text.svg"),
+    ),
+    (
         "icons/ui/plug-zap.svg",
         include_bytes!("../../../assets/icons/ui/plug-zap.svg"),
+    ),
+    (
+        "icons/ui/sliders-horizontal.svg",
+        include_bytes!("../../../assets/icons/ui/sliders-horizontal.svg"),
     ),
     (
         "icons/ui/refresh-cw.svg",
@@ -408,6 +451,10 @@ const ICONS: &[(&str, &[u8])] = &[
     (
         "icons/ui/unplug.svg",
         include_bytes!("../../../assets/icons/ui/unplug.svg"),
+    ),
+    (
+        "icons/ui/user-pen.svg",
+        include_bytes!("../../../assets/icons/ui/user-pen.svg"),
     ),
     (
         "icons/ui/user-search.svg",
