@@ -123,14 +123,16 @@ fn text_mark(realname: &str) -> Option<(u8, usize)> {
 }
 
 /// A realname without a leading mark (KVIrc's ETX, a digit, SI, or the
-/// textual `\x03<digit>\x03`), as the user configured it.
+/// textual `\x03<digit>\x03`), as the user configured it. When we add
+/// KVIrc's mark to a realname the user began with a textual one, both go.
 pub(crate) fn without_mark(realname: &str) -> &str {
-    if let Some((_, len)) = text_mark(realname) {
-        return &realname[len..];
-    }
-    match realname.as_bytes() {
+    let rest = match realname.as_bytes() {
         [0x03, b'0'..=b'7', 0x0f, ..] => &realname[3..],
         _ => realname,
+    };
+    match text_mark(rest) {
+        Some((_, len)) => &rest[len..],
+        None => rest,
     }
 }
 
@@ -831,6 +833,7 @@ mod tests {
         assert_eq!(without_mark("\\x034\\x03"), "");
         assert_eq!(without_mark("\\X034\\x03Alice"), "\\X034\\x03Alice");
         assert_eq!(without_mark("Alice \\x034\\x03"), "Alice \\x034\\x03");
+        assert_eq!(without_mark("\u{3}4\u{f}\\x034\\x03Bob"), "Bob");
     }
 
     #[test]

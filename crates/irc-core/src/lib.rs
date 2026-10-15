@@ -3597,7 +3597,8 @@ impl WhoisCollector {
                 info.username = arg(2);
                 info.host = arg(3);
                 info.realname = if args.len() > 5 {
-                    args.last().cloned()
+                    args.last()
+                        .map(|real| peer_avatar::without_mark(real).to_owned())
                 } else {
                     None
                 };
