@@ -27,6 +27,7 @@ Server history is limited to channel history on opt-in IRCv3 servers (recent lin
 ## Channels
 
 - PARTIAL — configured channels auto-join after registration; `/join` and `/part` work, with member snapshots refreshed on JOIN, PART, KICK, QUIT, NICK and channel MODE
+- PARTIAL — a 475 (bad channel key) for a JOIN we sent opens a key dialog (masked field, "remember" checkbox on by default); the key is saved to the credential store only after our own JOIN is confirmed and is reused by later manual joins and auto-joins (D052); keys cannot be entered before the first JOIN or edited in the auto-join list
 - PARTIAL — a KICK (ours or another member's) and a refused JOIN (471 full, 473 invite-only, 474 banned, 475 bad key) add a line to the channel log in the warning color, naming who did it (a refused join of a channel the user just asked for opens its conversation to show it); the server log still gets the raw line, except for our own KICK, which it records as leaving the channel. A ban is only shown where the server says so explicitly (474)
 - PARTIAL — live channel rows, or four mock channels across two networks
 - PARTIAL — the combined log lays a line out as `time | channel [network] nick: text` in one flowing text (full channel and network names, no fixed channel name column); the former Appearance `sub_log_name_width` setting was removed (ignored when read)
