@@ -5,11 +5,11 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
-    fill, point, prelude::*, px, relative, size,
+    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, DispatchPhase, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId,
+    KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    Pixels, Point, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle,
+    Window, actions, div, fill, point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::*;
 
@@ -460,11 +460,7 @@ impl TextInput {
         }
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _window: &mut Window, _: &mut Context<Self>) {
-        self.is_selecting = false;
-    }
-
-    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         if self.is_selecting {
             self.select_to(self.index_for_mouse_position(event.position), cx);
         }
@@ -1064,6 +1060,23 @@ impl Element for TextElement {
             input.last_bounds = Some(bounds);
             input.scroll_x = scroll_x;
         });
+
+        // A drag keeps selecting after the pointer leaves the field (a div's
+        // own move handler only fires while hovered, which dropped the first
+        // characters when the pointer overshot the left edge) and ends on a
+        // release anywhere in the window.
+        let input = self.input.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+            if phase == DispatchPhase::Capture {
+                input.update(cx, |input, cx| input.on_mouse_move(event, cx));
+            }
+        });
+        let input = self.input.clone();
+        window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+            if phase == DispatchPhase::Capture {
+                input.update(cx, |input, _| input.is_selecting = false);
+            }
+        });
     }
 }
 
@@ -1117,9 +1130,6 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
             .bg(theme.window)
             .w_full()
             .overflow_hidden()
@@ -1348,6 +1358,59 @@ mod tests {
         input.read_with(cx, |input, _| {
             assert!(!input.is_composing());
             assert_eq!(input.content.as_ref(), "かな");
+        });
+    }
+
+    /// Dragging from the end past the left edge of the field, where the
+    /// pointer is no longer over it, still selects the first character.
+    #[gpui::test]
+    fn drag_past_the_left_edge_selects_from_the_first_character(cx: &mut gpui::TestAppContext) {
+        use gpui::{Modifiers, MouseButton};
+
+        struct Host(Entity<TextInput>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().pl(px(100.)).w(px(300.)).child(self.0.clone())
+            }
+        }
+
+        cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::new(
+                cayenchat_storage::ThemeMode::Light,
+                gpui::WindowAppearance::Light,
+                &cayenchat_storage::Appearance::default(),
+            ));
+        });
+        let input = cx.new(|cx| {
+            let mut input = TextInput::new(cx);
+            input.content = "example".into();
+            input
+        });
+        let (_host, cx) = cx.add_window_view(|_, _| Host(input.clone()));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let end = point(px(100. + 4. + 150.), px(10.));
+        cx.simulate_mouse_down(end, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            point(px(100. + 4. + 20.), px(10.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        // Outside the field: the pointer overshoots to the left.
+        cx.simulate_mouse_move(
+            point(px(20.), px(10.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_up(
+            point(px(20.), px(10.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.selected_range, 0..7);
+            assert!(!input.is_selecting);
         });
     }
 
