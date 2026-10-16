@@ -2106,6 +2106,31 @@ impl ChatWindow {
         })
     }
 
+    /// What a double click on a server row does to `network`: connect one not
+    /// used in this run, reconnect a dropped one, disconnect a registered
+    /// one, and leave one that is still connecting or waiting to retry.
+    fn toggle_connection(
+        &mut self,
+        network: NetworkId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.sessions.get(&network) else {
+            return;
+        };
+        if session.retry_pending {
+            return;
+        }
+        if session.irc.is_none() {
+            self.reconnect(network, window, cx);
+        } else if matches!(
+            self.state.status(network),
+            Some(ConnectionStatus::Registered)
+        ) {
+            self.disconnect(network, cx);
+        }
+    }
+
     fn connect_action(&mut self, _: &Connect, window: &mut Window, cx: &mut Context<Self>) {
         match self.selected_network_id() {
             Some(network) => self.reconnect(network, window, cx),
@@ -5679,8 +5704,13 @@ impl ChatWindow {
                             cx.notify();
                         }),
                     )
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         this.dispatch_keeping_focus(Command::SelectServer(server_id), window, cx);
+                        // The double click is one gesture: only its second
+                        // click acts, so it cannot connect and then disconnect.
+                        if event.click_count() == 2 {
+                            this.toggle_connection(server_id, window, cx);
+                        }
                     }))
                     .into_any_element()
             }
