@@ -2095,6 +2095,7 @@ impl SettingsWindow {
                 .id("server-menu")
                 .max_h(px(260.))
                 .overflow_y_scroll()
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.surface);
@@ -2274,6 +2275,7 @@ impl SettingsWindow {
         );
         if self.settings.encoding_list_open {
             let mut menu = div()
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.surface);
@@ -2850,6 +2852,7 @@ impl SettingsWindow {
                 .ml(px(158.))
                 .max_h(px(170.))
                 .overflow_y_scroll()
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.surface);
