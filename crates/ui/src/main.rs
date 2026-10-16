@@ -6630,6 +6630,26 @@ impl ChatWindow {
                         .when(!enabled, |d| d.text_color(theme.text_muted)),
                 );
             }
+            // On our own row in a channel, changing the nickname comes last.
+            if !menu.private && self.is_own_nickname(menu.network, &menu.nickname) {
+                popup = popup
+                    .child(div().my_1().border_t_1().border_color(theme.separator))
+                    .child(
+                        div()
+                            .id("member-menu-nick")
+                            .px_2()
+                            .py_1()
+                            .child(self.i18n.text("server_menu_nick"))
+                            .when(enabled, |d| {
+                                d.cursor_pointer()
+                                    .hover(|d| d.bg(theme.hover_strong))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_member_prompt(MemberPromptKind::Nick, window, cx)
+                                    }))
+                            })
+                            .when(!enabled, |d| d.text_color(theme.text_muted)),
+                    );
+            }
             popup
         });
         if let Some(prompt) = self.member_prompt.as_mut()
