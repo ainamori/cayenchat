@@ -32,6 +32,8 @@ mod menu_bar;
 mod notifier;
 #[cfg(test)]
 mod perf_baseline;
+#[cfg(any(target_os = "windows", test))]
+mod placement;
 mod previews;
 mod quit_dialog;
 mod scrollbar;
@@ -3616,12 +3618,31 @@ impl ChatWindow {
             settings.selected_server = profile;
         }
         let owner = window.window_handle().downcast::<ChatWindow>().unwrap();
-        let bounds = Bounds::centered(None, size(px(900.), px(750.)), cx);
+        let min_size = size(px(760.), px(540.));
+        let wanted = size(px(900.), px(750.));
+        // Beside the chat window on its own display. Windows and macOS only:
+        // GPUI cannot place a window on Linux, where the usual place stays.
+        let owner_display = window.display(cx);
+        #[cfg(target_os = "windows")]
+        let owner_scale = window.scale_factor();
+        let (bounds, display_id) = match owner_display {
+            Some(display) if cfg!(any(target_os = "windows", target_os = "macos")) => (
+                window_layout::secondary_bounds(
+                    window.bounds(),
+                    display.bounds(),
+                    wanted,
+                    min_size,
+                ),
+                Some(display.id()),
+            ),
+            _ => (Bounds::centered(None, wanted, cx), None),
+        };
         match cx.open_window(
             WindowOptions {
                 app_id: Some(APP_ID.into()),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(760.), px(540.))),
+                display_id,
+                window_min_size: Some(min_size),
                 titlebar: Some(TitlebarOptions {
                     title: Some(self.i18n.text("settings_title").into()),
                     ..Default::default()
@@ -3637,6 +3658,15 @@ impl ChatWindow {
             },
         ) {
             Ok(handle) => {
+                // GPUI converts the bounds with the scale of the display the
+                // window is created on; put it right in physical pixels.
+                // Test windows have no native handle, so they skip it.
+                #[cfg(target_os = "windows")]
+                if display_id.is_some() && !cfg!(test) {
+                    let _ = handle.update(cx, |_, settings_window, _| {
+                        placement::place_native(settings_window, bounds, owner_scale)
+                    });
+                }
                 #[cfg(target_os = "windows")]
                 if self.always_on_top {
                     let _ = handle.update(cx, |_, window, _| {
