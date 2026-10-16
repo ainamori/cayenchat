@@ -34,6 +34,9 @@ pub struct WhoisWindow {
     status: Option<String>,
     /// The user's avatar image, pushed by the owner (it owns the cache).
     avatar: Option<Arc<RenderImage>>,
+    /// Images this window replaced; their tiles in its own atlas are freed
+    /// at the next render, which no longer draws them.
+    retired: Vec<Arc<RenderImage>>,
     /// Whether the server exchanges avatars, so the user can be asked.
     can_request_avatar: bool,
     i18n: Localizer,
@@ -80,6 +83,7 @@ impl WhoisWindow {
                         menu_scroll: ScrollHandle::new(),
                         status: None,
                         avatar: None,
+                        retired: Vec::new(),
                         can_request_avatar: false,
                         i18n,
                         focus,
@@ -123,13 +127,8 @@ impl WhoisWindow {
         can_request: bool,
         cx: &mut Context<Self>,
     ) {
-        let same = match (&self.avatar, &avatar) {
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-            (None, None) => true,
-            _ => false,
-        };
-        if !same || self.can_request_avatar != can_request {
-            self.avatar = avatar;
+        let changed = swap_avatar(&mut self.avatar, &mut self.retired, avatar);
+        if changed || self.can_request_avatar != can_request {
             self.can_request_avatar = can_request;
             cx.notify();
         }
@@ -380,6 +379,9 @@ fn button(
 
 impl Render for WhoisWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        for image in self.retired.drain(..) {
+            let _ = window.drop_image(image);
+        }
         let title = window_title(&self.info);
         let content = self.render_content(cx);
         crate::decorations::window_frame(window, cx, title, content)
@@ -545,9 +547,49 @@ impl WhoisWindow {
     }
 }
 
+/// Shows `new` in place of `current`, queueing a replaced image for release;
+/// returns whether the shown image changed.
+fn swap_avatar(
+    current: &mut Option<Arc<RenderImage>>,
+    retired: &mut Vec<Arc<RenderImage>>,
+    new: Option<Arc<RenderImage>>,
+) -> bool {
+    let same = match (&*current, &new) {
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        (None, None) => true,
+        _ => false,
+    };
+    if same {
+        return false;
+    }
+    retired.extend(std::mem::replace(current, new));
+    true
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{WhoisInfo, channel_name, idle_text, window_title};
+    use super::{WhoisInfo, channel_name, idle_text, swap_avatar, window_title};
+    use gpui::RenderImage;
+    use std::sync::Arc;
+
+    fn image() -> Arc<RenderImage> {
+        let buffer = image::RgbaImage::from_raw(1, 1, vec![0; 4]).unwrap();
+        Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
+    }
+
+    #[test]
+    fn replaced_and_cleared_avatars_are_queued_for_release() {
+        let (a, b) = (image(), image());
+        let (mut current, mut retired) = (None, Vec::new());
+        assert!(swap_avatar(&mut current, &mut retired, Some(a.clone())));
+        assert!(retired.is_empty());
+        assert!(!swap_avatar(&mut current, &mut retired, Some(a.clone())));
+        assert!(swap_avatar(&mut current, &mut retired, Some(b.clone())));
+        assert!(Arc::ptr_eq(&retired[0], &a));
+        assert!(swap_avatar(&mut current, &mut retired, None));
+        assert!(Arc::ptr_eq(&retired[1], &b));
+        assert!(current.is_none());
+    }
 
     #[test]
     fn strips_membership_prefixes_but_keeps_channel_prefixes() {

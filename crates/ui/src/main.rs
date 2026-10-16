@@ -1875,6 +1875,7 @@ impl ChatWindow {
         self.avatars
             .set_enabled(settings.servers.iter().any(|profile| profile.user_avatars));
         self.saved = settings;
+        self.refresh_whois_avatars(cx);
         cx.notify();
     }
 
