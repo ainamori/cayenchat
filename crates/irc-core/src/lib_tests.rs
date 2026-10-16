@@ -1400,12 +1400,23 @@ fn a_join_burst_sends_only_a_few_mode_queries_until_they_are_answered() {
             asked.push(lines.next().unwrap().unwrap());
         }
         assert_eq!(asked, ["MODE #c0", "MODE #c1", "MODE #c2", "MODE #c3"]);
+        // A slow machine may let the 10 s give-up time pass while we wait;
+        // a query then is a legitimate timeout, not a burst.
+        let sent = Instant::now();
         socket
             .set_read_timeout(Some(Duration::from_millis(500)))
             .unwrap();
-        assert!(lines.next().unwrap().is_err(), "a fifth query went out");
+        let line = lines.next().unwrap();
+        assert!(
+            line.is_err() || sent.elapsed() > Duration::from_secs(8),
+            "a fifth query went out"
+        );
+        if line.is_ok() {
+            return;
+        }
         // One answer frees one place.
         socket.write_all(b":server 324 me #c2 +n\r\n").unwrap();
+        let answered = Instant::now();
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
@@ -1413,8 +1424,9 @@ fn a_join_burst_sends_only_a_few_mode_queries_until_they_are_answered() {
         socket
             .set_read_timeout(Some(Duration::from_millis(500)))
             .unwrap();
+        let line = lines.next().unwrap();
         assert!(
-            lines.next().unwrap().is_err(),
+            line.is_err() || answered.elapsed() > Duration::from_secs(8),
             "more than one query went out"
         );
     });

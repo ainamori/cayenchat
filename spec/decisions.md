@@ -1268,7 +1268,7 @@ conversation titles are unchanged.
   fast or slow the server is; a channel that never answers keeps unknown
   modes. A `CASEMAPPING`
   change folds the tracked names again (names that collide fall back to
-  unknown).
+  unknown), and queued or sent queries for names no longer tracked are dropped, so the queue stays within the table.
 
 ## D050 — Per-channel text encodings with `/charset` (#396)
 

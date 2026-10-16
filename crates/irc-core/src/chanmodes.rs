@@ -217,6 +217,16 @@ impl ChannelModes {
                 }
             }
         }
+        // Queued and sent queries live only for channels still tracked under
+        // their own name, so the queue never outgrows the table.
+        let channels = &self.channels;
+        let tracked = |name: &String| {
+            channels
+                .get(&mapping.fold(name))
+                .is_some_and(|(own, _)| own == name)
+        };
+        self.pending.retain(tracked);
+        self.in_flight.retain(|(name, _)| tracked(name));
     }
 
     fn apply(&self, flags: &mut Vec<char>, plus: bool, letters: impl Iterator<Item = char>) {
@@ -368,6 +378,29 @@ mod tests {
         assert_eq!(modes.take_queries(late), ["#c6", "#c7", "#c8", "#c9"]);
         assert_eq!(modes.next_deadline(), None);
         assert_eq!(modes.channels["#c2"].1, None);
+    }
+
+    #[test]
+    fn refolding_again_and_again_keeps_the_queue_within_the_table() {
+        let mut modes = ChannelModes::default();
+        let ascii = CaseMapping::Ascii;
+        let rfc = CaseMapping::Rfc1459;
+        for round in 0..6 {
+            // Distinct under ASCII, one name under RFC 1459.
+            for n in 0..MAX_TRACKED {
+                let bracket = if n % 2 == 0 { '[' } else { '{' };
+                modes.joined(&format!("#r{round}x{n}{bracket}"), ascii);
+            }
+            modes.set_casemapping(rfc);
+            assert!(modes.pending.len() <= modes.channels.len());
+            assert!(modes.pending.len() <= MAX_TRACKED);
+            modes.set_casemapping(ascii);
+            assert!(modes.pending.len() <= modes.channels.len());
+            assert!(modes.pending.len() <= MAX_TRACKED);
+        }
+        for name in &modes.pending {
+            assert_eq!(modes.channels[name].0, *name);
+        }
     }
 
     #[test]
