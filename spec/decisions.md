@@ -1233,6 +1233,12 @@ conversation titles are unchanged.
   connection and folded channel name in `irc-core`, and per conversation
   (`Conversation::modes`) in the app, so equal names on two servers never mix.
 - A reply is not awaited: a server that never answers just leaves the modes out.
+- **Bounded.** At most 512 channels per connection are tracked; a join beyond
+  that keeps unknown modes (no prefix) and is reported once as a diagnostic.
+  Queries wait in a queue of at most that size and are sent two per incoming
+  server line, so a join burst does not flood the send queue. A `CASEMAPPING`
+  change folds the tracked names again (names that collide fall back to
+  unknown).
 
 ## D050 — Per-channel text encodings with `/charset` (#396)
 

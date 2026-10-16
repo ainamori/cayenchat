@@ -86,6 +86,8 @@ const PING_TIMEOUT_SECS: u32 = 120;
 /// Limits on WHOIS replies that have not reached end-of-WHOIS (318), so a
 /// hostile server cannot grow memory by never finishing them.
 const MAX_PENDING_WHOIS: usize = 32;
+/// Channel mode queries sent per incoming server line.
+const MODE_QUERIES_PER_LINE: usize = 2;
 const MAX_WHOIS_ITEMS: usize = 512;
 /// The realname sent in `USER` when none is configured; with a shared peer
 /// avatar it starts with KVIrc's avatar mark.
@@ -3001,6 +3003,7 @@ impl Worker {
             self.roster.presence.set_casemapping(announced);
             self.history.set_casemapping(announced);
             self.accounts.set_casemapping(announced);
+            self.channel_modes.set_casemapping(announced);
             self.emit(Event::CaseMapping(announced)).await?;
         }
         ControlFlow::Continue(history_started)
@@ -3204,7 +3207,7 @@ impl Worker {
         lifecycle.extend(merged(&mut self.peers, metadata_events));
         let whois_reply = self.whois.observe(&message);
         self.track_own_membership(&message).await?;
-        let mode_events = self.track_channel_modes(&message);
+        let mode_events = self.track_channel_modes(&message).await;
         // Echoes, ACKs and errors of messages we sent.
         if self.observe_echoes(&message).await? {
             return ControlFlow::Continue(());
@@ -3235,7 +3238,6 @@ impl Worker {
             server_time,
             self.batch_negotiated,
         );
-        let mut mode_queries = Vec::new();
         for event in translated
             .into_iter()
             .chain(whois_reply.map(|info| Event::Whois(Box::new(info))))
@@ -3275,16 +3277,20 @@ impl Worker {
                     _ => {}
                 }
             }
-            // Asked on every own join (also after a reconnect); until the
-            // reply arrives the modes are unknown.
-            if let Event::Joined { channel } = &event {
-                // Raw: the typed command would leave a trailing space.
-                mode_queries.push(IrcCommand::Raw("MODE".into(), vec![channel.clone()]));
-            }
             self.emit(event).await?;
         }
         self.emit_all(account_events).await?;
         self.emit_all(mode_events).await?;
+        // Asked for every own join (also after a reconnect), a few per
+        // incoming line so a join burst is paced; until the reply arrives
+        // the modes are unknown. Raw: the typed command would leave a
+        // trailing space.
+        let mode_queries = self
+            .channel_modes
+            .take_queries(MODE_QUERIES_PER_LINE)
+            .into_iter()
+            .map(|channel| IrcCommand::Raw("MODE".into(), vec![channel]))
+            .collect();
         self.send_commands(mode_queries).await?;
         if self.track_accounts
             && let Some(command) = self.accounts.next_who(tokio::time::Instant::now())
@@ -3302,11 +3308,13 @@ impl Worker {
 
     /// The flags of a joined channel after `message`. Leaving or joining
     /// ourselves discards what was known.
-    fn track_channel_modes(&mut self, message: &IrcMessage) -> Vec<Event> {
+    async fn track_channel_modes(&mut self, message: &IrcMessage) -> Vec<Event> {
         let own = message.source_nickname() == Some(self.current_nick.as_str());
         match &message.command {
             IrcCommand::JOIN(channel, _, _) if own => {
-                self.channel_modes.joined(channel, self.casemapping);
+                if let Some(note) = self.channel_modes.joined(channel, self.casemapping) {
+                    self.note(note).await;
+                }
             }
             IrcCommand::PART(channel, _) if own => {
                 self.channel_modes.left(channel, self.casemapping);

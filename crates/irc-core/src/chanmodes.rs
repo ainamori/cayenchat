@@ -3,7 +3,7 @@
 //! are kept: arguments (a key, a limit) are never read, so they cannot reach
 //! the UI whatever the server's `CHANMODES` says.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use irc::proto::mode::Mode;
 use irc::proto::{Command, Message, Response};
@@ -12,6 +12,9 @@ use crate::{CaseMapping, valid_channel};
 
 /// Most letters kept for one channel; a server cannot grow the state.
 const MAX_FLAGS: usize = 64;
+/// Most channels tracked, and so most queries waiting; a channel beyond it
+/// keeps unknown modes (no title prefix) instead of growing the state.
+const MAX_TRACKED: usize = 512;
 /// List modes (type A) when the server announces no `CHANMODES`, and the
 /// membership modes when it announces no `PREFIX`.
 const DEFAULT_LIST_MODES: &str = "beI";
@@ -23,8 +26,14 @@ pub(crate) struct ChannelModes {
     /// The letters that are not channel flags: they take a list entry or a
     /// member as argument.
     not_flags: HashSet<char>,
-    /// The channels we are in, by folded name; `None` until the `324`.
-    channels: HashMap<String, Option<Vec<char>>>,
+    /// The channels we are in, by folded name: the name as the server wrote
+    /// it (to fold again when `CASEMAPPING` changes) and the flags, `None`
+    /// until the `324`.
+    channels: HashMap<String, (String, Option<Vec<char>>)>,
+    /// Channels whose modes are still to be asked, oldest first.
+    pending: VecDeque<String>,
+    /// The limit was reported once.
+    warned: bool,
 }
 
 impl Default for ChannelModes {
@@ -37,6 +46,8 @@ impl Default for ChannelModes {
                 .chain(DEFAULT_PREFIX_MODES.chars())
                 .collect(),
             channels: HashMap::new(),
+            pending: VecDeque::new(),
+            warned: false,
         }
     }
 }
@@ -102,12 +113,14 @@ impl ChannelModes {
                 let letters = args.get(2).map(String::as_str).unwrap_or("");
                 self.apply(&mut flags, true, letters.chars());
                 let shown = flags.iter().collect();
-                self.channels.insert(key, Some(flags));
+                if let Some(entry) = self.channels.get_mut(&key) {
+                    entry.1 = Some(flags);
+                }
                 Some((channel.clone(), shown))
             }
             Command::ChannelMODE(channel, modes) => {
                 let key = mapping.fold(channel);
-                let mut updated = self.channels.get_mut(&key)?.take()?;
+                let mut updated = self.channels.get_mut(&key)?.1.take()?;
                 for mode in modes {
                     let (plus, mode) = match mode {
                         Mode::Plus(mode, _) => (true, mode),
@@ -119,21 +132,59 @@ impl ChannelModes {
                     }
                 }
                 let shown = updated.iter().collect();
-                self.channels.insert(key, Some(updated));
+                if let Some(entry) = self.channels.get_mut(&key) {
+                    entry.1 = Some(updated);
+                }
                 Some((channel.clone(), shown))
             }
             _ => None,
         }
     }
 
-    /// Our own join starts from unknown modes.
-    pub(crate) fn joined(&mut self, channel: &str, mapping: CaseMapping) {
-        self.channels.insert(mapping.fold(channel), None);
+    /// Our own join starts from unknown modes and queues the query. Past
+    /// `MAX_TRACKED` channels the join is not tracked at all.
+    /// Returns a diagnostic the first time the limit is hit.
+    pub(crate) fn joined(&mut self, channel: &str, mapping: CaseMapping) -> Option<String> {
+        let key = mapping.fold(channel);
+        if !self.channels.contains_key(&key) && self.channels.len() >= MAX_TRACKED {
+            return (!std::mem::replace(&mut self.warned, true))
+                .then(|| format!("Channel modes are not tracked beyond {MAX_TRACKED} channels."));
+        }
+        self.pending.retain(|queued| mapping.fold(queued) != key);
+        self.pending.push_back(channel.to_owned());
+        self.channels.insert(key, (channel.to_owned(), None));
+        None
     }
 
     /// A part or kick ends tracking.
     pub(crate) fn left(&mut self, channel: &str, mapping: CaseMapping) {
-        self.channels.remove(&mapping.fold(channel));
+        let key = mapping.fold(channel);
+        self.channels.remove(&key);
+        self.pending.retain(|queued| mapping.fold(queued) != key);
+    }
+
+    /// Up to `limit` channels whose modes are to be asked now; the rest
+    /// wait for later calls, so a join burst is paced by the traffic it
+    /// causes.
+    pub(crate) fn take_queries(&mut self, limit: usize) -> Vec<String> {
+        let count = limit.min(self.pending.len());
+        self.pending.drain(..count).collect()
+    }
+
+    /// The server changed its case mapping: fold the names again. Names
+    /// that now collide keep one entry, with unknown modes.
+    pub(crate) fn set_casemapping(&mut self, mapping: CaseMapping) {
+        let old = std::mem::take(&mut self.channels);
+        for (key, (name, flags)) in old {
+            let refolded = mapping.fold(&name);
+            if refolded == key {
+                self.channels.insert(key, (name, flags));
+            } else if self.channels.contains_key(&refolded) {
+                self.channels.insert(refolded, (name, None));
+            } else {
+                self.channels.insert(refolded, (name, flags));
+            }
+        }
     }
 
     fn apply(&self, flags: &mut Vec<char>, plus: bool, letters: impl Iterator<Item = char>) {
@@ -239,6 +290,40 @@ mod tests {
         ));
         let shown = feed(&mut modes, ":s 324 me #x +nqa").unwrap().1;
         assert_eq!(shown, "n");
+    }
+
+    #[test]
+    fn tracking_and_queries_are_bounded() {
+        let mut modes = ChannelModes::default();
+        let mapping = CaseMapping::default();
+        let mut warnings = 0;
+        for n in 0..MAX_TRACKED + 100 {
+            warnings += usize::from(modes.joined(&format!("#c{n}"), mapping).is_some());
+        }
+        assert_eq!(warnings, 1);
+        assert_eq!(modes.channels.len(), MAX_TRACKED);
+        assert_eq!(
+            feed(&mut modes, &format!(":s 324 me #c{MAX_TRACKED} +n")),
+            None
+        );
+        // The queue drains a few at a time and holds each channel once.
+        assert_eq!(modes.take_queries(2), ["#c0", "#c1"]);
+        modes.joined("#c2", mapping);
+        assert_eq!(modes.pending.len(), MAX_TRACKED - 2);
+        modes.left("#c3", mapping);
+        assert_eq!(modes.pending.len(), MAX_TRACKED - 3);
+    }
+
+    #[test]
+    fn a_casemapping_change_keeps_the_state_reachable() {
+        let mut modes = ChannelModes::default();
+        modes.joined("#foo[", CaseMapping::default());
+        feed(&mut modes, ":s 324 me #foo[ +n");
+        modes.set_casemapping(CaseMapping::Ascii);
+        let seen = modes.observe(&parse(":a!u@h MODE #foo[ +m"), CaseMapping::Ascii, false);
+        assert_eq!(seen, Some(("#foo[".into(), "nm".into())));
+        modes.left("#foo[", CaseMapping::Ascii);
+        assert!(modes.channels.is_empty());
     }
 
     #[test]
