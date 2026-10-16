@@ -43,7 +43,7 @@ use tokio::time::Instant;
 use crate::{
     Event,
     metadata::Handled,
-    text::{nickname_key, same_nickname, strip_formatting},
+    text::{nickname_key, strip_formatting},
     valid_channel,
 };
 use cayenchat_model::names::CaseMapping;
@@ -287,12 +287,12 @@ impl CtcpReplies {
             Some(Prefix::ServerName(name)) => (name.as_str(), false),
             None => ("server", false),
         };
-        if replayed || (user && same_nickname(sender, current_nick)) {
+        if replayed || (user && self.casemapping.same(sender, current_nick)) {
             return Some(handled);
         }
         // STATUSMSG (`@#chan`) reaches part of a channel; still a channel.
         let to_channel = valid_channel(target.trim_start_matches(['~', '@', '%', '+']));
-        if !to_channel && !same_nickname(target, current_nick) {
+        if !to_channel && !self.casemapping.same(target, current_nick) {
             return Some(handled);
         }
         if !request
@@ -842,6 +842,28 @@ mod tests {
             let text = reply("lat{", "alice", &format!("PING {token}"));
             let line = &lines(&observe(&mut ctcp, &text, now).unwrap())[0];
             assert_eq!(line.contains(" ms"), same, "{line}");
+        }
+    }
+
+    #[test]
+    fn own_nick_exclusion_follows_the_connection_casemapping() {
+        let now = Instant::now();
+        for (mapping, own_echo) in [(CaseMapping::Ascii, false), (CaseMapping::Rfc1459, true)] {
+            let mut ctcp = replies();
+            ctcp.set_casemapping(mapping);
+            let handled = ctcp.request("lat[", "PING", "", now);
+            let token = wire(&handled)[0]
+                .trim_start_matches("PRIVMSG lat[ :\u{1}PING ")
+                .trim_end_matches('\u{1}')
+                .to_owned();
+            // We are `lat{`; the peer `lat[` answers.
+            let text = reply("lat[", "lat{", &format!("PING {token}"));
+            let handled = ctcp.observe(&text.parse().unwrap(), "lat{", false, now);
+            let line = &lines(&handled.unwrap());
+            assert_eq!(line.is_empty(), own_echo, "{line:?}");
+            if !own_echo {
+                assert!(line[0].contains(" ms"), "{line:?}");
+            }
         }
     }
 
