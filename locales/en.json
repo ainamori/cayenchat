@@ -75,6 +75,7 @@
   "member_channel_placeholder": "#channel",
   "server_menu_join": "Join channel…",
   "server_menu_nick": "Change nickname…",
+  "server_menu_settings": "Server settings…",
   "channel_join_title": "Join a channel",
   "channel_join_required": "Enter a channel name.",
   "nickname_change_title": "Change nickname",

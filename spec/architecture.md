@@ -524,6 +524,10 @@ over another row is clicked itself, not the row.
 The server context menu also offers Join channel… (sends `/join <name>`) and
 Change nickname… (`NICK`), each asking in the small prompt the member menu
 uses and enabled only while registered; typed `/join` and `/nick` are unchanged.
+It also offers Server settings…, always enabled: it opens (or raises and
+switches) the settings window on the Connection tab showing the profile of the
+clicked server, found from the menu's network, not the selection, which stays
+as it was (issue #421).
 The log of a channel or private conversation has its own context menu (issue
 #358), opened by a right click on a message row or on blank log space; the
 click never touches the text selection. Groups: Copy (enabled with a non-empty
