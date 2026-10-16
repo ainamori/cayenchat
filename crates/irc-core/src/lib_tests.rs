@@ -1174,7 +1174,12 @@ fn safe_channel_join_names_messages_and_part_round_trip() {
             .unwrap();
         let mut lines = BufReader::new(socket.try_clone().unwrap()).lines();
         let read = |lines: &mut std::io::Lines<BufReader<std::net::TcpStream>>| {
-            lines.next().expect("client closed the connection").unwrap()
+            loop {
+                let line = lines.next().expect("client closed the connection").unwrap();
+                if !is_mode_query(&line) {
+                    break line;
+                }
+            }
         };
         while !read(&mut lines).starts_with("USER ") {}
         socket
@@ -1290,6 +1295,10 @@ fn rejoining_after_a_kick_lists_each_member_once() {
             .unwrap();
         assert_eq!(lines.next().unwrap().unwrap(), "JOIN #test");
         socket.write_all(b":alice!u@h JOIN #test\r\n:server 353 alice = #test :@alice bob\r\n:server 366 alice #test :End of NAMES\r\n:bob!u@h KICK #test alice :bye\r\n:alice!u@h JOIN #test\r\n:server 353 alice = #test :alice @bob\r\n:server 366 alice #test :End of NAMES\r\n").unwrap();
+        // The mode query of each join; the socket must outlive them.
+        for _ in 0..2 {
+            assert_eq!(lines.next().unwrap().unwrap(), "MODE #test");
+        }
     });
     let mut config =
         ConnectionConfig::tls("127.0.0.1".into(), "alice".into(), vec!["#test".into()]);
@@ -1314,6 +1323,127 @@ fn rejoining_after_a_kick_lists_each_member_once() {
 }
 
 #[test]
+fn joining_queries_the_channel_modes_and_follows_changes_without_arguments() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut lines = BufReader::new(socket.try_clone().unwrap()).lines();
+        while !lines.next().unwrap().unwrap().starts_with("USER ") {}
+        socket
+            .write_all(b":server 001 me :Welcome\r\n:server 376 me :End of MOTD\r\n")
+            .unwrap();
+        assert_eq!(lines.next().unwrap().unwrap(), "JOIN #a");
+        socket.write_all(b":me!u@h JOIN #a\r\n").unwrap();
+        assert_eq!(lines.next().unwrap().unwrap(), "MODE #a");
+        socket
+            .write_all(b":server 324 me #a +sntkl secret 50\r\n:op!o@h MODE #a +m-s\r\n:op!o@h MODE #a +ov me me\r\n")
+            .unwrap();
+        // Keep the socket open until the client has read everything.
+        let _ = lines.next();
+    });
+    let mut config = ConnectionConfig::tls("127.0.0.1".into(), "me".into(), vec!["#a".into()]);
+    config.port = port;
+    config.use_tls = false;
+    let mut connection = Connection::connect(config).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut flags = Vec::new();
+    let mut logged = Vec::new();
+    while Instant::now() < deadline && flags.len() < 3 {
+        match connection.try_recv() {
+            Some(Event::ChannelModes { channel, flags: f }) => {
+                assert_eq!(channel, "#a");
+                flags.push(f);
+            }
+            Some(Event::ChannelActivity {
+                kind: ChannelActivityKind::ModeChanged { modes, .. },
+                ..
+            }) => logged.push(modes),
+            Some(_) => {}
+            None => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    assert_eq!(flags, ["sntkl", "ntklm", "ntklm"]);
+    // Only the MODE lines are activity; the 324 is not a mode change.
+    assert_eq!(logged.len(), 2, "{logged:?}");
+    assert!(logged.iter().all(|modes| !modes.contains("secret")));
+    drop(connection);
+    server.join().unwrap();
+}
+
+#[test]
+fn a_join_burst_sends_only_a_few_mode_queries_until_they_are_answered() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut lines = BufReader::new(socket.try_clone().unwrap()).lines();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        while !lines.next().unwrap().unwrap().starts_with("USER ") {}
+        socket
+            .write_all(b":server 001 me :Welcome\r\n:server 376 me :End of MOTD\r\n")
+            .unwrap();
+        assert_eq!(lines.next().unwrap().unwrap(), "JOIN #c0");
+        let burst: String = (0..10).map(|n| format!(":me!u@h JOIN #c{n}\r\n")).collect();
+        socket.write_all(burst.as_bytes()).unwrap();
+        // Further lines from the server do not release more queries.
+        socket
+            .write_all(b":server 366 me #c0 :End of NAMES\r\n:server 366 me #c1 :End of NAMES\r\n")
+            .unwrap();
+        let mut asked = Vec::new();
+        for _ in 0..4 {
+            asked.push(lines.next().unwrap().unwrap());
+        }
+        assert_eq!(asked, ["MODE #c0", "MODE #c1", "MODE #c2", "MODE #c3"]);
+        // A slow machine may let the 10 s give-up time pass while we wait;
+        // a query then is a legitimate timeout, not a burst.
+        let sent = Instant::now();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let line = lines.next().unwrap();
+        assert!(
+            line.is_err() || sent.elapsed() > Duration::from_secs(8),
+            "a fifth query went out"
+        );
+        if line.is_ok() {
+            return;
+        }
+        // One answer frees one place.
+        socket.write_all(b":server 324 me #c2 +n\r\n").unwrap();
+        let answered = Instant::now();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        assert_eq!(lines.next().unwrap().unwrap(), "MODE #c4");
+        socket
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let line = lines.next().unwrap();
+        assert!(
+            line.is_err() || answered.elapsed() > Duration::from_secs(8),
+            "more than one query went out"
+        );
+    });
+    let mut config = ConnectionConfig::tls("127.0.0.1".into(), "me".into(), vec!["#c0".into()]);
+    config.port = port;
+    config.use_tls = false;
+    let mut connection = Connection::connect(config).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && !server.is_finished() {
+        if connection.try_recv().is_none() {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    server.join().unwrap();
+}
+
+#[test]
 fn modes_after_rejoining_from_a_kick_reach_the_roster() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1330,6 +1460,10 @@ fn modes_after_rejoining_from_a_kick_reach_the_roster() {
         assert_eq!(lines.next().unwrap().unwrap(), "JOIN #a");
         // carol left while we were out of the channel and is never reported.
         socket.write_all(b":me!u@h JOIN #a\r\n:server 353 me = #a :@op bob alice carol me\r\n:server 366 me #a :End of NAMES\r\n:op!o@h KICK #a me :bye\r\n:me!u@h JOIN #a\r\n:server 353 me = #a :@op bob alice me\r\n:server 366 me #a :End of NAMES\r\n:op!o@h MODE #a +o alice\r\n:op!o@h MODE #a +v bob\r\n").unwrap();
+        // The mode query of each join; the socket must outlive them.
+        for _ in 0..2 {
+            assert_eq!(lines.next().unwrap().unwrap(), "MODE #a");
+        }
     });
     let mut config = ConnectionConfig::tls("127.0.0.1".into(), "me".into(), vec!["#a".into()]);
     config.port = port;
@@ -1552,7 +1686,7 @@ fn local_server_registration_join_receive_and_send() {
                 || line.starts_with("NOTICE ")
                 || line.starts_with("WHOIS ")
                 || line.starts_with("INVITE ")
-                || line.starts_with("MODE ")
+                || (line.starts_with("MODE ") && !is_mode_query(&line))
             {
                 outgoing.push(line.trim_end().to_owned());
             }
@@ -2195,7 +2329,7 @@ fn sasl_plain_waits_for_success_before_ending_cap_negotiation() {
             loop {
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
-                if !line.starts_with("PING ") {
+                if !line.starts_with("PING ") && !is_mode_query(&line) {
                     break line.trim_end().to_owned();
                 }
             }
@@ -2496,12 +2630,20 @@ fn nickname_in_use_waits_for_another_nickname() {
     worker.join().unwrap();
 }
 
-/// Reads client lines from a fixture socket, skipping PINGs.
+/// Whether a client line is the query of a channel's modes sent after a join.
+fn is_mode_query(line: &str) -> bool {
+    line.trim_end()
+        .strip_prefix("MODE ")
+        .is_some_and(valid_channel)
+}
+
+/// Reads client lines from a fixture socket, skipping PINGs and the mode
+/// query after each join.
 fn read_client_line(reader: &mut BufReader<std::net::TcpStream>) -> String {
     loop {
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
-        if !line.starts_with("PING ") {
+        if !line.starts_with("PING ") && !is_mode_query(&line) {
             break line.trim_end().to_owned();
         }
     }

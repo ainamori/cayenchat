@@ -44,6 +44,10 @@ pub struct Conversation {
     pub messages: Vec<Message>,
     /// Display-only mock roster; live membership will arrive as application events.
     pub members: Vec<String>,
+    /// The mode letters set on a joined channel, as the server last stated
+    /// or changed them; `None` while they are not known. Never holds mode
+    /// arguments.
+    pub modes: Option<String>,
 }
 
 impl Conversation {

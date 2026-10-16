@@ -978,6 +978,11 @@ impl ChatWindow {
                     format!("{} ({})", channel.name, channel.members.len())
                 };
                 let name = display::neutralize_bidi_owned(name);
+                // Known, non-empty modes come first; unknown ones are left out.
+                let name = match channel.modes.as_deref() {
+                    Some(modes) if !modes.is_empty() => format!("[+{modes}] {name}"),
+                    _ => name,
+                };
                 let topic = cayenchat_irc_core::text::strip_formatting(&channel.topic);
                 let topic = topic.split_whitespace().collect::<Vec<_>>().join(" ");
                 if topic.is_empty() {
@@ -4181,6 +4186,9 @@ impl ChatWindow {
                     network,
                     self.i18n.format("event_joined", &[("channel", &channel)]),
                 );
+            }
+            Event::ChannelModes { channel, flags } => {
+                self.state.set_channel_modes(network, &channel, &flags);
             }
             Event::Parted { channel } => {
                 self.state.parted_channel(network, &channel);
