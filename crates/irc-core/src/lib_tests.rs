@@ -254,6 +254,24 @@ fn whois_collector_bounds_unfinished_replies() {
 }
 
 #[test]
+fn whois_realname_hides_both_avatar_marks() {
+    for (wire, shown, marked) in [
+        ("\\x034\\x03Alice", "Alice", true),
+        ("\u{3}4\u{f}Alice", "Alice", true),
+        ("\u{3}4\u{f}\\x034\\x03Alice", "Alice", true),
+        ("\\x031\\x03Alice", "Alice", false),
+        ("Alice", "Alice", false),
+    ] {
+        let mut collector = WhoisCollector::default();
+        let mut feed = |line: &str| collector.observe(&line.parse::<IrcMessage>().unwrap());
+        feed(&format!(":srv 311 me Alice u h * :{wire}"));
+        let info = feed(":srv 318 me Alice :End of WHOIS list.").unwrap();
+        assert_eq!(info.realname.as_deref(), Some(shown), "{wire:?}");
+        assert_eq!(info.avatar_mark, marked, "{wire:?}");
+    }
+}
+
+#[test]
 fn whois_collector_merges_replies_until_end_of_whois() {
     let mut collector = WhoisCollector::default();
     let mut feed = |line: &str| collector.observe(&line.parse::<IrcMessage>().unwrap());
@@ -4595,6 +4613,16 @@ fn the_configured_realname_is_registered_with_the_avatar_mark_only_on_the_wire()
         "Alice Liddell"
     );
     assert!(config.validate().is_ok());
+    config.encoding = "ISO-2022-JP".into();
+    assert!(
+        !config.advertises_avatar(),
+        "SI does not survive ISO-2022-JP"
+    );
+    assert_eq!(config.wire_realname(), "Alice Liddell");
+    assert!(config.validate().is_ok());
+    config.realname = "\\x034\\x03Alice".into();
+    assert_eq!(config.wire_realname(), "\\x034\\x03Alice", "sent as typed");
+    config.encoding = "UTF-8".into();
     config.realname = "a\r\nQUIT".into();
     assert!(config.validate().is_err());
     assert!(

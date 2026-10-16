@@ -228,9 +228,12 @@ impl ConnectionConfig {
     }
 
     /// Whether registration marks the realname as having an avatar: only
-    /// with peer exchange on and a URL explicitly shared.
+    /// with peer exchange on, a URL explicitly shared and an encoding that
+    /// can carry KVIrc's mark (not ISO-2022-JP).
     pub fn advertises_avatar(&self) -> bool {
-        self.ircv3.peer_avatars && self.shared_avatar.is_some()
+        self.ircv3.peer_avatars
+            && self.shared_avatar.is_some()
+            && peer_avatar::carries_mark(&self.encoding)
     }
 
     /// The realname as sent in `USER` and `SETNAME`: the configured value
@@ -868,6 +871,9 @@ pub struct WhoisInfo {
     pub username: Option<String>,
     pub host: Option<String>,
     pub realname: Option<String>,
+    /// The real name carried a mark for a CTCP AVATAR avatar (removed from
+    /// `realname`).
+    pub avatar_mark: bool,
     pub channels: Vec<String>,
     pub server: Option<String>,
     pub server_info: Option<String>,
@@ -1300,6 +1306,8 @@ enum Outgoing {
     },
     /// The URL answered to CTCP AVATAR queries (`None`: stop answering).
     ShareAvatar(Option<String>),
+    /// Ask this user for their avatar with CTCP AVATAR now.
+    QueryAvatar(String),
     /// Change the realname with `SETNAME`; the text is the configured value
     /// without the avatar mark.
     SetName(String),
@@ -1351,6 +1359,10 @@ fn validate_outgoing_relayed<'w>(
             "*".into(),
             format!("\u{1}AVATAR {}\u{1}", url.as_deref().unwrap_or_default()),
         )),
+        Outgoing::QueryAvatar(nickname) => IrcMessage::from(IrcCommand::PRIVMSG(
+            nickname.clone(),
+            "\u{1}AVATAR\u{1}".into(),
+        )),
         // Built and checked by the worker, whose reference types decide it.
         Outgoing::OlderHistory { channel, .. } => IrcMessage::from(IrcCommand::Raw(
             "CHATHISTORY".into(),
@@ -1358,7 +1370,10 @@ fn validate_outgoing_relayed<'w>(
         )),
         Outgoing::SetName(realname) => IrcMessage::from(IrcCommand::Raw(
             "SETNAME".into(),
-            vec![peer_avatar::realname(base_realname(realname), true)],
+            vec![peer_avatar::realname(
+                base_realname(realname),
+                peer_avatar::carries_mark(encoding.label),
+            )],
         )),
         Outgoing::Quit => return Ok(()),
         Outgoing::QuitWith(reason) => IrcMessage::from(IrcCommand::QUIT(Some(reason.clone()))),
@@ -1953,6 +1968,21 @@ impl Connection {
         self.commands
             .try_send(outgoing)
             .map_err(|error| format!("Could not queue avatar sharing: {error}"))
+    }
+
+    /// Asks `nickname` for their avatar with CTCP AVATAR, even if they were
+    /// asked before. It has an effect only when the connection was made with
+    /// [`Ircv3Options::peer_avatars`] and we share a channel with the user;
+    /// an answer arrives as [`Event::UserAvatar`].
+    pub fn request_peer_avatar(&self, nickname: &str) -> Result<(), String> {
+        if !valid_nickname(nickname) {
+            return Err("Invalid nickname.".into());
+        }
+        let outgoing = Outgoing::QueryAvatar(nickname.to_owned());
+        self.validate(&outgoing)?;
+        self.commands
+            .try_send(outgoing)
+            .map_err(|error| format!("Could not queue avatar request: {error}"))
     }
 
     /// Changes the realname on this connection with IRCv3 `SETNAME`. The
@@ -2582,6 +2612,15 @@ impl Worker {
             Outgoing::ShareAvatar(url) => {
                 if let Some(peers) = self.peers.as_mut() {
                     peers.set_share(url);
+                }
+                ControlFlow::Continue(())
+            }
+            Outgoing::QueryAvatar(nickname) => {
+                let note = self.peers.as_mut().and_then(|peers| {
+                    peers.request(&nickname, &self.current_nick, &self.roster.presence)
+                });
+                if let Some(note) = note {
+                    self.note(note).await;
                 }
                 ControlFlow::Continue(())
             }
@@ -3667,11 +3706,9 @@ impl WhoisCollector {
                 info.nickname = nickname.clone();
                 info.username = arg(2);
                 info.host = arg(3);
-                info.realname = if args.len() > 5 {
-                    args.last().cloned()
-                } else {
-                    None
-                };
+                let real = if args.len() > 5 { args.last() } else { None };
+                info.avatar_mark = real.is_some_and(|real| peer_avatar::advertises_avatar(real));
+                info.realname = real.map(|real| peer_avatar::without_mark(real).to_owned());
             }
             312 => {
                 info.server = arg(2);
