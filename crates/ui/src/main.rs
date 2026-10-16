@@ -3503,6 +3503,19 @@ impl ChatWindow {
         self.open_settings_for(profile, window, cx);
     }
 
+    /// Opens the settings window on the server the context menu was opened
+    /// on, leaving the selection alone.
+    fn open_server_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = self.server_menu.take() else {
+            return;
+        };
+        let profile = self
+            .sessions
+            .get(&menu.network)
+            .map(|session| session.profile_id.clone());
+        self.open_settings_for(profile, window, cx);
+    }
+
     /// Profile of the selected server, which the settings window edits first.
     fn selected_profile_id(&self) -> Option<String> {
         self.sessions
@@ -6201,108 +6214,122 @@ impl ChatWindow {
                     .child(panes.channels.clone().cached(pane_style().w_full())),
             );
 
-        let server_menu = self.server_menu.as_ref().map(|menu| {
-            let network = menu.network;
-            let session = self.sessions.get(&network);
-            let connected = session.is_some_and(|session| session.irc.is_some());
-            let can_disconnect = self.can_disconnect(network);
-            let registered = self.registered_connection(network).is_ok();
-            // A server not connected in this run offers Connect, not Reconnect.
-            let connect_key = if session.is_some_and(ServerSession::used) {
-                "reconnect"
-            } else {
-                "connect"
-            };
-            div()
-                .id("server-context-menu")
-                .occlude()
-                .w(px(176.))
-                .p_1()
-                .bg(theme.surface)
-                .border_1()
-                .border_color(border)
-                .shadow_md()
-                .child(
-                    div()
-                        .id("server-menu-reconnect")
-                        .px_2()
-                        .py_1()
-                        .child(self.i18n.text(connect_key))
-                        .when(!connected, |d| {
-                            d.cursor_pointer()
-                                .hover(|d| d.bg(theme.hover_strong))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.reconnect(network, window, cx);
-                                }))
-                        })
-                        .when(connected, |d| d.text_color(theme.text_muted)),
-                )
-                .child(
-                    div()
-                        .id("server-menu-disconnect")
-                        .px_2()
-                        .py_1()
-                        .child(self.i18n.text("disconnect"))
-                        .when(can_disconnect, |d| {
-                            d.cursor_pointer()
-                                .hover(|d| d.bg(theme.hover_strong))
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.disconnect(network, cx)),
-                                )
-                        })
-                        .when(!can_disconnect, |d| d.text_color(theme.text_muted)),
-                )
-                .child(div().my_1().border_t_1().border_color(theme.separator))
-                .children(
-                    [
-                        (MemberPromptKind::Join, "server_menu_join"),
-                        (MemberPromptKind::Nick, "server_menu_nick"),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (kind, key))| {
+        let server_menu =
+            self.server_menu.as_ref().map(|menu| {
+                let network = menu.network;
+                let session = self.sessions.get(&network);
+                let connected = session.is_some_and(|session| session.irc.is_some());
+                let can_disconnect = self.can_disconnect(network);
+                let registered = self.registered_connection(network).is_ok();
+                // A server not connected in this run offers Connect, not Reconnect.
+                let connect_key = if session.is_some_and(ServerSession::used) {
+                    "reconnect"
+                } else {
+                    "connect"
+                };
+                div()
+                    .id("server-context-menu")
+                    .occlude()
+                    .w(px(176.))
+                    .p_1()
+                    .bg(theme.surface)
+                    .border_1()
+                    .border_color(border)
+                    .shadow_md()
+                    .child(
                         div()
-                            .id(("server-menu-prompt", index))
+                            .id("server-menu-reconnect")
                             .px_2()
                             .py_1()
-                            .child(self.i18n.text(key))
-                            .when(registered, |d| {
+                            .child(self.i18n.text(connect_key))
+                            .when(!connected, |d| {
                                 d.cursor_pointer()
                                     .hover(|d| d.bg(theme.hover_strong))
                                     .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.open_server_prompt(kind, window, cx)
+                                        this.reconnect(network, window, cx);
                                     }))
                             })
-                            .when(!registered, |d| d.text_color(theme.text_muted))
-                    }),
-                )
-                .child(div().my_1().border_t_1().border_color(theme.separator))
-                .children(
-                    [(true, "tree_move_up"), (false, "tree_move_down")].map(|(up, key)| {
-                        let position = self
-                            .state
-                            .networks()
-                            .iter()
-                            .position(|server| server.id == network);
-                        let last = self.state.networks().len().saturating_sub(1);
-                        let enabled =
-                            position.is_some_and(|at| if up { at > 0 } else { at < last });
+                            .when(connected, |d| d.text_color(theme.text_muted)),
+                    )
+                    .child(
                         div()
-                            .id(key)
+                            .id("server-menu-disconnect")
                             .px_2()
                             .py_1()
-                            .child(self.i18n.text(key))
-                            .when(enabled, |d| {
+                            .child(self.i18n.text("disconnect"))
+                            .when(can_disconnect, |d| {
                                 d.cursor_pointer()
                                     .hover(|d| d.bg(theme.hover_strong))
-                                    .on_click(
-                                        cx.listener(move |this, _, _, cx| this.move_server(up, cx)),
-                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.disconnect(network, cx)
+                                    }))
                             })
-                            .when(!enabled, |d| d.text_color(theme.text_muted))
-                    }),
-                )
-        });
+                            .when(!can_disconnect, |d| d.text_color(theme.text_muted)),
+                    )
+                    .child(div().my_1().border_t_1().border_color(theme.separator))
+                    .children(
+                        [
+                            (MemberPromptKind::Join, "server_menu_join"),
+                            (MemberPromptKind::Nick, "server_menu_nick"),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (kind, key))| {
+                            div()
+                                .id(("server-menu-prompt", index))
+                                .px_2()
+                                .py_1()
+                                .child(self.i18n.text(key))
+                                .when(registered, |d| {
+                                    d.cursor_pointer()
+                                        .hover(|d| d.bg(theme.hover_strong))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.open_server_prompt(kind, window, cx)
+                                        }))
+                                })
+                                .when(!registered, |d| d.text_color(theme.text_muted))
+                        }),
+                    )
+                    .child(div().my_1().border_t_1().border_color(theme.separator))
+                    .child(
+                        div()
+                            .id("server-menu-settings")
+                            .px_2()
+                            .py_1()
+                            .cursor_pointer()
+                            .hover(|d| d.bg(theme.hover_strong))
+                            .child(self.i18n.text("server_menu_settings"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_server_settings(window, cx)
+                            })),
+                    )
+                    .child(div().my_1().border_t_1().border_color(theme.separator))
+                    .children([(true, "tree_move_up"), (false, "tree_move_down")].map(
+                        |(up, key)| {
+                            let position = self
+                                .state
+                                .networks()
+                                .iter()
+                                .position(|server| server.id == network);
+                            let last = self.state.networks().len().saturating_sub(1);
+                            let enabled =
+                                position.is_some_and(|at| if up { at > 0 } else { at < last });
+                            div()
+                                .id(key)
+                                .px_2()
+                                .py_1()
+                                .child(self.i18n.text(key))
+                                .when(enabled, |d| {
+                                    d.cursor_pointer()
+                                        .hover(|d| d.bg(theme.hover_strong))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.move_server(up, cx)
+                                        }))
+                                })
+                                .when(!enabled, |d| d.text_color(theme.text_muted))
+                        },
+                    ))
+            });
         let channel_menu = self.channel_menu.as_ref().map(|menu| {
             let registered = self.registered_connection(menu.network).is_ok();
             let mut popup = div()

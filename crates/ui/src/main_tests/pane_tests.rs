@@ -4221,3 +4221,52 @@ fn the_title_leads_with_the_known_modes_of_the_selected_channel(cx: &mut TestApp
         );
     });
 }
+
+#[gpui::test]
+fn server_settings_open_the_clicked_server_not_the_selected_one(cx: &mut TestAppContext) {
+    use super::ServerMenu;
+
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let mut settings = crate::settings_with_channels("#a");
+    settings.add_server("two.example");
+    let first = settings.servers[0].id.clone();
+    let second = settings.servers[1].id.clone();
+    settings.selected_server = first.clone();
+    let _file = crate::settings_file::TestFile::with(&settings);
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    for (index, expected) in [(1, &second), (0, &first), (1, &second)] {
+        chat.update_in(cx, |chat, window, cx| {
+            let before = chat.state.selection();
+            let network = chat.state.networks()[index].id;
+            chat.server_menu = Some(ServerMenu {
+                position: gpui::point(gpui::px(10.), gpui::px(10.)),
+                network,
+            });
+            chat.open_server_settings(window, cx);
+            assert!(chat.server_menu.is_none());
+            assert_eq!(chat.state.selection(), before);
+        });
+        let (tab, profile) = chat.read_with(cx, |chat, _| {
+            let handle = chat.settings_window.unwrap();
+            handle
+                .read_with(&*cx, |settings, _| {
+                    (
+                        settings.tab,
+                        settings.settings.values.selected_server.clone(),
+                    )
+                })
+                .unwrap()
+        });
+        assert!(tab == crate::settings_window::SettingsTab::Connection);
+        assert_eq!(&profile, expected);
+    }
+}

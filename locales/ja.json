@@ -78,6 +78,7 @@
   "member_channel_placeholder": "#チャンネル",
   "server_menu_join": "チャンネルに参加…",
   "server_menu_nick": "ニックネームを変更…",
+  "server_menu_settings": "このサーバーの設定…",
   "channel_join_title": "チャンネルに参加",
   "channel_join_required": "チャンネル名を入力してください。",
   "nickname_change_title": "ニックネームを変更",

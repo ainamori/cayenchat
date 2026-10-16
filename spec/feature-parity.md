@@ -71,6 +71,7 @@ Server history is limited to channel history on opt-in IRCv3 servers (recent lin
 ## Navigation
 
 - DONE — network/channel tree in the lower-right pane for application state
+- DONE — server context menu "Server settings…" opens the settings window's Connection tab on the right-clicked server's profile (reusing an open window) without changing the selected server; available for any connection state
 - DONE — channel tree context menu joins a parted channel or parts a joined one; channels not currently joined are grayed out
 - DONE — channel log context menu: Copy, Paste into the message box, change channel modes/topic, change own nickname, and open a private conversation with the clicked row's sender (see architecture.md); an empty topic cannot be submitted, so the menu cannot clear a topic
 - PARTIAL — reference shortcut set for unread/previous/active/all/indexed channel and
