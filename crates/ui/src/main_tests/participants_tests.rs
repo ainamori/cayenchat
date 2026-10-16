@@ -22,6 +22,7 @@ fn conversation(kind: ConversationKind, name: &str) -> Conversation {
         topic: String::new(),
         messages: Vec::new(),
         members: Vec::new(),
+        modes: None,
     }
 }
 

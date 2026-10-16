@@ -3,6 +3,7 @@
 
 mod accounts;
 mod cap;
+mod chanmodes;
 mod charsets;
 mod ctcp;
 mod echo;
@@ -563,6 +564,13 @@ pub enum Event {
     CaseMapping(CaseMapping),
     Joined {
         channel: String,
+    },
+    /// The mode letters set on a joined channel, in the order learned: from
+    /// `RPL_CHANNELMODEIS` after our join, then kept current by `MODE`.
+    /// Arguments (key, limit) and member or list modes are not included.
+    ChannelModes {
+        channel: String,
+        flags: String,
     },
     Parted {
         channel: String,
@@ -2325,6 +2333,7 @@ async fn run_cancellable(
         next_local_id: 0,
         reported_unsent: 0,
         accounts: accounts::Accounts::default(),
+        channel_modes: chanmodes::ChannelModes::default(),
         targets_asked: false,
         // Last reported Event::HistoryAvailable.
         history_available: false,
@@ -2397,6 +2406,7 @@ type Flow = ControlFlow<()>;
 /// receiver and the IRC stream, which the `select!` polls, and calls one
 /// method here per branch.
 struct Worker {
+    channel_modes: chanmodes::ChannelModes,
     client: Client,
     events: EventSender,
     started: Instant,
@@ -2980,6 +2990,7 @@ impl Worker {
         self.history_enabled = self.negotiation.enabled(cap::CHATHISTORY);
         self.history.isupport(message);
         modes::observe(message, &self.modes_per_line);
+        self.channel_modes.isupport(message);
         self.accounts.isupport(message);
         if let Some(announced) = advertised_casemapping(message)
             && announced != self.casemapping
@@ -3193,6 +3204,7 @@ impl Worker {
         lifecycle.extend(merged(&mut self.peers, metadata_events));
         let whois_reply = self.whois.observe(&message);
         self.track_own_membership(&message).await?;
+        let mode_events = self.track_channel_modes(&message);
         // Echoes, ACKs and errors of messages we sent.
         if self.observe_echoes(&message).await? {
             return ControlFlow::Continue(());
@@ -3223,6 +3235,7 @@ impl Worker {
             server_time,
             self.batch_negotiated,
         );
+        let mut mode_queries = Vec::new();
         for event in translated
             .into_iter()
             .chain(whois_reply.map(|info| Event::Whois(Box::new(info))))
@@ -3262,9 +3275,17 @@ impl Worker {
                     _ => {}
                 }
             }
+            // Asked on every own join (also after a reconnect); until the
+            // reply arrives the modes are unknown.
+            if let Event::Joined { channel } = &event {
+                // Raw: the typed command would leave a trailing space.
+                mode_queries.push(IrcCommand::Raw("MODE".into(), vec![channel.clone()]));
+            }
             self.emit(event).await?;
         }
         self.emit_all(account_events).await?;
+        self.emit_all(mode_events).await?;
+        self.send_commands(mode_queries).await?;
         if self.track_accounts
             && let Some(command) = self.accounts.next_who(tokio::time::Instant::now())
         {
@@ -3277,6 +3298,33 @@ impl Worker {
             self.send_next_history().await?;
         }
         ControlFlow::Continue(())
+    }
+
+    /// The flags of a joined channel after `message`. Leaving or joining
+    /// ourselves discards what was known.
+    fn track_channel_modes(&mut self, message: &IrcMessage) -> Vec<Event> {
+        let own = message.source_nickname() == Some(self.current_nick.as_str());
+        match &message.command {
+            IrcCommand::JOIN(channel, _, _) if own => {
+                self.channel_modes.joined(channel, self.casemapping);
+            }
+            IrcCommand::PART(channel, _) if own => {
+                self.channel_modes.left(channel, self.casemapping);
+            }
+            IrcCommand::KICK(channel, nickname, _) if nickname == &self.current_nick => {
+                self.channel_modes.left(channel, self.casemapping);
+            }
+            _ => {}
+        }
+        self.channel_modes
+            .observe(
+                message,
+                self.casemapping,
+                self.replay.in_history_batch(message),
+            )
+            .map(|(channel, flags)| Event::ChannelModes { channel, flags })
+            .into_iter()
+            .collect()
     }
 
     /// Our own joins, parts and kicks decide which channels have history.

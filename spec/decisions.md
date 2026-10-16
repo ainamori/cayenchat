@@ -1208,6 +1208,32 @@ point's reference is IRC's concern and is not a generic sync token.
 Private-message recovery, persistence and echo-message reconciliation are
 future work. Details in `architecture.md` (Channel history).
 
+## D051 — Channel modes in the window title (#413)
+
+**Status:** Implemented
+
+The title of a selected, joined channel starts with its mode letters,
+`[+snt] #example (12) @ Network: topic — CayenChat`. Server and private
+conversation titles are unchanged.
+
+- **Queried by `irc-core` on every own JOIN** (auto-join, `/join`, menu,
+  rejoin after reconnect) with `MODE <channel>`. `RPL_CHANNELMODEIS` (324)
+  sets the channel's letters; later `MODE` lines change them. `Event::ChannelModes`
+  carries the letters; a 324 is not a `ChannelActivity` and is not logged as a
+  mode change. The existing key redaction of logs and the wire transcript is
+  unchanged.
+- **Letters only.** Arguments (a key, a limit) are never read, so they cannot
+  reach the title whatever the server's `CHANMODES` says. Letters of `CHANMODES`
+  list type A and of `PREFIX` (default `beI` and `ov`) are not channel flags
+  and are left out; every other letter is shown in the order learned, once.
+- **Unknown until stated.** Until the 324 arrives the title shows no modes
+  (not `[+]`); a known empty set shows no brackets. A `MODE` before the 324 is
+  not applied (no baseline), and history replay does not change the modes.
+  Own JOIN, PART, KICK and disconnect discard the state. The state is kept per
+  connection and folded channel name in `irc-core`, and per conversation
+  (`Conversation::modes`) in the app, so equal names on two servers never mix.
+- A reply is not awaited: a server that never answers just leaves the modes out.
+
 ## D050 — Per-channel text encodings with `/charset` (#396)
 
 **Status:** Implemented
