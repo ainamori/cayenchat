@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-use super::{conversation_participants, member_menu_choice_count};
+use super::{MemberMenuChoice, conversation_participants, member_menu_items};
 use crate::member_selection::{Participants, Roster};
 use cayenchat_model::{Conversation, ConversationId, ConversationKind, NetworkId};
 
@@ -145,7 +145,41 @@ fn private_with_same_nickname_ignoring_case_is_one_row() {
 }
 
 #[test]
-fn private_menu_has_only_whois_and_private_message() {
-    assert_eq!(member_menu_choice_count(true, 5), 2);
-    assert_eq!(member_menu_choice_count(false, 5), 5);
+fn the_menu_of_our_own_nickname_opens_with_the_change_to_it() {
+    let (items, separator) = member_menu_items(false, true);
+    assert_eq!(
+        items.iter().map(|(choice, _)| *choice).collect::<Vec<_>>(),
+        [
+            MemberMenuChoice::Nick,
+            MemberMenuChoice::Whois,
+            MemberMenuChoice::PrivateMessage,
+            MemberMenuChoice::Invite,
+            MemberMenuChoice::GiveOp,
+            MemberMenuChoice::Deop,
+        ]
+    );
+    assert_eq!(separator, 3);
+
+    // A member who is not us keeps the old menu.
+    let (items, separator) = member_menu_items(false, false);
+    assert_eq!(
+        items.iter().map(|(choice, _)| *choice).collect::<Vec<_>>(),
+        [
+            MemberMenuChoice::Whois,
+            MemberMenuChoice::PrivateMessage,
+            MemberMenuChoice::Invite,
+            MemberMenuChoice::GiveOp,
+            MemberMenuChoice::Deop,
+        ]
+    );
+    assert_eq!(separator, 3);
+
+    // In a private conversation nothing is offered on ourselves, so the
+    // change stays away there; the menu is too short for a separator.
+    let (items, separator) = member_menu_items(true, true);
+    assert_eq!(
+        items.iter().map(|(choice, _)| *choice).collect::<Vec<_>>(),
+        [MemberMenuChoice::Whois, MemberMenuChoice::PrivateMessage]
+    );
+    assert!(separator >= items.len());
 }

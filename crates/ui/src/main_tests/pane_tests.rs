@@ -278,6 +278,78 @@ fn clicking_members_selects_them_and_the_menu_keeps_a_chosen_group(cx: &mut Test
 
 use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 
+#[gpui::test]
+fn right_clicking_our_own_nickname_in_the_list_opens_the_menu(cx: &mut TestAppContext) {
+    use cayenchat_irc_core::Event;
+    use gpui::{Modifiers, MouseButton, point, px};
+
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let mut settings = crate::settings_with_channels("#a");
+    settings.menu_bar_auto_hide = true;
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    chat.update(cx, |chat, cx| {
+        chat.handle_events(
+            NetworkId(1),
+            vec![
+                Event::Registered {
+                    nickname: "me".into(),
+                },
+                Event::NickChanged {
+                    nickname: "alice".into(),
+                },
+                Event::Joined {
+                    channel: "#a".into(),
+                },
+            ],
+            Worker::Running,
+            cx,
+        );
+        // Our own row is shown first in the list, so the rows below are
+        // deterministic: alice (us), then the others in their order.
+        chat.state.set_members(
+            NetworkId(1),
+            "#a",
+            vec!["@zed".to_owned(), "alice".to_owned(), "bob".to_owned()],
+        );
+    });
+    cx.run_until_parked();
+    // The rows of the member list at the right edge, 22 px tall each below
+    // the toolbar. Our own row is shown first.
+    let viewport = cx.update(|window, _| window.viewport_size());
+    let x = f32::from(viewport.width) - 240. + 30.;
+    let toolbar = f32::from(crate::toolbar::HEIGHT);
+    let row = |index: usize| point(px(x), px(toolbar + 22. * index as f32 + 11.));
+    let right_click = |cx: &mut gpui::VisualTestContext, at| {
+        cx.simulate_mouse_move(at, None, Modifiers::none());
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+    };
+    let menu = |cx: &mut gpui::VisualTestContext| -> Option<(String, bool)> {
+        chat.read_with(cx, |chat, _| {
+            chat.member_menu
+                .as_ref()
+                .map(|menu| (menu.nickname.clone(), menu.private))
+        })
+    };
+    // On our own row (shown first) the menu opens, about the nick we use;
+    // the change to it leads the menu (member_menu_items, unit tested).
+    right_click(cx, row(0));
+    assert_eq!(
+        menu(cx),
+        Some(("alice".to_owned(), false)),
+        "the menu on our own nick"
+    );
+}
+
 /// Two rows one above the other, each noting whether it is hovered.
 struct TwoRows {
     hovered: std::rc::Rc<std::cell::Cell<[bool; 2]>>,

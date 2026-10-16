@@ -63,6 +63,7 @@
   "disconnect_all_title": "すべてのサーバーから切断しますか？",
   "disconnect_all_detail": "すべての接続と、予約されている再接続を終了します。",
   "disconnect_all_confirm": "すべて切断",
+  "member_change_nick": "ニックネームを変更…",
   "member_whois": "Whois",
   "member_private_message": "プライベートメッセージ",
   "member_invite": "招待…",

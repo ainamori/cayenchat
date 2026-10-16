@@ -857,8 +857,10 @@ struct NickPrompt {
     focus_pending: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MemberMenuChoice {
+    /// Change our own nickname; shown only on the row of the nick in use.
+    Nick,
     Whois,
     PrivateMessage,
     Invite,
@@ -6577,16 +6579,12 @@ impl ChatWindow {
                 }
                 return popup;
             }
-            let choices = [
-                (MemberMenuChoice::Whois, "member_whois"),
-                (MemberMenuChoice::PrivateMessage, "member_private_message"),
-                (MemberMenuChoice::Invite, "member_invite"),
-                (MemberMenuChoice::GiveOp, "member_give_op"),
-                (MemberMenuChoice::Deop, "member_deop"),
-            ];
-            let shown = member_menu_choice_count(menu.private, choices.len());
-            for (index, (choice, key)) in choices.into_iter().take(shown).enumerate() {
-                if index == 3 {
+            let (items, separator) = member_menu_items(
+                menu.private,
+                self.is_own_nickname(menu.network, &menu.nickname),
+            );
+            for (index, (choice, key)) in items.iter().enumerate() {
+                if index == separator {
                     popup = popup.child(div().my_1().border_t_1().border_color(theme.separator));
                 }
                 let channel = menu.channel.clone();
@@ -6602,6 +6600,9 @@ impl ChatWindow {
                                 .on_click(cx.listener(move |this, _, window, cx| match choice {
                                     MemberMenuChoice::Whois => {
                                         this.member_command(MemberCommand::Whois, cx)
+                                    }
+                                    MemberMenuChoice::Nick => {
+                                        this.open_member_prompt(MemberPromptKind::Nick, window, cx)
                                     }
                                     MemberMenuChoice::PrivateMessage => this.open_member_prompt(
                                         MemberPromptKind::PrivateMessage,
@@ -8548,10 +8549,31 @@ fn conversation_participants<'a>(
     member_selection::Participants::plain(Cow::Owned(participants))
 }
 
-/// How many of the member menu's choices apply: a private conversation's
-/// peer gets only WHOIS and a private message, no channel operations.
-fn member_menu_choice_count(private: bool, total: usize) -> usize {
-    if private { 2.min(total) } else { total }
+/// The items of the one-member right-click menu, and where its separator
+/// goes: before the channel-mode items, which are its last two. The row of
+/// the nick we use opens with the change to it (#440).
+fn member_menu_items(
+    private: bool,
+    own: bool,
+) -> (&'static [(MemberMenuChoice, &'static str)], usize) {
+    const ALL: [(MemberMenuChoice, &str); 6] = [
+        (MemberMenuChoice::Nick, "member_change_nick"),
+        (MemberMenuChoice::Whois, "member_whois"),
+        (MemberMenuChoice::PrivateMessage, "member_private_message"),
+        (MemberMenuChoice::Invite, "member_invite"),
+        (MemberMenuChoice::GiveOp, "member_give_op"),
+        (MemberMenuChoice::Deop, "member_deop"),
+    ];
+    if private {
+        // A private conversation keeps only what its two participants have to
+        // offer, and nothing is offered on ourselves there.
+        (&ALL[1..3], usize::MAX)
+    } else {
+        // Ours starts at the change; anyone else's skips it. The separator
+        // sits before the channel-mode items (the last two) in both shapes.
+        let skip = usize::from(!own);
+        (&ALL[skip..], 3)
+    }
 }
 
 #[cfg(test)]

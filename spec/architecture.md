@@ -509,6 +509,9 @@ was opened with (someone may have left meanwhile and a namesake taken the
 nickname). The
 member context menu routes Whois, invite and +o/-o through validated
 IRC commands; private-message composition sends directly to the selected nick.
+On the row of the nick we use the menu opens with Change nickname… (#440),
+which asks in the same prompt as the server menu's item; on anyone else's row
+the menu is unchanged.
 `Connection::send_member_modes` gives or takes op/voice for several members,
 as `MODE <channel> +ooo a b c` lines of at most the server's announced
 `MODES` (ISUPPORT, read by the worker; 3 when absent, never more than 12) and
