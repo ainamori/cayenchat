@@ -3660,8 +3660,9 @@ impl ChatWindow {
             Ok(handle) => {
                 // GPUI converts the bounds with the scale of the display the
                 // window is created on; put it right in physical pixels.
+                // Test windows have no native handle, so they skip it.
                 #[cfg(target_os = "windows")]
-                if display_id.is_some() {
+                if display_id.is_some() && !cfg!(test) {
                     let _ = handle.update(cx, |_, settings_window, _| {
                         placement::place_native(settings_window, bounds, owner_scale)
                     });
