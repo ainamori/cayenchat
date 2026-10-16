@@ -489,6 +489,30 @@ impl ChatWindow {
             .then(|| search.probe.clone())
     }
 
+    /// The zero-size canvas a line adds while a jump to it is unfinished: when
+    /// painted it reports where the byte `index` of the line's text sits in
+    /// `layout`. Shared by every kind of log line (channel, DM, server log).
+    pub(crate) fn search_probe_canvas(
+        &self,
+        sequence: u64,
+        layout: TextLayout,
+        index: Option<usize>,
+    ) -> Option<Canvas<()>> {
+        let (probe, index) = self.search_probe(sequence).zip(index)?;
+        Some(
+            canvas(
+                |_, _, _| {},
+                move |_, _, _, _| {
+                    if let Some(position) = layout.position_for_index(index) {
+                        probe.set(Some((sequence, position.y, layout.line_height())));
+                    }
+                },
+            )
+            .absolute()
+            .size_0(),
+        )
+    }
+
     /// Finishes a jump: reads where the line painted its first match in the
     /// last frame (from the real wrapped layout) and scrolls until that is
     /// inside the log. Asks for another frame while the match is not in view

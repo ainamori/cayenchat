@@ -436,3 +436,48 @@ fn a_match_far_down_a_tall_line_is_scrolled_into_view_without_another_key(cx: &m
         assert!(search.revealed(), "the match was painted inside the log");
     });
 }
+
+#[gpui::test]
+fn a_match_in_a_tall_server_log_line_is_revealed_when_coming_from_all(cx: &mut TestAppContext) {
+    tall_server_line_is_revealed(Scope::All, cx);
+}
+
+#[gpui::test]
+fn a_match_in_a_tall_server_log_line_is_revealed_in_this_log(cx: &mut TestAppContext) {
+    tall_server_line_is_revealed(Scope::Selected, cx);
+}
+
+fn tall_server_line_is_revealed(scope: Scope, cx: &mut TestAppContext) {
+    {
+        let (chat, cx) = open_chat(cx);
+        chat.update(cx, |chat, cx| {
+            let text = format!("{}SERVER_TARGET", "long ".repeat(20_000));
+            chat.state.append_server_message(NetworkId(1), text);
+            chat.state
+                .append_server_message(NetworkId(1), "short last line".into());
+            if scope == Scope::Selected {
+                chat.state
+                    .dispatch(cayenchat_app::Command::SelectServer(NetworkId(1)));
+            }
+            cx.notify();
+        });
+        cx.run_until_parked();
+        chat.update_in(cx, |chat, window, cx| {
+            chat.open_search(&FindInLog, window, cx)
+        });
+        chat.update_in(cx, |chat, window, cx| {
+            chat.search_set_scope(scope, window, cx)
+        });
+        cx.simulate_input("SERVER_TARGET");
+        settle(cx);
+        for _ in 0..4 {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        }
+        chat.read_with(cx, |chat, _| {
+            assert!(matches!(chat.state.selection(), Selection::Server(_)));
+            let search = chat.search.as_ref().unwrap();
+            assert!(search.revealed(), "the match was painted inside the log");
+        });
+    }
+}

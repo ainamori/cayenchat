@@ -6990,10 +6990,11 @@ impl ChatWindow {
                         return div().into_any_element();
                     };
                     let (found, current) = self.search_ranges(&message.text, message.sequence);
+                    let mut probe = None;
                     let text = if found.is_empty() {
                         message.text.clone().into_any_element()
                     } else {
-                        styled_log_text(
+                        let styled = styled_log_text(
                             "",
                             &message.text,
                             &[],
@@ -7004,8 +7005,13 @@ impl ChatWindow {
                             current,
                             None,
                             &style.theme,
-                        )
-                        .into_any_element()
+                        );
+                        probe = self.search_probe_canvas(
+                            message.sequence,
+                            styled.layout().clone(),
+                            found.first().map(|range| range.start),
+                        );
+                        styled.into_any_element()
                     };
                     div()
                         .w_full()
@@ -7017,6 +7023,7 @@ impl ChatWindow {
                         })
                         .child(style.time(message.time))
                         .child(div().flex_1().min_w_0().child(text))
+                        .children(probe)
                         .into_any_element()
                 }
             },
@@ -7114,22 +7121,11 @@ impl ChatWindow {
         let layout = styled.layout().clone();
         // While a search jump to this line is unfinished, report where its
         // first match is painted (the layout is only valid once painted).
-        let probe = self
-            .search_probe(message.sequence)
-            .zip(first_found_start.map(|start| start + prefix_len))
-            .map(|(probe, index)| {
-                let (layout, sequence) = (layout.clone(), message.sequence);
-                canvas(
-                    |_, _, _| {},
-                    move |_, _, _, _| {
-                        if let Some(position) = layout.position_for_index(index) {
-                            probe.set(Some((sequence, position.y, layout.line_height())));
-                        }
-                    },
-                )
-                .absolute()
-                .size_0()
-            });
+        let probe = self.search_probe_canvas(
+            message.sequence,
+            layout.clone(),
+            first_found_start.map(|start| start + prefix_len),
+        );
         let down_layout = layout.clone();
         let move_layout = layout.clone();
         let click_layout = layout;
