@@ -662,7 +662,11 @@ hold released off the button leaves nothing behind. The hold is possible
 only while the button is enabled, so with the selected server idle it is
 not offered even when another server is connected. The
 settings window's Connect and Disconnect act on the server being
-edited. A new server, blank or from a preset, starts with an empty
+edited. A double click on a server row acts on that row's server (the
+single click still only selects): it connects a server not used in this
+run, reconnects a dropped one, disconnects a registered one without
+confirmation, and does nothing while it is connecting or waiting to retry.
+A new server, blank or from a preset, starts with an empty
 nickname, `USER` username, auto-join channels and SASL account, SASL,
 password saving and startup connection off, IRCv3 options off, and the
 transport defaults (port 6667, no TLS, certificate verification on, UTF-8);

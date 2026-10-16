@@ -453,3 +453,28 @@ fn the_file_dialog_offers_the_images_the_upload_accepts() {
         cayenchat_model::attachment::ImageFormat::FILE_EXTENSIONS
     );
 }
+
+#[gpui::test]
+fn double_clicking_a_server_leaves_one_waiting_to_retry_alone(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let settings = crate::settings_with_channels("#a");
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    chat.update_in(cx, |chat, window, cx| {
+        let session = chat.sessions.get_mut(&NetworkId(1)).unwrap();
+        session.retry_pending = true;
+        let token = session.retry_token;
+        chat.toggle_connection(NetworkId(1), window, cx);
+        let session = &chat.sessions[&NetworkId(1)];
+        assert!(session.retry_pending && !session.manual_disconnect);
+        assert_eq!(session.retry_token, token);
+    });
+}
