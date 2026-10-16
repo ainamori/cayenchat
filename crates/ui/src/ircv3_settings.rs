@@ -135,6 +135,11 @@ impl SettingsWindow {
                 .text_color(theme.text_secondary)
                 .child(self.i18n.text("ircv3_intro")),
         );
+        // A changed icon stops sharing the old one at once.
+        let draft = self.settings.avatar_url.read(cx).text().trim().to_owned();
+        if let Some(profile) = self.settings.values.selected_profile_mut() {
+            stop_sharing_if_avatar_differs(profile, &draft);
+        }
         let Some(profile) = self.settings.values.selected_profile().cloned() else {
             return panel.child(div().child(self.i18n.text("ircv3_no_server")));
         };
@@ -835,7 +840,19 @@ pub(crate) fn place_uploaded_avatar(
         .find(|profile| profile.id == profile_id)
         .ok_or("ircv3_avatar_upload_server_gone")?;
     profile.avatar_url = url.to_owned();
+    stop_sharing_if_avatar_differs(profile, url);
     Ok(shown)
+}
+
+/// A server's own avatar that is not the URL shared with peers ends the
+/// sharing (the old picture would otherwise stay with them); only choosing
+/// "Share with Peers" again shares the new one. Returns whether it stopped.
+pub(crate) fn stop_sharing_if_avatar_differs(profile: &mut ServerProfile, avatar: &str) -> bool {
+    let differs = !profile.peer_avatar_url.is_empty() && profile.peer_avatar_url != avatar.trim();
+    if differs {
+        profile.peer_avatar_url.clear();
+    }
+    differs
 }
 
 /// A plain text tooltip in the platform's tooltip style.
@@ -1171,7 +1188,8 @@ pub(crate) fn server_label(
 mod tests {
     use super::{
         IRCV3_FEATURES, OwnAvatarStatus, avatar_url_problem, peer_avatar_url_problem,
-        peer_reconnect_needed, place_uploaded_avatar, share_draft_with_peers, toggle_feature,
+        peer_reconnect_needed, place_uploaded_avatar, share_draft_with_peers,
+        stop_sharing_if_avatar_differs, toggle_feature,
     };
     use crate::session::PeerAvatarConnection;
     use cayenchat_storage::{Ircv3Preferences, Language, ServerProfile, Settings};
@@ -1202,8 +1220,7 @@ mod tests {
         toggle_feature(profile, peer.toggle);
         assert!(profile.ircv3.peer_avatars);
         assert_eq!(crate::shared_peer_avatar(profile), None, "not shared yet");
-        // Share with Peers takes the draft; later edits and uploads of the
-        // draft do not change what peers get.
+        // Share with Peers takes the draft.
         assert_eq!(
             share_draft_with_peers(profile, "https://example.com/me.png"),
             Ok(())
@@ -1212,11 +1229,26 @@ mod tests {
             crate::shared_peer_avatar(profile).as_deref(),
             Some("https://example.com/me.png")
         );
-        profile.avatar_url = "https://example.com/other.png".into();
+        // The same icon keeps sharing; a different one stops it, and
+        // sharing the new one is up to the user.
+        assert!(!stop_sharing_if_avatar_differs(
+            profile,
+            "https://example.com/me.png"
+        ));
+        assert!(stop_sharing_if_avatar_differs(
+            profile,
+            "https://example.com/other.png"
+        ));
+        assert_eq!(crate::shared_peer_avatar(profile), None);
+        assert!(!stop_sharing_if_avatar_differs(profile, "anything"));
+        share_draft_with_peers(profile, "https://example.com/me.png").unwrap();
+        // An uploaded image is a different icon too.
         settings.selected_server = id.clone();
         place_uploaded_avatar(&mut settings, &id, "https://i.ibb.co/x/new.png").unwrap();
         let profile = settings.servers.iter_mut().find(|p| p.id == id).unwrap();
-        assert_eq!(profile.peer_avatar_url, "https://example.com/me.png");
+        assert!(profile.peer_avatar_url.is_empty());
+        assert_eq!(profile.avatar_url, "https://i.ibb.co/x/new.png");
+        share_draft_with_peers(profile, "https://example.com/me.png").unwrap();
         // Unacceptable drafts are refused and keep the shared URL.
         for (draft, key) in [
             ("", "ircv3_avatar_empty"),
