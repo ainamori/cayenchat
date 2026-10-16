@@ -274,14 +274,50 @@ fn shown_keys(keys: Keys, overrides: &shortcuts::Overrides) -> Vec<String> {
     keys.iter().map(|key| key_recorder::describe(key)).collect()
 }
 
+/// A press on the Disconnect button, which becomes a long press once it has
+/// been held for `LONG_PRESS`.
+#[derive(Default)]
+struct Hold {
+    /// Counts the press down; dropped on release.
+    timer: Option<Task<()>>,
+    /// The press ran out, so the click that follows the release is not a
+    /// plain Disconnect.
+    fired: bool,
+}
+
+impl Hold {
+    fn begin(&mut self, timer: Task<()>) {
+        self.fired = false;
+        self.timer = Some(timer);
+    }
+
+    fn fire(&mut self) {
+        self.timer = None;
+        self.fired = true;
+    }
+
+    /// The button was released on the button; its click follows.
+    fn release(&mut self) {
+        self.timer = None;
+    }
+
+    /// The button was released elsewhere, so no click follows.
+    fn cancel(&mut self) {
+        self.timer = None;
+        self.fired = false;
+    }
+
+    /// Whether the click that arrived ends a long press, which has been
+    /// handled already.
+    fn take_click(&mut self) -> bool {
+        std::mem::take(&mut self.fired)
+    }
+}
+
 struct Toolbar {
     chat: WeakEntity<ChatWindow>,
     state: State,
-    /// Counts down a hold on the Disconnect button; dropped on release.
-    hold: Option<Task<()>>,
-    /// The hold ran out, so the click that follows the release is not a
-    /// plain Disconnect.
-    held: bool,
+    hold: Hold,
     _subscriptions: [Subscription; 2],
 }
 
@@ -291,8 +327,7 @@ pub fn view(state: State, cx: &mut Context<ChatWindow>) -> AnyView {
     cx.new(|cx: &mut Context<Toolbar>| Toolbar {
         chat: chat.downgrade(),
         state,
-        hold: None,
-        held: false,
+        hold: Hold::default(),
         _subscriptions: [
             // The state is worked out when the chat window changes, and the
             // bar redraws only if a button's availability or name did.
@@ -358,30 +393,31 @@ impl Toolbar {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _, window, cx| {
-                                    this.held = false;
-                                    this.hold = Some(cx.spawn_in(window, async move |this, cx| {
+                                    let timer = cx.spawn_in(window, async move |this, cx| {
                                         cx.background_executor().timer(LONG_PRESS).await;
                                         let _ = this.update_in(cx, |this, window, cx| {
-                                            this.hold = None;
-                                            this.held = true;
+                                            this.hold.fire();
                                             let _ = this.chat.update(cx, |chat, cx| {
                                                 chat.disconnect_all_action(window, cx)
                                             });
                                         });
-                                    }));
+                                    });
+                                    this.hold.begin(timer);
                                 }),
                             )
                             .on_mouse_up(
                                 MouseButton::Left,
-                                cx.listener(|this, _, _, _| this.hold = None),
+                                cx.listener(|this, _, _, _| this.hold.release()),
                             )
                             .on_mouse_up_out(
                                 MouseButton::Left,
-                                cx.listener(|this, _, _, _| this.hold = None),
+                                cx.listener(|this, _, _, _| this.hold.cancel()),
                             )
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        if std::mem::take(&mut this.held) {
+                        // Only the Disconnect button holds; another button's
+                        // click is never swallowed by a stale long press.
+                        if matches!(click, Click::Disconnect) && this.hold.take_click() {
                             return;
                         }
                         let _ = this.chat.update(cx, |chat, cx| match click {
@@ -565,7 +601,36 @@ mod tests {
     use super::{
         Button, Click, Icons, Keys, State, key_recorder, shortcuts, shown_keys, tooltip_text,
     };
-    use gpui::AssetSource;
+    use gpui::{AssetSource, Task};
+
+    #[test]
+    fn a_long_press_swallows_the_click_that_follows_its_release() {
+        let mut hold = super::Hold::default();
+        assert!(!hold.take_click(), "a plain click goes through");
+        hold.begin(Task::ready(()));
+        hold.release();
+        assert!(!hold.take_click(), "released before the time ran out");
+        hold.begin(Task::ready(()));
+        hold.fire();
+        assert!(hold.timer.is_none());
+        hold.release();
+        assert!(hold.take_click(), "the click after a long press is ignored");
+        assert!(!hold.take_click(), "and only that one");
+    }
+
+    #[test]
+    fn a_long_press_released_elsewhere_leaves_nothing_behind() {
+        let mut hold = super::Hold::default();
+        hold.begin(Task::ready(()));
+        hold.fire();
+        hold.cancel();
+        assert!(!hold.take_click(), "no click follows, so the next is real");
+        // A fresh press also forgets a flag the release never cleared.
+        hold.begin(Task::ready(()));
+        hold.fire();
+        hold.begin(Task::ready(()));
+        assert!(!hold.take_click());
+    }
 
     fn buttons(state: State) -> Vec<Button> {
         state.layout().into_iter().flatten().collect()

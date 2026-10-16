@@ -648,7 +648,10 @@ Disconnect is available (in the menu bar and the server context menu) only
 while that server has a connection, including one still opening, or a
 scheduled reconnect to cancel. Holding the toolbar's Disconnect button for
 600 ms asks (native prompt) whether to disconnect every server, and does so
-only when confirmed; the click after such a hold does nothing. The
+only when confirmed; the click after such a hold does nothing, and a
+hold released off the button leaves nothing behind. The hold is possible
+only while the button is enabled, so with the selected server idle it is
+not offered even when another server is connected. The
 settings window's Connect and Disconnect act on the server being
 edited. A new server, blank or from a preset, starts with an empty
 nickname, `USER` username, auto-join channels and SASL account, SASL,

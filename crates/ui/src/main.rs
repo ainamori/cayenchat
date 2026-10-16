@@ -2036,11 +2036,7 @@ impl ChatWindow {
     /// Disconnect button), then does so. Servers with nothing to stop are
     /// left alone.
     fn disconnect_all_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self
-            .sessions
-            .keys()
-            .any(|network| self.can_disconnect(*network))
-        {
+        if self.disconnectable_networks().is_empty() {
             return;
         }
         let answer = window.prompt(
@@ -2056,19 +2052,22 @@ impl ChatWindow {
         cx.spawn(async move |this, cx| {
             if answer.await == Ok(0) {
                 let _ = this.update(cx, |this, cx| {
-                    let networks: Vec<_> = this
-                        .sessions
-                        .keys()
-                        .copied()
-                        .filter(|network| this.can_disconnect(*network))
-                        .collect();
-                    for network in networks {
+                    for network in this.disconnectable_networks() {
                         this.disconnect(network, cx);
                     }
                 });
             }
         })
         .detach();
+    }
+
+    /// The servers that are connected or waiting to retry.
+    fn disconnectable_networks(&self) -> Vec<NetworkId> {
+        self.sessions
+            .keys()
+            .copied()
+            .filter(|network| self.can_disconnect(*network))
+            .collect()
     }
 
     /// Whether Connect applies: the selected server has not been connected in
