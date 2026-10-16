@@ -398,6 +398,33 @@ fn the_first_button_follows_a_connection_or_a_pending_retry(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn disconnecting_everything_targets_only_connected_or_retrying_servers(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let settings = crate::settings_with_channels("#a");
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    chat.update(cx, |chat, _| {
+        assert!(chat.disconnectable_networks().is_empty());
+        chat.sessions.get_mut(&NetworkId(1)).unwrap().retry_pending = true;
+        assert_eq!(chat.disconnectable_networks(), vec![NetworkId(1)]);
+    });
+    // With nothing to stop, the long press asks nothing and changes nothing.
+    chat.update_in(cx, |chat, window, cx| {
+        chat.sessions.get_mut(&NetworkId(1)).unwrap().retry_pending = false;
+        chat.disconnect_all_action(window, cx);
+        assert!(!chat.sessions[&NetworkId(1)].manual_disconnect);
+    });
+}
+
+#[gpui::test]
 fn the_upload_button_explains_a_missing_service_before_asking_for_a_file(cx: &mut TestAppContext) {
     cx.update(|cx| {
         crate::secrets::install_memory(cx);
