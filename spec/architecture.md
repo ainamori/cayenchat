@@ -1887,7 +1887,7 @@ are not searched, but match ranges are mapped to the drawn text with
 Sender names are not searched.
 
 `ui::log_search` owns the bar (`ChatWindow::search`, created on first open): a
-single row above the main log inside its pane, so the log is pushed down, not
+single row across the full content width above both columns (under the menu bar and toolbar), so the log is pushed down, not
 covered, and keeps its scroll position (the log list is bottom-anchored). It
 slides in over 120 ms. Ctrl+F (Cmd+F on macOS) or the toolbar's magnifier call
 the same `open_search`; with the bar open they focus the field. On Linux with
