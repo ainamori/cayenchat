@@ -2366,29 +2366,42 @@ impl ChatWindow {
             .whois_windows
             .iter()
             .map(|((network, key), handle)| {
-                let image = self
-                    .state
-                    .avatars()
-                    .for_message(
-                        *network,
-                        &cayenchat_irc_core::text::nickname_key(key),
-                        u64::MAX,
-                    )
+                let nickname = handle
+                    .read_with(cx, |view, _| view.nickname().to_owned())
+                    .unwrap_or_else(|_| key.clone());
+                // Ourselves first, as in the log: the confirmed or shared
+                // avatar, never a CTCP query to ourselves.
+                let avatar = self.own_avatar_for(*network, &nickname).or_else(|| {
+                    self.state
+                        .avatars()
+                        .for_message(
+                            *network,
+                            &cayenchat_irc_core::text::nickname_key(key),
+                            u64::MAX,
+                        )
+                        .cloned()
+                });
+                let shown = avatar
                     .filter(|_| self.avatars_shown(*network))
-                    .map(|avatar| self.avatars.lookup(avatar));
-                let image = match image {
-                    Some(avatars::Shown::Image(image)) => Some(image),
-                    Some(avatars::Shown::Pending) => {
+                    .map(|avatar| self.avatars.lookup(&avatar))
+                    .unwrap_or(avatars::Shown::None);
+                // Loading keeps the slot empty; no image falls back to the
+                // nickname's default icon.
+                let (image, default) = match shown {
+                    avatars::Shown::Image(image) => (Some(image), None),
+                    avatars::Shown::Pending => {
                         pending = true;
-                        None
+                        (None, None)
                     }
-                    _ => None,
+                    avatars::Shown::None => (None, Some(self.avatars.default_for(&nickname))),
                 };
-                (*handle, image, self.peer_avatars_on(*network))
+                (*handle, image, default, self.peer_avatars_on(*network))
             })
             .collect();
-        for (handle, image, can_request) in shown {
-            let _ = handle.update(cx, |view, _, cx| view.set_avatar(image, can_request, cx));
+        for (handle, image, default, can_request) in shown {
+            let _ = handle.update(cx, |view, _, cx| {
+                view.set_avatar(image, default, can_request, cx)
+            });
         }
         if pending {
             self.pump_avatars(cx);
@@ -3110,6 +3123,7 @@ impl ChatWindow {
                     });
                 }
                 self.whois_windows.insert(key, handle);
+                self.refresh_whois_avatars(cx);
                 cx.activate(true);
             }
             Err(error) => {

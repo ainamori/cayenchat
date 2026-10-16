@@ -34,6 +34,9 @@ pub struct WhoisWindow {
     status: Option<String>,
     /// The user's avatar image, pushed by the owner (it owns the cache).
     avatar: Option<Arc<RenderImage>>,
+    /// The nickname's default icon, drawn while `avatar` is empty and the
+    /// owner says no image is coming.
+    default_avatar: Option<Arc<gpui::Image>>,
     /// Images this window replaced; their tiles in its own atlas are freed
     /// at the next render, which no longer draws them.
     retired: Vec<Arc<RenderImage>>,
@@ -83,6 +86,7 @@ impl WhoisWindow {
                         menu_scroll: ScrollHandle::new(),
                         status: None,
                         avatar: None,
+                        default_avatar: None,
                         retired: Vec::new(),
                         can_request_avatar: false,
                         i18n,
@@ -124,14 +128,30 @@ impl WhoisWindow {
     pub fn set_avatar(
         &mut self,
         avatar: Option<Arc<RenderImage>>,
+        default_avatar: Option<Arc<gpui::Image>>,
         can_request: bool,
         cx: &mut Context<Self>,
     ) {
-        let changed = swap_avatar(&mut self.avatar, &mut self.retired, avatar);
+        let mut changed = swap_avatar(&mut self.avatar, &mut self.retired, avatar);
+        let same_default = match (&self.default_avatar, &default_avatar) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_default {
+            self.default_avatar = default_avatar;
+            changed = true;
+        }
         if changed || self.can_request_avatar != can_request {
             self.can_request_avatar = can_request;
             cx.notify();
         }
+    }
+
+    /// The nickname as the server reported it, which the default icon is
+    /// made from.
+    pub fn nickname(&self) -> &str {
+        &self.info.nickname
     }
 
     fn request_avatar(&mut self, cx: &mut Context<Self>) {
@@ -420,7 +440,11 @@ impl WhoisWindow {
                         .overflow_hidden()
                         .border_1()
                         .border_color(theme.border)
-                        .children(self.avatar.clone().map(|image| img(image).size_full())),
+                        .children(match (&self.avatar, &self.default_avatar) {
+                            (Some(image), _) => Some(img(image.clone()).size_full()),
+                            (None, Some(image)) => Some(img(image.clone()).size_full()),
+                            (None, None) => None,
+                        }),
                 )
                 .child(if askable {
                     button(
