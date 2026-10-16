@@ -255,16 +255,19 @@ fn whois_collector_bounds_unfinished_replies() {
 
 #[test]
 fn whois_realname_hides_both_avatar_marks() {
-    for (wire, shown) in [
-        ("\\x034\\x03Alice", "Alice"),
-        ("\u{3}4\u{f}Alice", "Alice"),
-        ("\u{3}4\u{f}\\x034\\x03Alice", "Alice"),
+    for (wire, shown, marked) in [
+        ("\\x034\\x03Alice", "Alice", true),
+        ("\u{3}4\u{f}Alice", "Alice", true),
+        ("\u{3}4\u{f}\\x034\\x03Alice", "Alice", true),
+        ("\\x031\\x03Alice", "Alice", false),
+        ("Alice", "Alice", false),
     ] {
         let mut collector = WhoisCollector::default();
         let mut feed = |line: &str| collector.observe(&line.parse::<IrcMessage>().unwrap());
         feed(&format!(":srv 311 me Alice u h * :{wire}"));
         let info = feed(":srv 318 me Alice :End of WHOIS list.").unwrap();
         assert_eq!(info.realname.as_deref(), Some(shown), "{wire:?}");
+        assert_eq!(info.avatar_mark, marked, "{wire:?}");
     }
 }
 

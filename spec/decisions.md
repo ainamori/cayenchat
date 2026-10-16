@@ -1012,7 +1012,14 @@ What CayenChat does:
   `name: \x034\x03Name`). Other clients show the characters, and KVIrc
   does not recognize it; this is a CayenChat-only convention and
   accepted. A realname that happens to start with it costs one query,
-  within the existing probe bounds.
+  within the existing probe bounds. (3) Discovery by speaking or WHOIS is
+  not reliable enough to check a mark by hand (issue #409 report), so the
+  WHOIS window shows the user's avatar when one is known and has a "Get
+  avatar" button, enabled when the 311 real name carried a mark
+  (`WhoisInfo::avatar_mark`) and the server exchanges avatars. It sends
+  one CTCP AVATAR query even if the user was asked before; it goes
+  through the same queue (spacing, bounds, one query per user), and only
+  for users who share a channel with us.
 
 Interoperability: verified against wire-accurate fixtures written from
 KVIrc's source (realname mark, query, `M`-suffixed answer, empty answer,

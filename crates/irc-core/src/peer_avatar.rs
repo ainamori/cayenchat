@@ -460,6 +460,29 @@ impl PeerAvatars {
         self.enqueue(ProbeKind::Who, nick, key)
     }
 
+    /// The user asked for `nick`'s avatar: queue a CTCP AVATAR query even
+    /// if one was sent before. It still goes through the queue, so the
+    /// spacing, the bound and the one-query-per-user rule apply.
+    pub(crate) fn request(
+        &mut self,
+        nick: &str,
+        current_nick: &str,
+        presence: &PresenceIndex,
+    ) -> Option<String> {
+        if same_nickname(nick, current_nick) || !valid_sender(nick) {
+            return None;
+        }
+        if !presence.shares(nick, None) {
+            return Some(format!(
+                "Not asking {nick} for an avatar: no channel is shared with them."
+            ));
+        }
+        let key = nickname_key(nick);
+        self.in_flight
+            .retain(|probe| probe.kind != ProbeKind::Query || probe.key != key);
+        self.enqueue(ProbeKind::Query, nick, key)
+    }
+
     fn enqueue(&mut self, kind: ProbeKind, nick: &str, key: String) -> Option<String> {
         if !self.stages.contains_key(&key) && self.stages.len() >= MAX_PROBED_USERS {
             return None;
@@ -968,6 +991,32 @@ mod tests {
         assert!(shareable(&long, true).is_err());
         // An unusable URL is never answered.
         assert_eq!(PeerAvatars::new(true, Some("me.png".into())).share, None);
+    }
+
+    #[test]
+    fn a_manual_request_queries_again_even_after_the_user_was_asked() {
+        let mut peers = PeerAvatars::new(true, None);
+        let presence = rosters();
+        let start = Instant::now();
+        // Already queried (and answered without an avatar).
+        let note = peers.request("bob", ME, &presence);
+        assert_eq!(note, None);
+        let sent = peers.tick(start, ME, &presence).send;
+        assert_eq!(wire(&sent), ["PRIVMSG bob \u{1}AVATAR\u{1}"]);
+        observe(
+            &mut peers,
+            ":bob!u@h NOTICE alice :\u{1}AVATAR \u{1}",
+            start,
+        );
+        // Asking again goes out once more, after the probe spacing.
+        assert_eq!(peers.request("bob", ME, &presence), None);
+        let later = start + PROBE_INTERVAL;
+        let sent = peers.tick(later, ME, &presence).send;
+        assert_eq!(wire(&sent), ["PRIVMSG bob \u{1}AVATAR\u{1}"]);
+        // Nobody is asked who shares no channel with us, or ourselves.
+        assert!(peers.request("stranger", ME, &presence).is_some());
+        assert_eq!(peers.request(ME, ME, &presence), None);
+        assert!(peers.queue.is_empty());
     }
 
     #[test]

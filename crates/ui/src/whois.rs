@@ -3,7 +3,7 @@ use crate::{ChatWindow, localization::Localizer};
 use cayenchat_irc_core::WhoisInfo;
 use cayenchat_model::{NetworkId, display, names::CaseMapping};
 use gpui::{prelude::*, *};
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 /// The channels we are in on a network, folded under the network's case
 /// mapping so a WHOIS entry matches however the server cases it.
@@ -32,6 +32,10 @@ pub struct WhoisWindow {
     details_scroll: ScrollHandle,
     menu_scroll: ScrollHandle,
     status: Option<String>,
+    /// The user's avatar image, pushed by the owner (it owns the cache).
+    avatar: Option<Arc<RenderImage>>,
+    /// Whether the server exchanges avatars, so the user can be asked.
+    can_request_avatar: bool,
     i18n: Localizer,
     focus: FocusHandle,
     // Refreshed at the start of each render for row helpers.
@@ -75,6 +79,8 @@ impl WhoisWindow {
                         details_scroll: ScrollHandle::new(),
                         menu_scroll: ScrollHandle::new(),
                         status: None,
+                        avatar: None,
+                        can_request_avatar: false,
                         i18n,
                         focus,
                         theme: crate::theme::current(cx),
@@ -107,6 +113,42 @@ impl WhoisWindow {
             self.joined = joined;
             cx.notify();
         }
+    }
+
+    /// The avatar to draw and whether it can be asked for; redrawn only on
+    /// a change.
+    pub fn set_avatar(
+        &mut self,
+        avatar: Option<Arc<RenderImage>>,
+        can_request: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let same = match (&self.avatar, &avatar) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same || self.can_request_avatar != can_request {
+            self.avatar = avatar;
+            self.can_request_avatar = can_request;
+            cx.notify();
+        }
+    }
+
+    fn request_avatar(&mut self, cx: &mut Context<Self>) {
+        let nickname = self.info.nickname.clone();
+        let network = self.network;
+        let result = self
+            .owner
+            .update(cx, |chat, _, cx| {
+                chat.request_peer_avatar(network, &nickname, cx)
+            })
+            .unwrap_or_else(|_| Err(self.i18n.text("not_connected")));
+        self.status = Some(match result {
+            Ok(()) => self.i18n.text("whois_avatar_asked"),
+            Err(error) => error,
+        });
+        cx.notify();
     }
 
     pub fn set_localizer(&mut self, i18n: Localizer, cx: &mut Context<Self>) {
@@ -361,7 +403,46 @@ impl WhoisWindow {
             .bg(theme.surface)
             .border_1()
             .border_color(theme.border);
+        let askable = info.avatar_mark && self.can_request_avatar;
+        let avatar_row = self.row(
+            "whois_avatar",
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(
+                    div()
+                        .w(px(48.))
+                        .h(px(48.))
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(theme.border)
+                        .children(self.avatar.clone().map(|image| img(image).size_full())),
+                )
+                .child(if askable {
+                    button(
+                        "whois-avatar-fetch",
+                        self.i18n.text("whois_avatar_fetch"),
+                        false,
+                        theme,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.request_avatar(cx)))
+                    .into_any_element()
+                } else {
+                    // Disabled: no mark in the real name, or no exchange.
+                    div()
+                        .px_3()
+                        .py_1()
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_color(theme.text_muted)
+                        .child(self.i18n.text("whois_avatar_fetch"))
+                        .into_any_element()
+                }),
+        );
         details = details
+            .child(avatar_row)
             .children(self.text_row("whois_nickname", Some(info.nickname.clone())))
             .children(self.text_row("whois_user_host", user_host))
             .children(self.text_row("whois_real_name", info.realname.clone()))
