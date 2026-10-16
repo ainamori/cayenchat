@@ -1,12 +1,13 @@
 {
   "cayenchat-en.png": {
-    "binary_modified": "2026-10-16T22:35:38+09:00",
-    "captured": "2026-10-16T22:35:53+09:00",
-    "commit": "4c1ed493adda34210f9889db27661678c250e1cb",
+    "binary_sha256": "8b05070c3ebd5c90242dd84a9faaa1c2d3eb02ac8c5c24abf504e0f67ddd1c07",
+    "captured": "2026-10-16T22:51:33+09:00",
+    "commit": "367b3d5b5d6455c3cc95bcaea45972685e63d5b6",
     "dirty": false,
     "features": [
       "demo"
     ],
+    "image_sha256": "c1e1b9d176046679948f7b712ca93ae48bc33e96a6a486a7543338c646f819ba",
     "language": "english",
     "os": "Linux 6.12.111+deb13-amd64",
     "show_toolbar": true,
@@ -14,13 +15,14 @@
     "theme": "light"
   },
   "cayenchat-ja.png": {
-    "binary_modified": "2026-10-16T22:35:38+09:00",
-    "captured": "2026-10-16T22:36:07+09:00",
-    "commit": "4c1ed493adda34210f9889db27661678c250e1cb",
+    "binary_sha256": "8b05070c3ebd5c90242dd84a9faaa1c2d3eb02ac8c5c24abf504e0f67ddd1c07",
+    "captured": "2026-10-16T22:51:47+09:00",
+    "commit": "367b3d5b5d6455c3cc95bcaea45972685e63d5b6",
     "dirty": false,
     "features": [
       "demo"
     ],
+    "image_sha256": "0777d1b6589aa9374ece8966dcf4023b76070662901ffe04f431805eaf62594d",
     "language": "japanese",
     "os": "Linux 6.12.111+deb13-amd64",
     "show_toolbar": true,
