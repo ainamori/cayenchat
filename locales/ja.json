@@ -210,7 +210,7 @@
   "always_on_top": "CayenChat のウィンドウを常に最前面に表示する",
   "confirm_quit": "終了時に確認する",
   "quit_title": "CayenChat を終了しますか？",
-  "quit_detail_connected": "接続中の IRC サーバーから切断して、アプリケーションを終了します。",
+  "quit_detail_connected": "サーバーから切断して終了します。",
   "quit_detail": "アプリケーションを終了します。",
   "quit_confirm": "終了する",
   "shorten_amazon_urls": "貼り付け時に長い Amazon 商品 URL を短縮する",
