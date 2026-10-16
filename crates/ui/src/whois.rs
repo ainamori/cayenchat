@@ -5,6 +5,15 @@ use cayenchat_model::{NetworkId, display, names::CaseMapping};
 use gpui::{prelude::*, *};
 use std::{collections::HashSet, sync::Arc};
 
+/// Side of the avatar box in logical pixels.
+const AVATAR_SLOT: f32 = 48.;
+
+/// Pixels a side of the avatar to draw in the box on a window with
+/// `scale_factor` device pixels per logical pixel, so it is never enlarged.
+pub fn avatar_pixels(scale_factor: f32) -> u32 {
+    (AVATAR_SLOT * scale_factor.max(1.)).ceil() as u32
+}
+
 /// The channels we are in on a network, folded under the network's case
 /// mapping so a WHOIS entry matches however the server cases it.
 #[derive(Clone, Default, PartialEq)]
@@ -429,8 +438,8 @@ impl WhoisWindow {
                 .gap_3()
                 .child(
                     div()
-                        .w(px(48.))
-                        .h(px(48.))
+                        .w(px(AVATAR_SLOT))
+                        .h(px(AVATAR_SLOT))
                         .flex_shrink_0()
                         .overflow_hidden()
                         .border_1()
@@ -624,6 +633,17 @@ mod tests {
         // No avatar, a failed fetch or avatars switched off.
         let (img, default, pending) = slot_contents(Shown::None, || "d");
         assert!(img.is_none() && default == Some("d") && !pending);
+    }
+
+    #[test]
+    fn avatar_pixels_cover_the_box_at_every_scale() {
+        use super::avatar_pixels;
+        assert_eq!(avatar_pixels(1.), 48);
+        assert_eq!(avatar_pixels(1.5), 72);
+        assert_eq!(avatar_pixels(2.), 96);
+        // Rounded up, never short of the box.
+        assert_eq!(avatar_pixels(1.25), 60);
+        assert_eq!(avatar_pixels(1.01), 49);
     }
 
     #[test]

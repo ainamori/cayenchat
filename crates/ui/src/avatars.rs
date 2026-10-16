@@ -21,7 +21,7 @@
 use std::{cell::RefCell, collections::HashMap, sync::Arc, time::Instant};
 
 use cayenchat_media::{
-    Fetcher, HttpFetcher, Limits, LoadError, Thumbnail,
+    Fetcher, HttpFetcher, Limits, LoadError, MediaRef, Original, Thumbnail,
     cache::{CacheLimits, Job, Lookup, PreviewCache},
     policy,
 };
@@ -34,8 +34,98 @@ pub const SLOT: f32 = 16.;
 /// Thumbnail size in pixels (sharp on 2× displays), also the size asked for
 /// through the registry's `{size}` placeholder.
 pub const PIXELS: u32 = 32;
-/// Largest default avatar `default_sized` rasterizes.
+/// Pixels a side of the one size an avatar URL is fetched at (the registry's
+/// `{size}` placeholder); every displayed size is made from that download.
+pub const ORIGINAL_PIXELS: u32 = 128;
+/// Largest default avatar `default_sized` rasterizes and largest thumbnail
+/// `lookup` makes.
 const MAX_DEFAULT_PIXELS: u32 = 512;
+/// Avatar originals kept for resizing: at most this many, and this many
+/// bytes together. The oldest go first; they are fetched again when needed.
+const MAX_ORIGINALS: usize = 256;
+const MAX_ORIGINAL_BYTES: usize = 8 * 1024 * 1024;
+
+/// A ready image is cached per avatar URL and size.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Key {
+    source: MediaRef,
+    pixels: u32,
+}
+
+/// The fetched bytes of avatar URLs, bounded in count and total size, least
+/// recently used first out. Memory only.
+struct Originals {
+    entries: HashMap<MediaRef, OriginalEntry>,
+    bytes: usize,
+    clock: u64,
+    max_entries: usize,
+    max_bytes: usize,
+}
+
+impl Default for Originals {
+    fn default() -> Self {
+        Self::new(MAX_ORIGINALS, MAX_ORIGINAL_BYTES)
+    }
+}
+
+struct OriginalEntry {
+    original: Original,
+    bytes: usize,
+    last_used: u64,
+}
+
+impl Originals {
+    fn new(max_entries: usize, max_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            bytes: 0,
+            clock: 0,
+            max_entries,
+            max_bytes,
+        }
+    }
+
+    /// The slot loads of `source` share, made if needed.
+    fn slot(&mut self, source: &MediaRef) -> Original {
+        self.clock += 1;
+        let entry = self
+            .entries
+            .entry(source.clone())
+            .or_insert_with(|| OriginalEntry {
+                original: Original::default(),
+                bytes: 0,
+                last_used: 0,
+            });
+        entry.last_used = self.clock;
+        entry.original.clone()
+    }
+
+    /// Counts what a finished load left in the slot and enforces the limits.
+    fn settle(&mut self, source: &MediaRef) {
+        if let Some(entry) = self.entries.get_mut(source) {
+            let held = entry.original.len();
+            self.bytes = self.bytes - entry.bytes + held;
+            entry.bytes = held;
+        }
+        while self.entries.len() > self.max_entries || self.bytes > self.max_bytes {
+            let victim = self
+                .entries
+                .iter()
+                .filter(|(other, _)| *other != source)
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(other, _)| other.clone());
+            let Some(victim) = victim else { break };
+            if let Some(entry) = self.entries.remove(&victim) {
+                self.bytes -= entry.bytes;
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+}
 /// Image fetches in flight across avatars and previews together, so turning
 /// both on does not double the peak of network and memory use. Decoding is
 /// already one at a time in the whole process (`media::decode`).
@@ -82,7 +172,8 @@ struct Released {
 }
 
 pub struct Avatars {
-    cache: RefCell<PreviewCache<Arc<RenderImage>, ()>>,
+    cache: RefCell<PreviewCache<Arc<RenderImage>, (), Key>>,
+    originals: RefCell<Originals>,
     limits: Limits,
     /// Present only while avatars are shown.
     fetcher: Option<Arc<dyn Fetcher>>,
@@ -100,6 +191,7 @@ impl Avatars {
     pub fn new(enabled: bool) -> Self {
         let mut avatars = Self {
             cache: RefCell::new(PreviewCache::new(cache_limits())),
+            originals: RefCell::default(),
             limits: Limits::avatar(PIXELS),
             fetcher: None,
             released: RefCell::new(Vec::new()),
@@ -155,6 +247,7 @@ impl Avatars {
         if !enabled {
             self.fetcher = None;
             self.defaults.get_mut().clear();
+            self.originals.get_mut().clear();
         } else if self.fetcher.is_none() {
             #[cfg(test)]
             if let Some(fetcher) = &self.fetcher_override {
@@ -170,18 +263,24 @@ impl Avatars {
         }
     }
 
-    /// The image for an avatar reference (an avatar URL template), queued
-    /// for loading if needed. Call only for rows being drawn.
-    pub fn lookup(&self, avatar: &str) -> Shown {
+    /// The image for an avatar reference (an avatar URL template) at
+    /// `pixels` × `pixels`, queued for loading if needed. The URL is always
+    /// fetched at [`ORIGINAL_PIXELS`], whatever size is asked for. Call only
+    /// for rows being drawn.
+    pub fn lookup(&self, avatar: &str, pixels: u32) -> Shown {
         if !self.enabled() {
             return Shown::None;
         }
         #[cfg(test)]
         self.lookups.set(self.lookups.get() + 1);
-        let Some(source) = policy::avatar_url(avatar, PIXELS) else {
+        let Some(source) = policy::avatar_url(avatar, ORIGINAL_PIXELS) else {
             return Shown::None;
         };
-        match self.cache.borrow_mut().request(&source, (), Instant::now()) {
+        let key = Key {
+            source,
+            pixels: pixels.clamp(1, MAX_DEFAULT_PIXELS),
+        };
+        match self.cache.borrow_mut().request(&key, (), Instant::now()) {
             Lookup::Ready(image) => Shown::Image(image.clone()),
             Lookup::Pending => Shown::Pending,
             Lookup::None => Shown::None,
@@ -234,8 +333,15 @@ impl Avatars {
     }
 
     #[cfg(test)]
-    pub fn cache(&self) -> std::cell::Ref<'_, PreviewCache<Arc<RenderImage>, ()>> {
+    pub fn cache(&self) -> std::cell::Ref<'_, PreviewCache<Arc<RenderImage>, (), Key>> {
         self.cache.borrow()
+    }
+
+    /// Originals kept and their bytes (tests).
+    #[cfg(test)]
+    pub fn originals(&self) -> (usize, usize) {
+        let originals = self.originals.borrow();
+        (originals.entries.len(), originals.bytes)
     }
 
     #[cfg(test)]
@@ -272,11 +378,22 @@ impl ChatWindow {
             let Some(job) = self.avatars.cache.borrow_mut().next_job() else {
                 break;
             };
-            let (source, cancel, fetcher) =
-                (job.source.clone(), job.cancel.clone(), fetcher.clone());
+            let (key, cancel, fetcher) = (job.source.clone(), job.cancel.clone(), fetcher.clone());
+            let original = self.avatars.originals.borrow_mut().slot(&key.source);
+            let limits = Limits {
+                thumbnail_width: key.pixels,
+                thumbnail_height: key.pixels,
+                ..limits
+            };
             let work = cx.background_executor().spawn(async move {
-                cayenchat_media::load_thumbnail(&source, fetcher.as_ref(), &limits, &cancel)
-                    .map(to_image)
+                cayenchat_media::load_avatar_thumbnail(
+                    &key.source,
+                    fetcher.as_ref(),
+                    &limits,
+                    &cancel,
+                    &original,
+                )
+                .map(to_image)
             });
             cx.spawn(async move |this, cx| {
                 let result = work.await;
@@ -289,10 +406,11 @@ impl ChatWindow {
 
     fn avatar_finished(
         &mut self,
-        job: Job,
+        job: Job<Key>,
         result: Result<(Arc<RenderImage>, usize), LoadError>,
         cx: &mut Context<Self>,
     ) {
+        self.avatars.originals.get_mut().settle(&job.source.source);
         let finished = self
             .avatars
             .cache
@@ -323,7 +441,7 @@ mod tests {
     use crate::{ChatWindow, Worker};
 
     const BOB: &str = "https://avatars.example.com/u/bob?s={size}";
-    const BOB_URL: &str = "https://avatars.example.com/u/bob?s=32";
+    const BOB_URL: &str = "https://avatars.example.com/u/bob?s=128";
     const CAROL: &str = "https://avatars.example.com/carol";
 
     fn png(width: u32, height: u32) -> Vec<u8> {
@@ -365,7 +483,13 @@ mod tests {
             if url.contains("missing") {
                 return Err(LoadError::Status(404));
             }
-            Ok(png(96, 64))
+            Ok(if url.contains("huge") {
+                png(600, 600)
+            } else if url.contains("big") {
+                png(300, 300)
+            } else {
+                png(96, 64)
+            })
         }
     }
 
@@ -615,6 +739,107 @@ mod tests {
         assert_eq!(fetcher.calls().len(), count);
     }
 
+    /// Looks `url` up at each size, lets the loads finish and returns the
+    /// pixel width of each image that arrived.
+    fn widths(
+        chat: &Entity<ChatWindow>,
+        cx: &mut VisualTestContext,
+        url: &str,
+        sizes: &[u32],
+    ) -> Vec<Option<i32>> {
+        chat.update(cx, |chat, cx| {
+            for &pixels in sizes {
+                chat.avatars.lookup(url, pixels);
+            }
+            chat.pump_avatars(cx);
+        });
+        cx.run_until_parked();
+        chat.update(cx, |chat, _| {
+            sizes
+                .iter()
+                .map(|&pixels| match chat.avatars.lookup(url, pixels) {
+                    super::Shown::Image(image) => Some(image.size(0).width.0),
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    fn every_size_comes_from_one_download_and_is_never_enlarged(cx: &mut TestAppContext) {
+        let fetcher = Arc::new(FakeFetcher::default());
+        let (chat, cx) = open(cx, true, false, &fetcher);
+        let url = "https://avatars.example.com/big/{size}";
+        // The log's slot, and the WHOIS box at 1×, 1.5× and 2× scaling.
+        let sizes = [32, 48, 72, 96];
+        assert_eq!(
+            sizes,
+            [
+                super::PIXELS,
+                crate::whois::avatar_pixels(1.),
+                crate::whois::avatar_pixels(1.5),
+                crate::whois::avatar_pixels(2.),
+            ]
+        );
+        let shown = widths(&chat, cx, url, &sizes);
+        assert_eq!(shown, sizes.map(|pixels| Some(pixels as i32)));
+        assert_eq!(
+            fetcher.calls(),
+            ["https://avatars.example.com/big/128".to_owned()],
+            "one fetch, at the original size"
+        );
+        chat.read_with(cx, |chat, _| {
+            let (entries, bytes) = chat.avatars.originals();
+            assert_eq!(entries, 1);
+            assert!(bytes > 0 && bytes <= cayenchat_media::ORIGINAL_MAX_BYTES);
+            assert!(chat.avatars.cache().ready_bytes() <= 2 * 1024 * 1024);
+        });
+    }
+
+    #[gpui::test]
+    fn images_too_large_to_keep_are_fetched_again_for_each_size(cx: &mut TestAppContext) {
+        let fetcher = Arc::new(FakeFetcher::default());
+        let (chat, cx) = open(cx, true, false, &fetcher);
+        let url = "https://avatars.example.com/huge";
+        assert_eq!(widths(&chat, cx, url, &[32]), [Some(32)]);
+        assert_eq!(widths(&chat, cx, url, &[96]), [Some(96)]);
+        assert_eq!(fetcher.calls().len(), 2);
+        chat.read_with(cx, |chat, _| assert_eq!(chat.avatars.originals().1, 0));
+    }
+
+    #[test]
+    fn kept_originals_stay_within_their_count_and_byte_limits() {
+        use cayenchat_media::{CancelFlag, Limits, load_avatar_thumbnail};
+
+        let fetcher = FakeFetcher::default();
+        let png_len = png(96, 64).len();
+        let mut originals = super::Originals::new(5, 3 * png_len);
+        let limits = Limits::avatar(32);
+        let source = |n: usize| {
+            cayenchat_media::policy::avatar_url(&format!("https://a.example/{n}"), 128).unwrap()
+        };
+        let load = |originals: &mut super::Originals, n: usize| {
+            let source = source(n);
+            let slot = originals.slot(&source);
+            load_avatar_thumbnail(&source, &fetcher, &limits, &CancelFlag::default(), &slot)
+                .unwrap();
+            originals.settle(&source);
+        };
+        for n in 0..10 {
+            load(&mut originals, n);
+            assert!(originals.entries.len() <= 5 && originals.bytes <= 3 * png_len);
+        }
+        assert_eq!((originals.entries.len(), originals.bytes), (3, 3 * png_len));
+        // The newest survive; an evicted one is fetched again, a kept one not.
+        let calls = fetcher.calls().len();
+        load(&mut originals, 9);
+        assert_eq!(fetcher.calls().len(), calls);
+        load(&mut originals, 0);
+        assert_eq!(fetcher.calls().len(), calls + 1);
+        originals.clear();
+        assert_eq!((originals.entries.len(), originals.bytes), (0, 0));
+    }
+
     #[gpui::test]
     fn a_new_occupant_of_a_nickname_does_not_get_the_old_avatar(cx: &mut TestAppContext) {
         let fetcher = Arc::new(FakeFetcher::default());
@@ -660,7 +885,7 @@ mod tests {
         chat.update(cx, |chat, cx| {
             for n in 0..10 {
                 chat.avatars
-                    .lookup(&format!("https://avatars.example.com/n/{n}"));
+                    .lookup(&format!("https://avatars.example.com/n/{n}"), super::PIXELS);
                 let url = format!("https://images.example.com/{n}.png");
                 chat.previews.lookup(
                     &cayenchat_app::links::find(&url),

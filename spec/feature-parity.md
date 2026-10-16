@@ -66,7 +66,7 @@ Server history is limited to channel history on opt-in IRCv3 servers (recent lin
 - PARTIAL — nick changes update the roster through the IRC client's channel list
 - PARTIAL — join/part/quit synchronize the roster through the IRC client's channel list
 - DONE — member context menu offers Whois, private-message composition, channel invite and +o/-o commands
-- DONE — WHOIS replies requested by this client open a raised per-nick WHOIS window with join, private message and update actions and a 48px icon (the user's avatar, ours from the confirmed/shared avatar as in the log, else the nickname-derived default icon; empty only while loading); replies requested by other bouncer clients stay in the server log
+- DONE — WHOIS replies requested by this client open a raised per-nick WHOIS window with join, private message and update actions and a 48px icon (the user's avatar, ours from the confirmed/shared avatar as in the log, else the nickname-derived default icon; empty only while loading; drawn at 48 × the window's scale factor, rounded up, from the kept original of the image or as a default icon rasterized at that size, never enlarged from the 32 px log size); replies requested by other bouncer clients stay in the server log
 
 ## Navigation
 
