@@ -547,6 +547,15 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
+        // Past either edge a drag selects to that end of the text. The text
+        // scrolls only when painted, so a pointer held still outside the box
+        // would otherwise stop at the first visible character.
+        if position.x < bounds.left() {
+            return 0;
+        }
+        if position.x > bounds.right() {
+            return self.content.len();
+        }
         line.closest_index_for_x(position.x - bounds.left() + self.scroll_x)
     }
 
@@ -1467,6 +1476,54 @@ mod tests {
         );
         input.read_with(cx, |input, _| {
             assert_eq!(input.selected_range, 0..7);
+        });
+    }
+
+    /// A scrolled long text must still select to its start when the pointer
+    /// is held outside the box, where no repaint scrolls it back.
+    #[gpui::test]
+    fn drag_outside_a_scrolled_text_selects_to_the_start(cx: &mut gpui::TestAppContext) {
+        use gpui::{Modifiers, MouseButton};
+
+        struct Host(Entity<TextInput>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().pl(px(100.)).w(px(300.)).child(self.0.clone())
+            }
+        }
+
+        cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::new(
+                cayenchat_storage::ThemeMode::Light,
+                gpui::WindowAppearance::Light,
+                &cayenchat_storage::Appearance::default(),
+            ));
+        });
+        let text = "START-".to_string() + &"abcdefghijklmnopqrstuvwxyz-".repeat(8) + "END";
+        let input = cx.new(|cx| {
+            let mut input = TextInput::new(cx);
+            input.content = text.clone().into();
+            input.selected_range = text.len()..text.len();
+            input
+        });
+        let (_host, cx) = cx.add_window_view(|_, _| Host(input.clone()));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        input.read_with(cx, |input, _| assert!(input.scroll_x > px(0.)));
+
+        cx.simulate_mouse_down(
+            point(px(100. + 4. + 180.), px(10.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(
+            point(px(20.), px(10.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.selected_range.start, 0);
         });
     }
 
