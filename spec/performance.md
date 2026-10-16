@@ -87,12 +87,13 @@ Do not build a second mechanism for any of these; extend them instead.
 | Own avatar requests (irc-core, app) | 1 outstanding, 20 s timeout, URL ≤ 400 bytes | per connection | Only on Send to / Remove from IRC Server, or after an avatar image upload. |
 | Users told of a changed shared avatar (irc-core) | 256 askers, one private NOTICE per 2 s | per connection | Only users who queried us and share a channel with us; never channels. Empty on reconnect. |
 | Avatar directory (app) | 2,048 current + 512 retired entries | per network | Worst case about 6 MiB per network at the maximum URL length; typical URLs are ~100 bytes. Removed with the server. |
-| Default avatars (ui) | 512 looks, one 32×32 SVG image each | application | Kept per look while avatars are shown (about 4 KiB of pixels each in GPUI's image cache and atlas); cleared when the setting is turned off. |
+| Default avatars (ui) | 512 looks per pixel size (32 for the log and members, ⌈48 × scale⌉ for WHOIS) | application | Kept per look and size while avatars are shown (about 4 KiB of pixels each at 32, GPUI's image cache and atlas); cleared when the setting is turned off. |
+| Avatar originals (ui) | 256 URLs, 8 MiB together; only data ≤ 256 KiB and ≤ 512 px a side | application | Fetched bytes, undecoded, in memory only, least recently used first out; every displayed size is decoded from them, so a second size never fetches again. Larger images are not kept and are fetched and decoded again per size. Cleared when the setting is turned off. |
 | Avatar loads | 2 in flight; with previews at most 3 media fetches in flight together | application | Decoding stays one at a time in the process (shared with previews). |
 | Queued avatar requests | 32, newest first | application | Only from drawn rows. |
-| Avatar records | 256 (ready, failed, queued, loading) | application | Least recently used ready or failed first. |
-| Ready avatars | 2 MiB charged (32×32 BGRA × 2 for CPU copy and GPU tile = 8 KiB each) | application | Separate from the 32 MiB preview budget. Released images leave the GPU atlas after both avatar panes redrew. |
-| Avatar response and decode | 2 MiB, 3 redirects, 5 s connect, 10 s total; ≤ 4096 px a side, ≤ 4.2 MP, decoder ≤ 24 MiB | per load | Centered square cropped and scaled to 32×32. |
+| Avatar records | 256 (ready, failed, queued, loading), keyed by URL and pixel size | application | Least recently used ready or failed first. |
+| Ready avatars | 2 MiB charged (32×32 BGRA × 2 for CPU copy and GPU tile = 8 KiB each; a 96×96 WHOIS image is 72 KiB) | application | Separate from the 32 MiB preview budget. Open WHOIS windows add their larger images to the same budget, so many of them evict the least recently used log images, which are made again from the kept originals. Released images leave the GPU atlas after both avatar panes redrew. |
+| Avatar response and decode | 2 MiB, 3 redirects, 5 s connect, 10 s total; ≤ 4096 px a side, ≤ 4.2 MP, decoder ≤ 24 MiB | per load | Centered square cropped and scaled (Lanczos3) to the size asked for, never enlarged. A `{size}` URL is always fetched at 128 px. |
 | Linux shaping cache | swept every 128 lines | process | Age-based, not a byte bound. |
 
 ## Measuring
@@ -516,6 +517,23 @@ avatars, the log staying put while scrolled up during a burst and
 following again at the bottom, and the column disappearing at once when
 the setting was turned off. The process-level scenarios (`run_baseline.py`)
 were not run.
+
+## Avatar sizes and kept originals (2026-10-16)
+
+Release build, headless `perf_baseline_avatars`, one run each in the same
+Linux container, medians in µs, parent `e57658a` against this change:
+
+| Build | Typing | Channel switch | Scroll 20 rows | 256-event batch | Roster 2,000 |
+| --- | --- | --- | --- | --- | --- |
+| Parent | 323 | 1,945 | 1,541 | 1,925 | 1,997 |
+| This change | 329 | 1,983 | 1,561 | 1,936 | 1,695 |
+
+Within noise. `lookup` still parses the URL once per call and now adds a
+size to the cache key (a `u32`); nothing else is done per row. Bookkeeping
+is unchanged: 50 fetches, 50 ready, 409,600 charged bytes. The URL is now
+fetched at 128 px instead of 32 for `{size}` templates, so a download may be
+larger (still ≤ 2 MiB); the kept original (≤ 256 KiB) removes the refetch for
+each further size.
 
 ## Own avatar and later-joiner lookups (2026-09-28)
 

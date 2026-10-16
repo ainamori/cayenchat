@@ -27,7 +27,7 @@ mod testing;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -176,6 +176,76 @@ pub fn load_thumbnail(
     decode::thumbnail(&bytes, limits, cancel)
 }
 
+/// Avatar originals kept for resizing are at most this many bytes...
+pub const ORIGINAL_MAX_BYTES: usize = 256 * 1024;
+/// ...and at most this many pixels on each side.
+pub const ORIGINAL_MAX_SIDE: u32 = 512;
+
+/// The fetched bytes of one avatar URL, shared by every size made from it.
+/// Filled by the first load, only when the image is small enough to keep.
+/// The bytes stay untrusted: every size is decoded from them through the
+/// same checks as a fresh download.
+#[derive(Clone, Debug, Default)]
+pub struct Original(Arc<OriginalInner>);
+
+#[derive(Debug, Default)]
+struct OriginalInner {
+    /// Held across a fetch, so only background loads take it.
+    bytes: std::sync::Mutex<Option<Arc<[u8]>>>,
+    /// Size of `bytes`, readable without the lock (the UI accounts with it
+    /// and must not wait for a fetch in flight).
+    len: AtomicUsize,
+}
+
+impl Original {
+    /// Bytes held (0 while empty). Never waits for a load.
+    pub fn len(&self) -> usize {
+        self.0.len.load(Ordering::Acquire)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Arc<[u8]>>> {
+        self.0
+            .bytes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Like [`load_thumbnail`] for an avatar, made from `original` when it holds
+/// the bytes. Otherwise fetches, keeps the bytes in `original` if they are
+/// small (see [`ORIGINAL_MAX_BYTES`]) and decodes. Loads of the same
+/// `original` run one after another, so a second size waits for the first
+/// fetch instead of fetching again. Blocking; run it on a background thread.
+pub fn load_avatar_thumbnail(
+    source: &MediaRef,
+    fetcher: &dyn Fetcher,
+    limits: &Limits,
+    cancel: &CancelFlag,
+    original: &Original,
+) -> Result<Thumbnail, LoadError> {
+    let mut held = original.lock();
+    let bytes = match held.as_ref() {
+        Some(bytes) => bytes.clone(),
+        None => {
+            let bytes: Arc<[u8]> = fetcher.fetch(source, limits, cancel)?.into();
+            if decode::is_small_original(&bytes) {
+                *held = Some(bytes.clone());
+                original.0.len.store(bytes.len(), Ordering::Release);
+            }
+            bytes
+        }
+    };
+    drop(held);
+    if cancel.is_cancelled() {
+        return Err(LoadError::Cancelled);
+    }
+    decode::thumbnail(&bytes, limits, cancel)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -245,5 +315,135 @@ mod tests {
         assert_eq!((avatar.width, avatar.height), (32, 32));
         assert_eq!(load("/avatar/32/page"), Err(LoadError::NotImage));
         assert_eq!(load("/avatar/32/svg"), Err(LoadError::NotImage));
+    }
+
+    #[test]
+    fn small_avatar_originals_are_kept_and_serve_every_size_from_one_fetch() {
+        // Noise does not compress: 500×500 stays within 512 px but not
+        // within 256 KiB.
+        let noise = |side: u32| {
+            let mut state = 0x2545_F491_u32;
+            let image = image::RgbaImage::from_fn(side, side, |_, _| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let [a, b, c, _] = state.to_be_bytes();
+                image::Rgba([a, b, c, 255])
+            });
+            let mut bytes = Vec::new();
+            image
+                .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
+                .unwrap();
+            bytes
+        };
+        let heavy = noise(500);
+        assert!(heavy.len() > ORIGINAL_MAX_BYTES);
+        let mut routes = HashMap::new();
+        routes.insert(
+            "/small".to_string(),
+            Route::image("image/png", encode(ImageFormat::Png, 128, 96)),
+        );
+        routes.insert("/heavy".to_string(), Route::image("image/png", heavy));
+        routes.insert(
+            "/wide".to_string(),
+            Route::image("image/png", encode(ImageFormat::Png, 513, 100)),
+        );
+        let server = FixtureServer::start(routes);
+        let base = Limits::avatar(32);
+        let fetcher = HttpFetcher::for_local_fixture(&base);
+        let load = |path: &str, pixels: u32, original: &Original| {
+            let source = MediaRef::Link(url::Url::parse(&server.url(path)).unwrap());
+            let limits = Limits {
+                thumbnail_width: pixels,
+                thumbnail_height: pixels,
+                ..base
+            };
+            load_avatar_thumbnail(&source, &fetcher, &limits, &CancelFlag::default(), original)
+        };
+
+        let original = Original::default();
+        for pixels in [32, 48, 96] {
+            let thumbnail = load("/small", pixels, &original).unwrap();
+            assert_eq!((thumbnail.width, thumbnail.height), (pixels, pixels));
+        }
+        assert_eq!(server.hits(), 1, "later sizes come from the kept bytes");
+        assert!(!original.is_empty());
+
+        // Too heavy or too wide: nothing is kept, each size fetches again.
+        for path in ["/heavy", "/wide"] {
+            let hits = server.hits();
+            let original = Original::default();
+            load(path, 32, &original).unwrap();
+            load(path, 96, &original).unwrap();
+            assert!(original.is_empty(), "{path}");
+            assert_eq!(server.hits(), hits + 2, "{path}");
+        }
+    }
+
+    #[test]
+    fn counting_an_original_does_not_wait_for_a_fetch_in_flight() {
+        use std::sync::mpsc;
+
+        struct Gated {
+            png: Vec<u8>,
+            entered: mpsc::Sender<()>,
+            release: std::sync::Mutex<mpsc::Receiver<()>>,
+            calls: AtomicUsize,
+        }
+        impl Fetcher for Gated {
+            fn fetch(
+                &self,
+                _: &MediaRef,
+                _: &Limits,
+                _: &CancelFlag,
+            ) -> Result<Vec<u8>, LoadError> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                    self.entered.send(()).unwrap();
+                    self.release.lock().unwrap().recv().unwrap();
+                }
+                Ok(self.png.clone())
+            }
+        }
+
+        let (entered_tx, entered) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        // Too wide to keep, so every size fetches again.
+        let fetcher = Gated {
+            png: encode(ImageFormat::Png, 513, 100),
+            entered: entered_tx,
+            release: std::sync::Mutex::new(release_rx),
+            calls: AtomicUsize::new(0),
+        };
+        let source = MediaRef::Link(url::Url::parse("https://example.test/a").unwrap());
+        let limits = Limits::avatar(32);
+        let original = Original::default();
+        load_avatar_thumbnail(
+            &source,
+            &fetcher,
+            &limits,
+            &CancelFlag::default(),
+            &original,
+        )
+        .unwrap();
+
+        std::thread::scope(|scope| {
+            let second = scope.spawn(|| {
+                let limits = Limits::avatar(48);
+                load_avatar_thumbnail(
+                    &source,
+                    &fetcher,
+                    &limits,
+                    &CancelFlag::default(),
+                    &original,
+                )
+            });
+            entered.recv().unwrap();
+            // The second size is now inside its fetch, holding the slot.
+            let (len_tx, len_rx) = mpsc::channel();
+            let counter = original.clone();
+            scope.spawn(move || len_tx.send(counter.len()).unwrap());
+            let counted = len_rx.recv_timeout(Duration::from_secs(5));
+            release_tx.send(()).unwrap();
+            assert_eq!(counted, Ok(0), "len() waited for the fetch");
+            second.join().unwrap().unwrap();
+        });
     }
 }

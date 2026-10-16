@@ -2404,9 +2404,14 @@ impl ChatWindow {
             .whois_windows
             .iter()
             .map(|((network, key), handle)| {
-                let nickname = handle
-                    .read_with(cx, |view, _| view.nickname().to_owned())
-                    .unwrap_or_else(|_| key.clone());
+                let (nickname, pixels) = handle
+                    .update(cx, |view, window, _| {
+                        (
+                            view.nickname().to_owned(),
+                            whois::avatar_pixels(window.scale_factor()),
+                        )
+                    })
+                    .unwrap_or_else(|_| (key.clone(), whois::avatar_pixels(1.)));
                 // Ourselves first, as in the log: the confirmed or shared
                 // avatar, never a CTCP query to ourselves.
                 let avatar = self.own_avatar_for(*network, &nickname).or_else(|| {
@@ -2421,13 +2426,13 @@ impl ChatWindow {
                 });
                 let shown = avatar
                     .filter(|_| self.avatars_shown(*network))
-                    .map(|avatar| self.avatars.lookup(&avatar))
+                    .map(|avatar| self.avatars.lookup(&avatar, pixels))
                     .unwrap_or(avatars::Shown::None);
                 // Loading keeps the slot empty; no image falls back to the
                 // icon made from the nickname as the server reported it
                 // (the lowercased key only if the window is gone).
                 let (image, default, loading) =
-                    whois::slot_contents(shown, || self.avatars.default_for(&nickname));
+                    whois::slot_contents(shown, || self.avatars.default_sized(&nickname, pixels));
                 pending |= loading;
                 (*handle, image, default, self.peer_avatars_on(*network))
             })
@@ -7562,7 +7567,7 @@ impl ChatWindow {
             .flex_shrink_0()
             .overflow_hidden();
         let shown = match &avatar {
-            Some(avatar) => self.avatars.lookup(avatar),
+            Some(avatar) => self.avatars.lookup(avatar, avatars::PIXELS),
             None => avatars::Shown::None,
         };
         match shown {

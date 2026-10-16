@@ -67,8 +67,8 @@ pub enum Lookup<'a, T> {
 
 /// Work handed out by [`PreviewCache::next_job`].
 #[derive(Debug)]
-pub struct Job {
-    pub source: MediaRef,
+pub struct Job<K = MediaRef> {
+    pub source: K,
     pub cancel: CancelFlag,
     generation: u64,
 }
@@ -110,13 +110,13 @@ pub struct Stats {
 }
 
 #[derive(Debug)]
-pub struct PreviewCache<T, R> {
+pub struct PreviewCache<T, R, K = MediaRef> {
     limits: CacheLimits,
     enabled: bool,
     generation: u64,
-    records: HashMap<MediaRef, Record<T, R>>,
+    records: HashMap<K, Record<T, R>>,
     /// Queued requests, oldest first.
-    queue: VecDeque<MediaRef>,
+    queue: VecDeque<K>,
     in_flight: usize,
     ready_bytes: usize,
     clock: u64,
@@ -125,7 +125,7 @@ pub struct PreviewCache<T, R> {
     stats: Stats,
 }
 
-impl<T, R: PartialEq> PreviewCache<T, R> {
+impl<T, R: PartialEq, K: Clone + Eq + std::hash::Hash> PreviewCache<T, R, K> {
     /// A cache that starts disabled.
     pub fn new(limits: CacheLimits) -> Self {
         Self {
@@ -168,7 +168,7 @@ impl<T, R: PartialEq> PreviewCache<T, R> {
 
     /// Looks up `source` for a row being drawn and queues it if needed.
     /// `waiter` identifies the row; it is told when a pending load finishes.
-    pub fn request(&mut self, source: &MediaRef, waiter: R, now: Instant) -> Lookup<'_, T> {
+    pub fn request(&mut self, source: &K, waiter: R, now: Instant) -> Lookup<'_, T> {
         if !self.enabled {
             return Lookup::None;
         }
@@ -238,7 +238,7 @@ impl<T, R: PartialEq> PreviewCache<T, R> {
     }
 
     /// The next load to run, if a slot is free. Newest requests go first.
-    pub fn next_job(&mut self) -> Option<Job> {
+    pub fn next_job(&mut self) -> Option<Job<K>> {
         if !self.enabled || self.in_flight >= self.limits.max_in_flight {
             return None;
         }
@@ -261,7 +261,7 @@ impl<T, R: PartialEq> PreviewCache<T, R> {
     /// Results of jobs started before previews were turned off are dropped.
     pub fn finish(
         &mut self,
-        job: Job,
+        job: Job<K>,
         result: Result<(T, usize), LoadError>,
         now: Instant,
     ) -> Finished<R> {
@@ -344,7 +344,7 @@ impl<T, R: PartialEq> PreviewCache<T, R> {
 
     /// Drops the least recently used ready or failed records until the
     /// budget and the record limit hold. `keep` is never dropped.
-    fn evict(&mut self, keep: Option<&MediaRef>) {
+    fn evict(&mut self, keep: Option<&K>) {
         while self.ready_bytes > self.limits.budget_bytes
             || self.records.len() > self.limits.max_records
         {

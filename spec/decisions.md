@@ -876,7 +876,8 @@ Omitting an avatar is preferred to guessing.
 Media: avatar URLs go through `cayenchat-media` like previews but are
 recognized without a file extension (`policy::avatar_url`); safety checks,
 redirects, response and decode limits, background decoding and the static
-first frame are shared. `{size}` becomes 32. Limits: 2 MiB response,
+first frame are shared. `{size}` becomes 128 (`ORIGINAL_PIXELS`, one
+fetch whose kept bytes serve every display size). Limits: 2 MiB response,
 10 s total, sources up to 4096 px a side and 4.2 MP, decoder allocation up
 to 24 MiB, centered square cropped to 32×32 px and shown at 16×16 logical
 px. A separate cache (256 records, 2 MiB charged at twice the BGRA bytes,
