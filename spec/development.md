@@ -1396,6 +1396,15 @@ disconnection. It passed on 2026-09-28. The first run found that the
 refusal line came back after another user was answered; it is now limited
 to once per window.
 
+Issue 427 (2026-10-16) extended the same test: USERINFO, FINGER, SOURCE,
+ERRMSG and an unknown tag are answered (at most two per peer, five in
+total), DCC and an incoming ERRMSG NOTICE are not, `/ctcp bob VERSION`
+shows the peer's NOTICE in the server log, and `/ping bob` gives one
+`… reply from bob… ms` line only for the reply echoing the token (a wrong
+token and a reply from another user are not measured). It passed against
+Ergo 2.19.1 on 2026-10-16. Unit tests cover the token matching, timeout,
+pending bound, pacing and request validation.
+
 Manual check in the app, against a disposable local server with a raw
 client as the peer: `PRIVMSG <me> :\x01VERSION\x01`, `…PING 123…`, `…TIME…` and
 `…CLIENTINFO…` each get a NOTICE and a `CTCP … request from <peer>` line in

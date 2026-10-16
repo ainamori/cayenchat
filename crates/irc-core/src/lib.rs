@@ -1323,6 +1323,13 @@ enum Outgoing {
         encoder: Option<&'static encoding_rs::Encoding>,
     },
     Raw(IrcMessage),
+    /// Our own CTCP request to a user (`/ctcp`, `/ping`); the worker adds the
+    /// token of a timed PING and paces the requests.
+    Ctcp {
+        nick: String,
+        tag: String,
+        args: String,
+    },
     /// Publish (`Some`) or remove (`None`) our own avatar; `request`
     /// identifies the outcome events.
     OwnAvatar {
@@ -1375,6 +1382,11 @@ fn validate_outgoing_relayed<'w>(
             }
         }
         Outgoing::Raw(message) => message.clone(),
+        // The longest form: PING carries a token.
+        Outgoing::Ctcp { nick, tag, args } => IrcMessage::from(IrcCommand::PRIVMSG(
+            nick.clone(),
+            format!("\u{1}{tag} {args} 0123456789abcdef0123\u{1}"),
+        )),
         Outgoing::OwnAvatar { url, .. } => {
             let mut args = vec!["*".to_owned(), "SET".into(), metadata::AVATAR_KEY.into()];
             args.extend(url.clone());
@@ -1434,6 +1446,15 @@ fn split_word(value: &str) -> (&str, &str) {
         Some(index) => (&value[..index], value[index..].trim_start()),
         None => (value, ""),
     }
+}
+
+fn ctcp_request(nick: &str, tag: &str, args: &str) -> Result<Outgoing, String> {
+    ctcp::check_request(nick, tag, args)?;
+    Ok(Outgoing::Ctcp {
+        nick: nick.into(),
+        tag: tag.to_ascii_uppercase(),
+        args: args.into(),
+    })
 }
 
 fn checked_raw(wire: &str) -> Result<Outgoing, String> {
@@ -1631,6 +1652,22 @@ fn parse_slash_command(line: &str, selected: Option<&str>) -> Result<Outgoing, S
             }
             checked_command(IrcCommand::QUIT(Some(reason.into())))?;
             Ok(Outgoing::QuitWith(reason.into()))
+        }
+        "CTCP" => {
+            let (nick, rest) = split_word(rest);
+            let (tag, args) = split_word(rest);
+            if nick.is_empty() || tag.is_empty() {
+                return Err("Usage: /ctcp <nick> <command> [arguments].".into());
+            }
+            ctcp_request(nick, tag, args)
+        }
+        // CTCP PING to a user (the round trip), not the server's PING.
+        "PING" => {
+            let (nick, extra) = split_word(rest);
+            if nick.is_empty() || !extra.is_empty() {
+                return Err("Usage: /ping <nick>.".into());
+            }
+            ctcp_request(nick, "PING", "")
         }
         "RAW" | "QUOTE" => checked_raw(rest),
         _ => checked_raw(body),
@@ -2217,7 +2254,7 @@ async fn run_cancellable(
             config.shared_avatar.clone(),
         )
     });
-    let ctcp = ctcp::CtcpReplies::new(config.ircv3.peer_avatars);
+    let ctcp = ctcp::CtcpReplies::new(config.ircv3.peer_avatars, &config.host);
     let mut negotiation = cap::CapNegotiation::new(
         config.ircv3,
         config.sasl,
@@ -2475,6 +2512,15 @@ async fn run_cancellable(
                     break;
                 }
             }
+            // A CTCP PING without a reply is reported once; no timer runs
+            // while none is pending.
+            _ = tokio::time::sleep_until(until(worker.ctcp.next_deadline())),
+                if worker.ctcp.next_deadline().is_some() =>
+            {
+                if worker.on_ctcp_deadline().await.is_break() {
+                    break;
+                }
+            }
             _ = registration_progress.tick(), if worker.waiting_for_registration() => {
                 worker.note("Still waiting for IRC registration (001 welcome).").await;
             }
@@ -2658,6 +2704,7 @@ impl Worker {
                     .await
             }
             Outgoing::Raw(message) => self.send_raw(message).await,
+            Outgoing::Ctcp { nick, tag, args } => self.send_ctcp(&nick, &tag, &args).await,
             Outgoing::OwnAvatar { request, url } => self.set_own_avatar(request, url).await,
             Outgoing::ShareAvatar(url) => {
                 if let Some(peers) = self.peers.as_mut() {
@@ -2822,6 +2869,26 @@ impl Worker {
                     .await
             }
         }
+    }
+
+    async fn send_ctcp(&mut self, nick: &str, tag: &str, args: &str) -> Flow {
+        if !self.registered {
+            return self
+                .emit(Event::ServerLine(format!(
+                    "CTCP {tag} request to {nick} not sent: not connected yet"
+                )))
+                .await;
+        }
+        let handled = self
+            .ctcp
+            .request(nick, tag, args, tokio::time::Instant::now());
+        self.send_commands(handled.send).await?;
+        self.emit_all(handled.events).await
+    }
+
+    async fn on_ctcp_deadline(&mut self) -> Flow {
+        let handled = self.ctcp.tick(tokio::time::Instant::now());
+        self.emit_all(handled.events).await
     }
 
     async fn set_own_avatar(&mut self, request: u64, url: Option<String>) -> Flow {
@@ -3105,6 +3172,7 @@ impl Worker {
             self.roster.presence.set_casemapping(announced);
             self.history.set_casemapping(announced);
             self.accounts.set_casemapping(announced);
+            self.ctcp.set_casemapping(announced);
             self.channel_modes.set_casemapping(announced);
             self.emit(Event::CaseMapping(announced)).await?;
         }

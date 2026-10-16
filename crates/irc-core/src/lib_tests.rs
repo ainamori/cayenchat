@@ -1067,6 +1067,34 @@ fn slash_commands_infer_selected_channel_and_reject_injection() {
     assert_eq!(wire("/raw WHOIS bob", None), "WHOIS bob");
     assert!(parse_slash_command("/part", None).is_err());
     assert!(parse_slash_command("/raw PRIVMSG #test :hi\r\nQUIT", Some("#test")).is_err());
+    match parse_slash_command("/ctcp alice version", None).unwrap() {
+        Outgoing::Ctcp { nick, tag, args } => {
+            assert_eq!(
+                (nick.as_str(), tag.as_str(), args.as_str()),
+                ("alice", "VERSION", "")
+            );
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    match parse_slash_command("/ping alice", Some("#test")).unwrap() {
+        Outgoing::Ctcp { nick, tag, args } => {
+            assert_eq!(
+                (nick.as_str(), tag.as_str(), args.as_str()),
+                ("alice", "PING", "")
+            );
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    for line in [
+        "/ping",
+        "/ping alice bob",
+        "/ping #test",
+        "/ctcp alice",
+        "/ctcp #a VERSION",
+        "/ctcp alice DCC SEND",
+    ] {
+        assert!(parse_slash_command(line, None).is_err(), "{line}");
+    }
     match parse_slash_command("/me waves", Some("#test")).unwrap() {
         Outgoing::Message {
             target,

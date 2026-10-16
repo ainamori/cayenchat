@@ -55,6 +55,8 @@ Type `/` at the beginning of the draft to send an IRC command. When the channel 
 | `/me waves` | Send a CTCP ACTION to the selected channel |
 | `/msg :hello everyone` or `/notice :hello everyone` | Message or notify the selected channel |
 | `/msg bob hello` or `/notice bob hello` | Send directly to a named target |
+| `/ctcp bob VERSION` | Send a CTCP request to a user; the reply appears in the server log (`SOURCE`, `USERINFO`, `FINGER`, `CLIENTINFO`, `TIME`; DCC is not supported) |
+| `/ping bob` | CTCP PING a user and show the round trip time (the server's PING is `/raw PING token`) |
 | `/nick newname`, `/whois bob`, `/raw WHO #channel` | Send other IRC commands |
 
 `/raw` and `/quote` send the rest of the line as an IRC command.
