@@ -94,6 +94,10 @@ use std::{
 use theme::Theme;
 use whois::{JoinedChannels, WhoisWindow};
 
+/// Window class / Wayland app id; must equal the basename of `assets/linux/cayenchat.desktop`
+/// so the shell matches every window to the launcher (issue #433).
+pub(crate) const APP_ID: &str = "cayenchat";
+
 /// The channel log's share of the log height when nothing was dragged, and
 /// the bounds of what dragging may leave to either log.
 const DEFAULT_LOG_SPLIT: f32 = 0.5;
@@ -3615,6 +3619,7 @@ impl ChatWindow {
         let bounds = Bounds::centered(None, size(px(900.), px(750.)), cx);
         match cx.open_window(
             WindowOptions {
+                app_id: Some(APP_ID.into()),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(760.), px(540.))),
                 titlebar: Some(TitlebarOptions {
@@ -8379,6 +8384,7 @@ fn main() {
             let chat_window = cx
                 .open_window(
                     WindowOptions {
+                        app_id: Some(APP_ID.into()),
                         window_bounds: Some(window_bounds),
                         display_id,
                         window_min_size: Some(min_size),

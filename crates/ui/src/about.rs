@@ -78,6 +78,7 @@ pub fn open(i18n: &Localizer, cx: &mut App) {
     let title = i18n.text("about_title");
     let opened = cx.open_window(
         WindowOptions {
+            app_id: Some(crate::APP_ID.into()),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(360.), px(280.))),
             titlebar: Some(TitlebarOptions {
