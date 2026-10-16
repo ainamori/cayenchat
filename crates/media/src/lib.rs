@@ -27,7 +27,7 @@ mod testing;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -186,12 +186,21 @@ pub const ORIGINAL_MAX_SIDE: u32 = 512;
 /// The bytes stay untrusted: every size is decoded from them through the
 /// same checks as a fresh download.
 #[derive(Clone, Debug, Default)]
-pub struct Original(Arc<std::sync::Mutex<Option<Arc<[u8]>>>>);
+pub struct Original(Arc<OriginalInner>);
+
+#[derive(Debug, Default)]
+struct OriginalInner {
+    /// Held across a fetch, so only background loads take it.
+    bytes: std::sync::Mutex<Option<Arc<[u8]>>>,
+    /// Size of `bytes`, readable without the lock (the UI accounts with it
+    /// and must not wait for a fetch in flight).
+    len: AtomicUsize,
+}
 
 impl Original {
-    /// Bytes held (0 while empty).
+    /// Bytes held (0 while empty). Never waits for a load.
     pub fn len(&self) -> usize {
-        self.lock().as_ref().map_or(0, |bytes| bytes.len())
+        self.0.len.load(Ordering::Acquire)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -200,6 +209,7 @@ impl Original {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<Arc<[u8]>>> {
         self.0
+            .bytes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -224,6 +234,7 @@ pub fn load_avatar_thumbnail(
             let bytes: Arc<[u8]> = fetcher.fetch(source, limits, cancel)?.into();
             if decode::is_small_original(&bytes) {
                 *held = Some(bytes.clone());
+                original.0.len.store(bytes.len(), Ordering::Release);
             }
             bytes
         }
@@ -365,5 +376,74 @@ mod tests {
             assert!(original.is_empty(), "{path}");
             assert_eq!(server.hits(), hits + 2, "{path}");
         }
+    }
+
+    #[test]
+    fn counting_an_original_does_not_wait_for_a_fetch_in_flight() {
+        use std::sync::mpsc;
+
+        struct Gated {
+            png: Vec<u8>,
+            entered: mpsc::Sender<()>,
+            release: std::sync::Mutex<mpsc::Receiver<()>>,
+            calls: AtomicUsize,
+        }
+        impl Fetcher for Gated {
+            fn fetch(
+                &self,
+                _: &MediaRef,
+                _: &Limits,
+                _: &CancelFlag,
+            ) -> Result<Vec<u8>, LoadError> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                    self.entered.send(()).unwrap();
+                    self.release.lock().unwrap().recv().unwrap();
+                }
+                Ok(self.png.clone())
+            }
+        }
+
+        let (entered_tx, entered) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        // Too wide to keep, so every size fetches again.
+        let fetcher = Gated {
+            png: encode(ImageFormat::Png, 513, 100),
+            entered: entered_tx,
+            release: std::sync::Mutex::new(release_rx),
+            calls: AtomicUsize::new(0),
+        };
+        let source = MediaRef::Link(url::Url::parse("https://example.test/a").unwrap());
+        let limits = Limits::avatar(32);
+        let original = Original::default();
+        load_avatar_thumbnail(
+            &source,
+            &fetcher,
+            &limits,
+            &CancelFlag::default(),
+            &original,
+        )
+        .unwrap();
+
+        std::thread::scope(|scope| {
+            let second = scope.spawn(|| {
+                let limits = Limits::avatar(48);
+                load_avatar_thumbnail(
+                    &source,
+                    &fetcher,
+                    &limits,
+                    &CancelFlag::default(),
+                    &original,
+                )
+            });
+            entered.recv().unwrap();
+            // The second size is now inside its fetch, holding the slot.
+            let (len_tx, len_rx) = mpsc::channel();
+            let counter = original.clone();
+            scope.spawn(move || len_tx.send(counter.len()).unwrap());
+            let counted = len_rx.recv_timeout(Duration::from_secs(5));
+            release_tx.send(()).unwrap();
+            assert_eq!(counted, Ok(0), "len() waited for the fetch");
+            second.join().unwrap().unwrap();
+        });
     }
 }
