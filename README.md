@@ -35,6 +35,10 @@ See [development requirements](spec/development.md) for platform prerequisites a
 
 Add a server in the settings window that opens at startup (`Cmd+,` / `Ctrl+,`), then choose **Connect**. See [keyboard shortcuts and IRC commands](SHORTCUTS.md).
 
+## Tips
+
+- **Avatars through Tiarra, or on ISO-2022-JP servers (peer avatars).** KVIrc's mark for "has an avatar" cannot survive ISO-2022-JP, so CayenChat does not add it there. Write the text `\x034\x03` (nine ASCII characters, not control characters) at the very start of the real name instead, and CayenChat clients that see it ask you for your avatar; they do not show it. With Tiarra, put it in `name:`, for example `name: \x034\x03Your usual name`. Other clients show the text as it is, and KVIrc does not recognize it. See [D025](spec/decisions.md).
+
 ## Conversation logs
 
 Saving conversations to files is off by default. In the Application settings, turn on channel conversations and, separately, private conversations (they are written to your disk too), and choose the folder (by default `CayenChat/logs` in your data directory). CayenChat appends one UTF-8 text file per conversation and day, `<folder>/<server>/channels/<channel>/<date>.log` and `<folder>/<server>/private/<nick>/<date>.log`, each line being `time`, `kind` (`msg`, `action`, `notice`, `join`, `part`, `quit`, `nick`, `kick`, `topic`, `mode`), `nick` and `text` separated by tabs. Of mode changes only operator and voice changes (`+o nick`) are saved; keys, bans and other modes are not. Passwords, the server log and history fetched from the server are never saved. Turning a log off stops writing and keeps the files. The format is specified in [D044](spec/decisions.md).

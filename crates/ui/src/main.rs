@@ -1883,6 +1883,7 @@ impl ChatWindow {
         self.avatars
             .set_enabled(settings.servers.iter().any(|profile| profile.user_avatars));
         self.saved = settings;
+        self.refresh_whois_avatars(cx);
         cx.notify();
     }
 
@@ -2312,6 +2313,69 @@ impl ChatWindow {
         }
         cx.notify();
         Ok(())
+    }
+
+    /// Asks `nickname` for their avatar with CTCP AVATAR (the WHOIS
+    /// window's button).
+    fn request_peer_avatar(
+        &mut self,
+        network: NetworkId,
+        nickname: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if !self.peer_avatars_on(network) {
+            return Err(self.i18n.text("whois_avatar_off"));
+        }
+        self.registered_connection(network)?
+            .request_peer_avatar(nickname)?;
+        cx.notify();
+        Ok(())
+    }
+
+    fn peer_avatars_on(&self, network: NetworkId) -> bool {
+        self.sessions
+            .get(&network)
+            .is_some_and(|session| session.peer_avatars.enabled)
+    }
+
+    /// Pushes each WHOIS window the avatar image of its user; the cache is
+    /// here, and a window cannot read this one while drawing.
+    fn refresh_whois_avatars(&mut self, cx: &mut Context<Self>) {
+        if self.whois_windows.is_empty() {
+            return;
+        }
+        let mut pending = false;
+        let shown: Vec<_> = self
+            .whois_windows
+            .iter()
+            .map(|((network, key), handle)| {
+                let image = self
+                    .state
+                    .avatars()
+                    .for_message(
+                        *network,
+                        &cayenchat_irc_core::text::nickname_key(key),
+                        u64::MAX,
+                    )
+                    .filter(|_| self.avatars_shown(*network))
+                    .map(|avatar| self.avatars.lookup(avatar));
+                let image = match image {
+                    Some(avatars::Shown::Image(image)) => Some(image),
+                    Some(avatars::Shown::Pending) => {
+                        pending = true;
+                        None
+                    }
+                    _ => None,
+                };
+                (*handle, image, self.peer_avatars_on(*network))
+            })
+            .collect();
+        for (handle, image, can_request) in shown {
+            let _ = handle.update(cx, |view, _, cx| view.set_avatar(image, can_request, cx));
+        }
+        if pending {
+            self.pump_avatars(cx);
+        }
     }
 
     fn joined_channels(&self, network: NetworkId) -> JoinedChannels {
@@ -4024,6 +4088,7 @@ impl ChatWindow {
                         .update(cx, |view, _, cx| view.set_joined(joined.clone(), cx))
                         .is_ok()
             });
+            self.refresh_whois_avatars(cx);
             self.ensure_inputs(cx);
             cx.notify();
         }

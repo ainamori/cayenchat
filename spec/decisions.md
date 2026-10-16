@@ -1009,6 +1009,32 @@ What CayenChat does:
   answered and is shown like other CTCP (D029), for example
   `CTCP AVATAR request from kv (not answered)`.
 
+- **ISO-2022-JP and the textual mark (#409).** KVIrc's mark needs SI
+  (0x0F), which ISO-2022-JP cannot carry (`encoding_rs` receives it as
+  U+FFFD and sends `&#65533;`), so a mark may arrive broken or a leading
+  `4` may show. (1) On connections in ISO-2022-JP CayenChat does not add
+  KVIrc's mark (`ConnectionConfig::advertises_avatar` is false, for `USER`
+  and `SETNAME`); the shared URL is still answered to queries, and the
+  "reconnect" hint follows the same rule. (2) When receiving, a realname
+  that starts with the 9 printable ASCII characters `\x03<digit>\x03`
+  (backslash, `x`, `0`, `3`, a digit, backslash, `x`, `0`, `3`; not
+  control characters; exact case) with the fours place set in the digit
+  (4–7) also counts as "has an avatar", in addition to KVIrc's mark.
+  `without_mark` strips either, so CayenChat's own WHOIS and `SETNAME`
+  displays do not show it. It is receiving only: CayenChat never adds it;
+  a user who wants it types it at the start of the real name (Tiarra:
+  `name: \x034\x03Name`). Other clients show the characters, and KVIrc
+  does not recognize it; this is a CayenChat-only convention and
+  accepted. A realname that happens to start with it costs one query,
+  within the existing probe bounds. (3) Discovery by speaking or WHOIS is
+  not reliable enough to check a mark by hand (issue #409 report), so the
+  WHOIS window shows the user's avatar when one is known and has a "Get
+  avatar" button, enabled when the 311 real name carried a mark
+  (`WhoisInfo::avatar_mark`) and the server exchanges avatars. It sends
+  one CTCP AVATAR query even if the user was asked before; it goes
+  through the same queue (spacing, bounds, one query per user), and only
+  for users who share a channel with us.
+
 Interoperability: verified against wire-accurate fixtures written from
 KVIrc's source (realname mark, query, `M`-suffixed answer, empty answer,
 file-name answer, channel announcement); not tested against a running

@@ -109,17 +109,50 @@ pub(crate) fn realname(base: &str, advertise: bool) -> String {
     }
 }
 
-/// A realname without KVIrc's leading mark (ETX, a digit, SI), as the user
-/// configured it.
+/// Whether a connection in `encoding` (a WHATWG label) can carry KVIrc's
+/// mark. ISO-2022-JP cannot: SI (0x0F) is its shift-in code and
+/// `encoding_rs` turns it into U+FFFD on receiving and `&#65533;` on
+/// sending.
+pub(crate) fn carries_mark(encoding: &str) -> bool {
+    encoding_rs::Encoding::for_label(encoding.as_bytes()) != Some(encoding_rs::ISO_2022_JP)
+}
+
+/// CayenChat's own mark, recognized when receiving only: the text
+/// `\x03<digit>\x03` (nine printable ASCII characters, not control
+/// characters) at the start of a realname. It survives every encoding and
+/// Tiarra; we never add it, a user who wants it types it into the realname.
+const TEXT_MARK_PREFIX: &str = "\\x03";
+const TEXT_MARK_SUFFIX: &str = "\\x03";
+
+/// The digit of the textual mark at the start of `realname`, and the
+/// length of the mark.
+fn text_mark(realname: &str) -> Option<(u8, usize)> {
+    let rest = realname.strip_prefix(TEXT_MARK_PREFIX)?;
+    let (&digit, rest) = rest.as_bytes().split_first()?;
+    (digit.is_ascii_digit() && rest.starts_with(TEXT_MARK_SUFFIX.as_bytes()))
+        .then_some((digit, TEXT_MARK_PREFIX.len() + 1 + TEXT_MARK_SUFFIX.len()))
+}
+
+/// A realname without a leading mark (KVIrc's ETX, a digit, SI, or the
+/// textual `\x03<digit>\x03`), as the user configured it. When we add
+/// KVIrc's mark to a realname the user began with a textual one, both go.
 pub(crate) fn without_mark(realname: &str) -> &str {
-    match realname.as_bytes() {
+    let rest = match realname.as_bytes() {
         [0x03, b'0'..=b'7', 0x0f, ..] => &realname[3..],
         _ => realname,
+    };
+    match text_mark(rest) {
+        Some((_, len)) => &rest[len..],
+        None => rest,
     }
 }
 
-/// Whether a realname starts with KVIrc's mark for an avatar.
+/// Whether a realname starts with a mark for an avatar: KVIrc's, or the
+/// textual one, whose digit must also have the fours place set.
 pub(crate) fn advertises_avatar(realname: &str) -> bool {
+    if let Some((digit, _)) = text_mark(realname) {
+        return matches!(digit, b'4'..=b'7');
+    }
     match realname.as_bytes() {
         [0x03, digit @ b'0'..=b'7', 0x0f, ..] => (digit - b'0') & AVATAR_BIT != 0,
         _ => false,
@@ -518,6 +551,29 @@ impl PeerAvatars {
         self.enqueue(ProbeKind::Who, nick, key)
     }
 
+    /// The user asked for `nick`'s avatar: queue a CTCP AVATAR query even
+    /// if one was sent before. It still goes through the queue, so the
+    /// spacing, the bound and the one-query-per-user rule apply.
+    pub(crate) fn request(
+        &mut self,
+        nick: &str,
+        current_nick: &str,
+        presence: &PresenceIndex,
+    ) -> Option<String> {
+        if same_nickname(nick, current_nick) || !valid_sender(nick) {
+            return None;
+        }
+        if !presence.shares(nick, None) {
+            return Some(format!(
+                "Not asking {nick} for an avatar: no channel is shared with them."
+            ));
+        }
+        let key = nickname_key(nick);
+        self.in_flight
+            .retain(|probe| probe.kind != ProbeKind::Query || probe.key != key);
+        self.enqueue(ProbeKind::Query, nick, key)
+    }
+
     fn enqueue(&mut self, kind: ProbeKind, nick: &str, key: String) -> Option<String> {
         if !self.stages.contains_key(&key) && self.stages.len() >= MAX_PROBED_USERS {
             return None;
@@ -877,6 +933,61 @@ mod tests {
     }
 
     #[test]
+    fn the_textual_mark_advertises_an_avatar_at_the_start_only() {
+        for digit in ['4', '5', '6', '7'] {
+            assert!(
+                advertises_avatar(&format!("\\x03{digit}\\x03Name")),
+                "{digit}"
+            );
+        }
+        for real in [
+            "\\x030\\x03Name",
+            "\\x033\\x03Name",
+            "\\x038\\x03Name",
+            "\\X034\\x03Name",
+            "\\x034\\X03Name",
+            "\\x03a\\x03Name",
+            "\\x0344\\x03Name",
+            "\\x034Name",
+            "Name \\x034\\x03",
+            " \\x034\\x03Name",
+            "\\x034",
+        ] {
+            assert!(!advertises_avatar(real), "{real:?}");
+        }
+        assert!(advertises_avatar("\\x034\\x03"));
+    }
+
+    #[test]
+    fn both_marks_are_stripped_to_show_the_realname() {
+        assert_eq!(without_mark("\\x034\\x03Alice"), "Alice");
+        assert_eq!(without_mark("\\x030\\x03Alice"), "Alice");
+        assert_eq!(without_mark("\\x034\\x03"), "");
+        assert_eq!(without_mark("\\X034\\x03Alice"), "\\X034\\x03Alice");
+        assert_eq!(without_mark("Alice \\x034\\x03"), "Alice \\x034\\x03");
+        assert_eq!(without_mark("\u{3}4\u{f}\\x034\\x03Bob"), "Bob");
+    }
+
+    #[test]
+    fn iso_2022_jp_cannot_carry_the_kvirc_mark_but_the_textual_one_survives() {
+        assert!(carries_mark("UTF-8"));
+        assert!(carries_mark("Shift_JIS"));
+        assert!(carries_mark("EUC-JP"));
+        assert!(!carries_mark("ISO-2022-JP"));
+        let marked = realname("名前", true);
+        let (bytes, _, _) = encoding_rs::ISO_2022_JP.encode(&marked);
+        let (back, _) = encoding_rs::ISO_2022_JP.decode_without_bom_handling(&bytes);
+        assert!(!advertises_avatar(&back), "the KVIrc mark is broken");
+        let text = "\\x034\\x03日本語";
+        let (bytes, _, lost) = encoding_rs::ISO_2022_JP.encode(text);
+        assert!(!lost);
+        let (back, _) = encoding_rs::ISO_2022_JP.decode_without_bom_handling(&bytes);
+        assert_eq!(back, text);
+        assert!(advertises_avatar(&back));
+        assert_eq!(without_mark(&back), "日本語");
+    }
+
+    #[test]
     fn the_mark_is_stripped_to_show_the_configured_realname() {
         assert_eq!(without_mark(&realname("Alice", true)), "Alice");
         assert_eq!(without_mark("Alice"), "Alice");
@@ -989,6 +1100,32 @@ mod tests {
         assert!(shareable(&long, true).is_err());
         // An unusable URL is never answered.
         assert_eq!(PeerAvatars::new(true, Some("me.png".into())).share, None);
+    }
+
+    #[test]
+    fn a_manual_request_queries_again_even_after_the_user_was_asked() {
+        let mut peers = PeerAvatars::new(true, None);
+        let presence = rosters();
+        let start = Instant::now();
+        // Already queried (and answered without an avatar).
+        let note = peers.request("bob", ME, &presence);
+        assert_eq!(note, None);
+        let sent = peers.tick(start, ME, &presence).send;
+        assert_eq!(wire(&sent), ["PRIVMSG bob \u{1}AVATAR\u{1}"]);
+        observe(
+            &mut peers,
+            ":bob!u@h NOTICE alice :\u{1}AVATAR \u{1}",
+            start,
+        );
+        // Asking again goes out once more, after the probe spacing.
+        assert_eq!(peers.request("bob", ME, &presence), None);
+        let later = start + PROBE_INTERVAL;
+        let sent = peers.tick(later, ME, &presence).send;
+        assert_eq!(wire(&sent), ["PRIVMSG bob \u{1}AVATAR\u{1}"]);
+        // Nobody is asked who shares no channel with us, or ourselves.
+        assert!(peers.request("stranger", ME, &presence).is_some());
+        assert_eq!(peers.request(ME, ME, &presence), None);
+        assert!(peers.queue.is_empty());
     }
 
     #[test]

@@ -287,6 +287,7 @@ impl ChatWindow {
             .finish(job, result, Instant::now());
         if finished.applied {
             // Both avatar panes are cached; the slot size does not change.
+            self.refresh_whois_avatars(cx);
             cx.notify();
         }
         self.pump_avatars(cx);
