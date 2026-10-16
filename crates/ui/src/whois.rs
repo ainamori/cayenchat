@@ -3,7 +3,7 @@ use crate::{ChatWindow, localization::Localizer};
 use cayenchat_irc_core::WhoisInfo;
 use cayenchat_model::{NetworkId, display, names::CaseMapping};
 use gpui::{prelude::*, *};
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 /// The channels we are in on a network, folded under the network's case
 /// mapping so a WHOIS entry matches however the server cases it.
@@ -32,6 +32,13 @@ pub struct WhoisWindow {
     details_scroll: ScrollHandle,
     menu_scroll: ScrollHandle,
     status: Option<String>,
+    /// The user's avatar image, pushed by the owner (it owns the cache).
+    avatar: Option<Arc<RenderImage>>,
+    /// Images this window replaced; their tiles in its own atlas are freed
+    /// at the next render, which no longer draws them.
+    retired: Vec<Arc<RenderImage>>,
+    /// Whether the server exchanges avatars, so the user can be asked.
+    can_request_avatar: bool,
     i18n: Localizer,
     focus: FocusHandle,
     // Refreshed at the start of each render for row helpers.
@@ -75,6 +82,9 @@ impl WhoisWindow {
                         details_scroll: ScrollHandle::new(),
                         menu_scroll: ScrollHandle::new(),
                         status: None,
+                        avatar: None,
+                        retired: Vec::new(),
+                        can_request_avatar: false,
                         i18n,
                         focus,
                         theme: crate::theme::current(cx),
@@ -107,6 +117,37 @@ impl WhoisWindow {
             self.joined = joined;
             cx.notify();
         }
+    }
+
+    /// The avatar to draw and whether it can be asked for; redrawn only on
+    /// a change.
+    pub fn set_avatar(
+        &mut self,
+        avatar: Option<Arc<RenderImage>>,
+        can_request: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = swap_avatar(&mut self.avatar, &mut self.retired, avatar);
+        if changed || self.can_request_avatar != can_request {
+            self.can_request_avatar = can_request;
+            cx.notify();
+        }
+    }
+
+    fn request_avatar(&mut self, cx: &mut Context<Self>) {
+        let nickname = self.info.nickname.clone();
+        let network = self.network;
+        let result = self
+            .owner
+            .update(cx, |chat, _, cx| {
+                chat.request_peer_avatar(network, &nickname, cx)
+            })
+            .unwrap_or_else(|_| Err(self.i18n.text("not_connected")));
+        self.status = Some(match result {
+            Ok(()) => self.i18n.text("whois_avatar_asked"),
+            Err(error) => error,
+        });
+        cx.notify();
     }
 
     pub fn set_localizer(&mut self, i18n: Localizer, cx: &mut Context<Self>) {
@@ -338,6 +379,9 @@ fn button(
 
 impl Render for WhoisWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        for image in self.retired.drain(..) {
+            let _ = window.drop_image(image);
+        }
         let title = window_title(&self.info);
         let content = self.render_content(cx);
         crate::decorations::window_frame(window, cx, title, content)
@@ -361,7 +405,46 @@ impl WhoisWindow {
             .bg(theme.surface)
             .border_1()
             .border_color(theme.border);
+        let askable = info.avatar_mark && self.can_request_avatar;
+        let avatar_row = self.row(
+            "whois_avatar",
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(
+                    div()
+                        .w(px(48.))
+                        .h(px(48.))
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(theme.border)
+                        .children(self.avatar.clone().map(|image| img(image).size_full())),
+                )
+                .child(if askable {
+                    button(
+                        "whois-avatar-fetch",
+                        self.i18n.text("whois_avatar_fetch"),
+                        false,
+                        theme,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.request_avatar(cx)))
+                    .into_any_element()
+                } else {
+                    // Disabled: no mark in the real name, or no exchange.
+                    div()
+                        .px_3()
+                        .py_1()
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_color(theme.text_muted)
+                        .child(self.i18n.text("whois_avatar_fetch"))
+                        .into_any_element()
+                }),
+        );
         details = details
+            .child(avatar_row)
             .children(self.text_row("whois_nickname", Some(info.nickname.clone())))
             .children(self.text_row("whois_user_host", user_host))
             .children(self.text_row("whois_real_name", info.realname.clone()))
@@ -464,9 +547,49 @@ impl WhoisWindow {
     }
 }
 
+/// Shows `new` in place of `current`, queueing a replaced image for release;
+/// returns whether the shown image changed.
+fn swap_avatar(
+    current: &mut Option<Arc<RenderImage>>,
+    retired: &mut Vec<Arc<RenderImage>>,
+    new: Option<Arc<RenderImage>>,
+) -> bool {
+    let same = match (&*current, &new) {
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        (None, None) => true,
+        _ => false,
+    };
+    if same {
+        return false;
+    }
+    retired.extend(std::mem::replace(current, new));
+    true
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{WhoisInfo, channel_name, idle_text, window_title};
+    use super::{WhoisInfo, channel_name, idle_text, swap_avatar, window_title};
+    use gpui::RenderImage;
+    use std::sync::Arc;
+
+    fn image() -> Arc<RenderImage> {
+        let buffer = image::RgbaImage::from_raw(1, 1, vec![0; 4]).unwrap();
+        Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
+    }
+
+    #[test]
+    fn replaced_and_cleared_avatars_are_queued_for_release() {
+        let (a, b) = (image(), image());
+        let (mut current, mut retired) = (None, Vec::new());
+        assert!(swap_avatar(&mut current, &mut retired, Some(a.clone())));
+        assert!(retired.is_empty());
+        assert!(!swap_avatar(&mut current, &mut retired, Some(a.clone())));
+        assert!(swap_avatar(&mut current, &mut retired, Some(b.clone())));
+        assert!(Arc::ptr_eq(&retired[0], &a));
+        assert!(swap_avatar(&mut current, &mut retired, None));
+        assert!(Arc::ptr_eq(&retired[1], &b));
+        assert!(current.is_none());
+    }
 
     #[test]
     fn strips_membership_prefixes_but_keeps_channel_prefixes() {
