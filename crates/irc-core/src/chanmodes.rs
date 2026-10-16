@@ -3,7 +3,10 @@
 //! are kept: arguments (a key, a limit) are never read, so they cannot reach
 //! the UI whatever the server's `CHANMODES` says.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque, hash_map::Entry};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use irc::proto::mode::Mode;
 use irc::proto::{Command, Message, Response};
@@ -15,6 +18,10 @@ const MAX_FLAGS: usize = 64;
 /// Most channels tracked, and so most queries waiting; a channel beyond it
 /// keeps unknown modes (no title prefix) instead of growing the state.
 const MAX_TRACKED: usize = 512;
+/// Most `MODE` queries sent and unanswered at once, and how long one is
+/// waited for; a channel that never answers keeps unknown modes.
+const MAX_IN_FLIGHT: usize = 4;
+const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// List modes (type A) when the server announces no `CHANMODES`, and the
 /// membership modes when it announces no `PREFIX`.
 const DEFAULT_LIST_MODES: &str = "beI";
@@ -32,6 +39,10 @@ pub(crate) struct ChannelModes {
     channels: HashMap<String, (String, Option<Vec<char>>)>,
     /// Channels whose modes are still to be asked, oldest first.
     pending: VecDeque<String>,
+    /// Queries sent and not yet answered, with the time they give up. At
+    /// most `MAX_IN_FLIGHT`: the next one goes out on a `324` or a timeout,
+    /// whatever else the server sends.
+    in_flight: Vec<(String, Instant)>,
     /// The limit was reported once.
     warned: bool,
 }
@@ -47,6 +58,7 @@ impl Default for ChannelModes {
                 .collect(),
             channels: HashMap::new(),
             pending: VecDeque::new(),
+            in_flight: Vec::new(),
             warned: false,
         }
     }
@@ -106,6 +118,8 @@ impl ChannelModes {
             Command::Response(Response::RPL_CHANNELMODEIS, args) => {
                 let channel = args.get(1).filter(|name| valid_channel(name))?;
                 let key = mapping.fold(channel);
+                self.in_flight
+                    .retain(|(queried, _)| mapping.fold(queried) != key);
                 if !self.channels.contains_key(&key) {
                     return None;
                 }
@@ -161,28 +175,46 @@ impl ChannelModes {
         let key = mapping.fold(channel);
         self.channels.remove(&key);
         self.pending.retain(|queued| mapping.fold(queued) != key);
+        self.in_flight
+            .retain(|(queried, _)| mapping.fold(queried) != key);
     }
 
-    /// Up to `limit` channels whose modes are to be asked now; the rest
-    /// wait for later calls, so a join burst is paced by the traffic it
-    /// causes.
-    pub(crate) fn take_queries(&mut self, limit: usize) -> Vec<String> {
-        let count = limit.min(self.pending.len());
-        self.pending.drain(..count).collect()
+    /// The channels whose modes are to be asked now: as many as free
+    /// places remain in the window of unanswered queries. The rest wait
+    /// for a `324` or a timeout, however many lines the server sends.
+    pub(crate) fn take_queries(&mut self, now: Instant) -> Vec<String> {
+        self.in_flight.retain(|(_, until)| *until > now);
+        let count = MAX_IN_FLIGHT
+            .saturating_sub(self.in_flight.len())
+            .min(self.pending.len());
+        let queries: Vec<String> = self.pending.drain(..count).collect();
+        self.in_flight.extend(
+            queries
+                .iter()
+                .map(|name| (name.clone(), now + QUERY_TIMEOUT)),
+        );
+        queries
+    }
+
+    /// When a waiting query may go out for want of an answer; none while
+    /// the queue is empty, so no timer runs then.
+    pub(crate) fn next_deadline(&self) -> Option<Instant> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        self.in_flight.iter().map(|(_, until)| *until).min()
     }
 
     /// The server changed its case mapping: fold the names again. Names
     /// that now collide keep one entry, with unknown modes.
     pub(crate) fn set_casemapping(&mut self, mapping: CaseMapping) {
         let old = std::mem::take(&mut self.channels);
-        for (key, (name, flags)) in old {
-            let refolded = mapping.fold(&name);
-            if refolded == key {
-                self.channels.insert(key, (name, flags));
-            } else if self.channels.contains_key(&refolded) {
-                self.channels.insert(refolded, (name, None));
-            } else {
-                self.channels.insert(refolded, (name, flags));
+        for (name, flags) in old.into_values() {
+            match self.channels.entry(mapping.fold(&name)) {
+                Entry::Occupied(mut taken) => taken.get_mut().1 = None,
+                Entry::Vacant(free) => {
+                    free.insert((name, flags));
+                }
             }
         }
     }
@@ -306,12 +338,55 @@ mod tests {
             feed(&mut modes, &format!(":s 324 me #c{MAX_TRACKED} +n")),
             None
         );
-        // The queue drains a few at a time and holds each channel once.
-        assert_eq!(modes.take_queries(2), ["#c0", "#c1"]);
+        // The queue holds each channel once.
         modes.joined("#c2", mapping);
-        assert_eq!(modes.pending.len(), MAX_TRACKED - 2);
+        assert_eq!(modes.pending.len(), MAX_TRACKED);
         modes.left("#c3", mapping);
-        assert_eq!(modes.pending.len(), MAX_TRACKED - 3);
+        assert_eq!(modes.pending.len(), MAX_TRACKED - 1);
+    }
+
+    #[test]
+    fn unanswered_queries_are_limited_and_move_on_by_reply_or_timeout() {
+        let mut modes = ChannelModes::default();
+        let mapping = CaseMapping::default();
+        for n in 0..10 {
+            modes.joined(&format!("#c{n}"), mapping);
+        }
+        let start = Instant::now();
+        assert_eq!(modes.take_queries(start), ["#c0", "#c1", "#c2", "#c3"]);
+        // Nothing more however often it is asked.
+        assert!(modes.take_queries(start).is_empty());
+        assert_eq!(modes.next_deadline(), Some(start + QUERY_TIMEOUT));
+        // A reply frees one place.
+        feed(&mut modes, ":s 324 me #c1 +n");
+        assert_eq!(modes.take_queries(start), ["#c4"]);
+        // A part frees one too.
+        modes.left("#c0", mapping);
+        assert_eq!(modes.take_queries(start), ["#c5"]);
+        // Silence ends at the timeout; those channels stay unknown.
+        let late = start + QUERY_TIMEOUT;
+        assert_eq!(modes.take_queries(late), ["#c6", "#c7", "#c8", "#c9"]);
+        assert_eq!(modes.next_deadline(), None);
+        assert_eq!(modes.channels["#c2"].1, None);
+    }
+
+    #[test]
+    fn colliding_names_become_unknown_whatever_their_order() {
+        for _ in 0..20 {
+            let mut modes = ChannelModes::default();
+            modes.joined("#x[", CaseMapping::Ascii);
+            modes.joined("#x{", CaseMapping::Ascii);
+            for name in ["#x[", "#x{"] {
+                modes.observe(
+                    &parse(&format!(":s 324 me {name} +n")),
+                    CaseMapping::Ascii,
+                    false,
+                );
+            }
+            modes.set_casemapping(CaseMapping::default());
+            assert_eq!(modes.channels.len(), 1);
+            assert!(modes.channels.values().all(|(_, flags)| flags.is_none()));
+        }
     }
 
     #[test]

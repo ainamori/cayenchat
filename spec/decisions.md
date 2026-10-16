@@ -1235,8 +1235,12 @@ conversation titles are unchanged.
 - A reply is not awaited: a server that never answers just leaves the modes out.
 - **Bounded.** At most 512 channels per connection are tracked; a join beyond
   that keeps unknown modes (no prefix) and is reported once as a diagnostic.
-  Queries wait in a queue of at most that size and are sent two per incoming
-  server line, so a join burst does not flood the send queue. A `CASEMAPPING`
+  Queries wait in a queue of at most that size, and at most four are
+  unanswered at once: the next goes out on a `324`, a PART/KICK of the asked
+  channel, or after 10 seconds of silence (a timer runs only while queries
+  wait). A join burst therefore sends four queries, not one per join, however
+  fast or slow the server is; a channel that never answers keeps unknown
+  modes. A `CASEMAPPING`
   change folds the tracked names again (names that collide fall back to
   unknown).
 

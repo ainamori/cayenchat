@@ -86,8 +86,6 @@ const PING_TIMEOUT_SECS: u32 = 120;
 /// Limits on WHOIS replies that have not reached end-of-WHOIS (318), so a
 /// hostile server cannot grow memory by never finishing them.
 const MAX_PENDING_WHOIS: usize = 32;
-/// Channel mode queries sent per incoming server line.
-const MODE_QUERIES_PER_LINE: usize = 2;
 const MAX_WHOIS_ITEMS: usize = 512;
 /// The realname sent in `USER` when none is configured; with a shared peer
 /// avatar it starts with KVIrc's avatar mark.
@@ -2379,6 +2377,15 @@ async fn run_cancellable(
                     break;
                 }
             }
+            // A channel mode query that was never answered frees its place
+            // for the next; no timer runs while none is waiting.
+            _ = tokio::time::sleep_until(until(worker.mode_query_deadline())),
+                if worker.mode_query_deadline().is_some() =>
+            {
+                if worker.on_mode_query_deadline().await.is_break() {
+                    break;
+                }
+            }
             // Peer avatar lookups and queries, spaced out; no timer runs
             // while none is queued or outstanding.
             _ = tokio::time::sleep_until(until(worker.peer_deadline())),
@@ -2540,6 +2547,12 @@ impl Worker {
         self.history
             .next_deadline()
             .filter(|_| self.history_enabled)
+    }
+
+    fn mode_query_deadline(&self) -> Option<tokio::time::Instant> {
+        self.channel_modes
+            .next_deadline()
+            .filter(|_| self.registered)
     }
 
     fn peer_deadline(&self) -> Option<tokio::time::Instant> {
@@ -3281,17 +3294,7 @@ impl Worker {
         }
         self.emit_all(account_events).await?;
         self.emit_all(mode_events).await?;
-        // Asked for every own join (also after a reconnect), a few per
-        // incoming line so a join burst is paced; until the reply arrives
-        // the modes are unknown. Raw: the typed command would leave a
-        // trailing space.
-        let mode_queries = self
-            .channel_modes
-            .take_queries(MODE_QUERIES_PER_LINE)
-            .into_iter()
-            .map(|channel| IrcCommand::Raw("MODE".into(), vec![channel]))
-            .collect();
-        self.send_commands(mode_queries).await?;
+        self.send_mode_queries().await?;
         if self.track_accounts
             && let Some(command) = self.accounts.next_who(tokio::time::Instant::now())
         {
@@ -3304,6 +3307,24 @@ impl Worker {
             self.send_next_history().await?;
         }
         ControlFlow::Continue(())
+    }
+
+    /// Asks for the modes of own joins (also after a reconnect), a few
+    /// unanswered at a time so a join burst is paced by the replies and
+    /// timeouts, not by incoming traffic; until the reply arrives the modes
+    /// are unknown. Raw: the typed command would leave a trailing space.
+    async fn send_mode_queries(&mut self) -> Flow {
+        let queries = self
+            .channel_modes
+            .take_queries(tokio::time::Instant::now())
+            .into_iter()
+            .map(|channel| IrcCommand::Raw("MODE".into(), vec![channel]))
+            .collect();
+        self.send_commands(queries).await
+    }
+
+    async fn on_mode_query_deadline(&mut self) -> Flow {
+        self.send_mode_queries().await
     }
 
     /// The flags of a joined channel after `message`. Leaving or joining

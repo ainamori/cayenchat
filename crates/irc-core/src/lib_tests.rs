@@ -1357,6 +1357,63 @@ fn joining_queries_the_channel_modes_and_follows_changes_without_arguments() {
 }
 
 #[test]
+fn a_join_burst_sends_only_a_few_mode_queries_until_they_are_answered() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut lines = BufReader::new(socket.try_clone().unwrap()).lines();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        while !lines.next().unwrap().unwrap().starts_with("USER ") {}
+        socket
+            .write_all(b":server 001 me :Welcome\r\n:server 376 me :End of MOTD\r\n")
+            .unwrap();
+        assert_eq!(lines.next().unwrap().unwrap(), "JOIN #c0");
+        let burst: String = (0..10).map(|n| format!(":me!u@h JOIN #c{n}\r\n")).collect();
+        socket.write_all(burst.as_bytes()).unwrap();
+        // Further lines from the server do not release more queries.
+        socket
+            .write_all(b":server 366 me #c0 :End of NAMES\r\n:server 366 me #c1 :End of NAMES\r\n")
+            .unwrap();
+        let mut asked = Vec::new();
+        for _ in 0..4 {
+            asked.push(lines.next().unwrap().unwrap());
+        }
+        assert_eq!(asked, ["MODE #c0", "MODE #c1", "MODE #c2", "MODE #c3"]);
+        socket
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        assert!(lines.next().unwrap().is_err(), "a fifth query went out");
+        // One answer frees one place.
+        socket.write_all(b":server 324 me #c2 +n\r\n").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        assert_eq!(lines.next().unwrap().unwrap(), "MODE #c4");
+        socket
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        assert!(
+            lines.next().unwrap().is_err(),
+            "more than one query went out"
+        );
+    });
+    let mut config = ConnectionConfig::tls("127.0.0.1".into(), "me".into(), vec!["#c0".into()]);
+    config.port = port;
+    config.use_tls = false;
+    let mut connection = Connection::connect(config).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && !server.is_finished() {
+        if connection.try_recv().is_none() {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    server.join().unwrap();
+}
+
+#[test]
 fn modes_after_rejoining_from_a_kick_reach_the_roster() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
