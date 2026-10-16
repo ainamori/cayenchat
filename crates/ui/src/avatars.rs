@@ -34,6 +34,8 @@ pub const SLOT: f32 = 16.;
 /// Thumbnail size in pixels (sharp on 2× displays), also the size asked for
 /// through the registry's `{size}` placeholder.
 pub const PIXELS: u32 = 32;
+/// Largest default avatar `default_sized` rasterizes.
+const MAX_DEFAULT_PIXELS: u32 = 512;
 /// Image fetches in flight across avatars and previews together, so turning
 /// both on does not double the peak of network and memory use. Decoding is
 /// already one at a time in the whole process (`media::decode`).
@@ -85,8 +87,9 @@ pub struct Avatars {
     /// Present only while avatars are shown.
     fetcher: Option<Arc<dyn Fetcher>>,
     released: RefCell<Vec<Released>>,
-    /// Default avatars by look; bounded by the 512 combinations.
-    defaults: RefCell<HashMap<default_avatar::Params, Arc<gpui::Image>>>,
+    /// Default avatars by look and pixel size; bounded by the 512
+    /// combinations times the few sizes in use.
+    defaults: RefCell<HashMap<(default_avatar::Params, u32), Arc<gpui::Image>>>,
     #[cfg(test)]
     fetcher_override: Option<Arc<dyn Fetcher>>,
     #[cfg(test)]
@@ -116,14 +119,24 @@ impl Avatars {
 
     /// The default avatar drawn for `nickname`.
     pub fn default_for(&self, nickname: &str) -> Arc<gpui::Image> {
+        self.default_sized(nickname, PIXELS)
+    }
+
+    /// The default avatar of `nickname` rasterized at `pixels` × `pixels`
+    /// (GPUI draws an SVG at its own size, so a larger slot, such as the
+    /// 48 px one in WHOIS, asks for twice its logical size instead of
+    /// enlarging the 32 px image).
+    pub fn default_sized(&self, nickname: &str, pixels: u32) -> Arc<gpui::Image> {
+        // Bounds the cache even if a caller passes a wild size.
+        let pixels = pixels.clamp(1, MAX_DEFAULT_PIXELS);
         let params = default_avatar::params(nickname);
         self.defaults
             .borrow_mut()
-            .entry(params)
+            .entry((params, pixels))
             .or_insert_with(|| {
                 Arc::new(gpui::Image::from_bytes(
                     gpui::ImageFormat::Svg,
-                    default_avatar::svg(params, PIXELS).into_bytes(),
+                    default_avatar::svg(params, pixels).into_bytes(),
                 ))
             })
             .clone()
@@ -808,6 +821,12 @@ mod tests {
                 Arc::ptr_eq(&bob, &chat.avatars.default_for("bob")),
                 "shared"
             );
+        });
+        chat.read_with(cx, |chat, _| {
+            let large = chat.avatars.default_sized("bob", 96);
+            let svg = String::from_utf8(large.bytes().to_vec()).unwrap();
+            assert!(svg.contains(r#"width="96" height="96""#), "own size");
+            assert!(Arc::ptr_eq(&large, &chat.avatars.default_sized("bob", 96)));
         });
         // No image is fetched for them.
         assert!(fetcher.calls().iter().all(|url| !url.contains("bob")));
