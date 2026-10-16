@@ -942,10 +942,24 @@ What CayenChat does:
   copies the current draft, after the same checks as publishing
   (`publishable_avatar_url`, one line, ASCII on legacy encodings) and no
   `{size}` (KVIrc would request it literally), into
-  `ServerProfile::peer_avatar_url`. Editing, autosaving or uploading the
-  draft never changes it; "Stop Sharing" clears it, and so does turning the
-  option off, so turning it on again shares nothing until chosen. "Send to
-  IRC Server" (metadata) is unchanged and independent.
+  `ServerProfile::peer_avatar_url`. Changing the server's own avatar (the
+  draft or an upload) to anything but the shared URL stops sharing
+  (`stop_sharing_if_avatar_differs`), so peers are not left with the old
+  picture; the new one is shared only by choosing "Share with Peers" again.
+  "Stop Sharing" clears it, and so does turning the option off, so turning
+  it on again shares nothing until chosen. "Send to IRC Server" (metadata)
+  is unchanged and independent.
+- **Telling askers of a change**: users who sent us a private CTCP AVATAR
+  query are remembered per connection (256, only while they share a
+  channel with us; dropped on QUIT or leaving, followed on NICK, empty after
+  reconnecting). When the shared URL changes or stops, each is told with a
+  private `NOTICE <nick> :\x01AVATAR <url>\x01` (`\x01AVATAR\x01` to remove),
+  one per two seconds, only the latest state (a user already holding it is
+  skipped). Never a channel NOTICE (KVIrc's `avatar.notify` to a channel):
+  clients without CTCP AVATAR would show it. Receivers already take a
+  private NOTICE from a channel mate over an earlier answer. Sharing first
+  started while connected reaches nobody, as no query was invited by the
+  realname mark; the reconnect line covers that.
 - **Advertising**: only with the option on and a URL shared, the `USER`
   realname becomes `\x034\x0fCayenChat`. The realname is sent at
   registration, so the mark changes only on the next connection; the tab

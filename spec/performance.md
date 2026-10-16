@@ -85,6 +85,7 @@ Do not build a second mechanism for any of these; extend them instead.
 | Avatar metadata (irc-core) | 2,048 users with an avatar; values ≤ 2,048 bytes; 16 deferred channel syncs, 3 per channel | per connection | Only the `avatar` key is kept; later users get none. Reset on reconnect or lost capability. |
 | Avatar lookups for later joiners (irc-core) | 64 pending, 8 unanswered, 2 sent per second after a 2 s pause, 2 attempts, 30 s timeout | per connection | Only live JOINs of users sharing no other channel; never NAMES, redraws or history. Further joiners are skipped until the table drains. |
 | Own avatar requests (irc-core, app) | 1 outstanding, 20 s timeout, URL ≤ 400 bytes | per connection | Only on Send to / Remove from IRC Server, or after an avatar image upload. |
+| Users told of a changed shared avatar (irc-core) | 256 askers, one private NOTICE per 2 s | per connection | Only users who queried us and share a channel with us; never channels. Empty on reconnect. |
 | Avatar directory (app) | 2,048 current + 512 retired entries | per network | Worst case about 6 MiB per network at the maximum URL length; typical URLs are ~100 bytes. Removed with the server. |
 | Default avatars (ui) | 512 looks, one 32×32 SVG image each | application | Kept per look while avatars are shown (about 4 KiB of pixels each in GPUI's image cache and atlas); cleared when the setting is turned off. |
 | Avatar loads | 2 in flight; with previews at most 3 media fetches in flight together | application | Decoding stays one at a time in the process (shared with previews). |

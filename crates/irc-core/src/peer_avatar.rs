@@ -44,6 +44,13 @@
 //! realname mark is decided at registration by the caller
 //! ([`realname`]); the shared URL can change while connected.
 //!
+//! A user who queried us is remembered (bounded, only while they share a
+//! channel with us; gone on QUIT or leaving, followed on NICK). When the
+//! shared URL changes, or stops, each of them is told with a private
+//! `NOTICE <nick> :\x01AVATAR <url>\x01` (`\x01AVATAR\x01` for none), one per
+//! two seconds, only the latest state. Nothing goes to channels: clients
+//! that do not speak CTCP AVATAR would show it.
+//!
 //! Server metadata wins: [`PeerAvatars`] keeps both references per user and
 //! reports the metadata avatar when there is one, the peer one otherwise,
 //! and passes metadata events through that merge. Avatars belong to the
@@ -87,6 +94,10 @@ const MAX_REPLIES_PER_WINDOW: usize = 5;
 const REPLY_WINDOW: Duration = Duration::from_secs(10);
 const REPLY_INTERVAL_PER_USER: Duration = Duration::from_secs(60);
 const MAX_REPLY_RECIPIENTS: usize = 256;
+/// Users who queried us and are told when what we share changes, and the
+/// pause between two such notices.
+const MAX_NOTIFIED_USERS: usize = MAX_REPLY_RECIPIENTS;
+const NOTIFY_INTERVAL: Duration = PROBE_INTERVAL;
 
 /// The realname sent at registration, with KVIrc's avatar mark when we
 /// share an avatar.
@@ -251,6 +262,17 @@ pub(crate) struct PeerAvatars {
     skipped: usize,
     replies: VecDeque<Instant>,
     replied: HashMap<String, Instant>,
+    /// Users who queried us and are present, by nickname key.
+    askers: HashMap<String, Asker>,
+    next_notify: Option<Instant>,
+}
+
+/// A user who queried us for our avatar.
+#[derive(Debug)]
+struct Asker {
+    nickname: String,
+    /// The URL they were last given (`None`: no avatar).
+    known: Option<String>,
 }
 
 impl PeerAvatars {
@@ -266,6 +288,8 @@ impl PeerAvatars {
             skipped: 0,
             replies: VecDeque::new(),
             replied: HashMap::new(),
+            askers: HashMap::new(),
+            next_notify: None,
         }
     }
 
@@ -273,6 +297,69 @@ impl PeerAvatars {
     /// realname mark sent at registration is not changed.
     pub(crate) fn set_share(&mut self, url: Option<String>) {
         self.share = url.filter(|url| shareable(url, self.utf8).is_ok());
+    }
+
+    /// A user who queried us is a client that speaks CTCP AVATAR: they are
+    /// told of later changes, one by one ([`PeerAvatars::notify`]). What
+    /// they are taken to know changes only when they are actually answered
+    /// ([`PeerAvatars::mark_told`]), so an unanswered query never hides a
+    /// pending change or clear.
+    fn remember_asker(&mut self, sender: &str, presence: &PresenceIndex) {
+        if !valid_sender(sender) || !presence.shares(sender, None) {
+            return;
+        }
+        let key = nickname_key(sender);
+        if !self.askers.contains_key(&key) && self.askers.len() >= MAX_NOTIFIED_USERS {
+            return;
+        }
+        self.askers.entry(key).or_insert_with(|| Asker {
+            nickname: sender.to_owned(),
+            known: None,
+        });
+    }
+
+    /// Records that an asker was just given what we share now.
+    fn mark_told(&mut self, sender: &str) {
+        if let Some(asker) = self.askers.get_mut(&nickname_key(sender)) {
+            asker.known = self.share.clone();
+        }
+    }
+
+    /// Tells the next asker still present whose picture differs from what
+    /// we share now, at most one per [`NOTIFY_INTERVAL`]. Changes made in
+    /// between are folded: only the latest state is compared and sent, to
+    /// the user alone, never to a channel.
+    fn notify(
+        &mut self,
+        now: Instant,
+        current_nick: &str,
+        presence: &PresenceIndex,
+    ) -> Option<IrcCommand> {
+        if self.next_notify.is_some_and(|due| due > now) {
+            return None;
+        }
+        loop {
+            let key = self
+                .askers
+                .iter()
+                .find(|(_, asker)| asker.known != self.share)
+                .map(|(key, _)| key.clone())?;
+            let asker = self.askers.get_mut(&key)?;
+            if same_nickname(&asker.nickname, current_nick)
+                || !valid_sender(&asker.nickname)
+                || !presence.shares(&asker.nickname, None)
+            {
+                self.askers.remove(&key);
+                continue;
+            }
+            asker.known = self.share.clone();
+            self.next_notify = Some(now + NOTIFY_INTERVAL);
+            let text = match &self.share {
+                Some(url) => format!("\u{1}{CTCP_TAG} {url}\u{1}"),
+                None => format!("\u{1}{CTCP_TAG}\u{1}"),
+            };
+            return Some(IrcCommand::NOTICE(asker.nickname.clone(), text));
+        }
     }
 
     /// Handles CTCP AVATAR traffic and replies to our lookups. `Some` means
@@ -298,13 +385,17 @@ impl PeerAvatars {
                     && !replayed
                     && !same_nickname(sender, current_nick)
                     && same_nickname(target, current_nick)
-                    && let Some(url) = self.share.clone()
-                    && self.may_reply(sender, now)
                 {
-                    handled.send.push(IrcCommand::NOTICE(
-                        sender.to_owned(),
-                        format!("\u{1}{CTCP_TAG} {url}\u{1}"),
-                    ));
+                    self.remember_asker(sender, presence);
+                    if let Some(url) = self.share.clone()
+                        && self.may_reply(sender, now)
+                    {
+                        self.mark_told(sender);
+                        handled.send.push(IrcCommand::NOTICE(
+                            sender.to_owned(),
+                            format!("\u{1}{CTCP_TAG} {url}\u{1}"),
+                        ));
+                    }
                 }
                 Some(handled)
             }
@@ -517,7 +608,12 @@ impl PeerAvatars {
         let send = (!self.queue.is_empty() && self.in_flight.len() < MAX_PROBES_IN_FLIGHT)
             .then(|| self.next_probe.unwrap_or_else(Instant::now));
         let expiry = self.in_flight.iter().map(|probe| probe.deadline).min();
-        send.into_iter().chain(expiry).min()
+        let notice = self
+            .askers
+            .values()
+            .any(|asker| asker.known != self.share)
+            .then(|| self.next_notify.unwrap_or_else(Instant::now));
+        send.into_iter().chain(expiry).chain(notice).min()
     }
 
     /// Gives up unanswered probes and sends the next one when due.
@@ -528,6 +624,9 @@ impl PeerAvatars {
         presence: &PresenceIndex,
     ) -> Handled {
         let mut handled = Handled::default();
+        handled
+            .send
+            .extend(self.notify(now, current_nick, presence));
         self.in_flight.retain(|probe| probe.deadline > now);
         if self.next_probe.is_some_and(|due| due > now)
             || self.in_flight.len() >= MAX_PROBES_IN_FLIGHT
@@ -600,6 +699,7 @@ impl PeerAvatars {
     fn forget(&mut self, nick: &str) -> Option<Event> {
         let key = nickname_key(nick);
         self.stages.remove(&key);
+        self.askers.remove(&key);
         self.queue.retain(|probe| probe.key != key);
         self.in_flight
             .retain(|probe| probe.kind == ProbeKind::Who || probe.key != key);
@@ -621,12 +721,21 @@ impl PeerAvatars {
             if let Some(sources) = self.avatars.get_mut(&from_key) {
                 sources.nickname = to.to_owned();
             }
+            if let Some(asker) = self.askers.get_mut(&from_key) {
+                asker.nickname = to.to_owned();
+            }
             return Vec::new();
         }
         // Anything under the new name belonged to someone who left it.
         let mut events: Vec<Event> = self.forget(to).into_iter().collect();
         if let Some(stage) = self.stages.remove(&from_key) {
             self.stages.insert(to_key.clone(), stage);
+        }
+        if let Some(mut asker) = self.askers.remove(&from_key)
+            && valid_sender(to)
+        {
+            asker.nickname = to.to_owned();
+            self.askers.insert(to_key.clone(), asker);
         }
         for probe in &mut self.queue {
             if probe.key == from_key {
@@ -1393,5 +1502,213 @@ mod tests {
         let mut events = peers.lifecycle(&line(":kv2!u@h QUIT :bye"), &rosters, ME);
         events.extend(peers.merge_metadata(vec![meta("kv2", None)]));
         assert_eq!(avatars(&events), ["kv2=-"]);
+    }
+
+    const URL: &str = "https://example.com/me.png";
+    const URL2: &str = "https://example.com/new.png";
+
+    fn ask(peers: &mut PeerAvatars, nick: &str, now: Instant) {
+        let text = format!(":{nick}!u@h PRIVMSG alice :\u{1}AVATAR\u{1}");
+        observe(peers, &text, now).unwrap();
+    }
+
+    fn tick(peers: &mut PeerAvatars, now: Instant) -> Vec<String> {
+        wire(&peers.tick(now, ME, &rosters()).send)
+    }
+
+    #[test]
+    fn only_users_who_asked_are_told_of_a_change_one_at_a_time() {
+        let now = Instant::now();
+        let mut peers = PeerAvatars::new(true, Some(URL.into()));
+        ask(&mut peers, "kv", now);
+        ask(&mut peers, "bob", now + Duration::from_secs(1));
+        // carol never asked; asking from outside our channels is not kept;
+        // channel queries and replayed ones are not asks.
+        ask(&mut peers, "stranger", now);
+        observe(&mut peers, ":carol!u@h PRIVMSG #a :\u{1}AVATAR\u{1}", now);
+        let replayed = line(":carol!u@h PRIVMSG alice :\u{1}AVATAR\u{1}");
+        peers.observe(&replayed, ME, &rosters(), true, now);
+        // They already have the URL they were answered with.
+        assert_eq!(peers.next_deadline(), None);
+        assert!(tick(&mut peers, now).is_empty());
+
+        peers.set_share(Some(URL2.into()));
+        let mut told = Vec::new();
+        let mut at = now;
+        for _ in 0..2 {
+            assert!(peers.next_deadline().is_some());
+            let sent = tick(&mut peers, at);
+            assert_eq!(sent.len(), 1);
+            told.extend(sent);
+            // The next one waits for the interval.
+            assert!(tick(&mut peers, at).is_empty());
+            at += NOTIFY_INTERVAL;
+        }
+        told.sort();
+        assert_eq!(
+            told,
+            [
+                format!("NOTICE bob :\u{1}AVATAR {URL2}\u{1}"),
+                format!("NOTICE kv :\u{1}AVATAR {URL2}\u{1}"),
+            ]
+        );
+        assert_eq!(peers.next_deadline(), None);
+        assert!(tick(&mut peers, at + NOTIFY_INTERVAL).is_empty());
+    }
+
+    #[test]
+    fn stopping_sends_an_empty_notice_and_quick_changes_fold() {
+        let now = Instant::now();
+        let mut peers = PeerAvatars::new(true, Some(URL.into()));
+        ask(&mut peers, "kv", now);
+        peers.set_share(None);
+        assert_eq!(tick(&mut peers, now), ["NOTICE kv \u{1}AVATAR\u{1}"]);
+        // Starting again is told as the new URL.
+        peers.set_share(Some(URL2.into()));
+        let later = now + NOTIFY_INTERVAL;
+        assert_eq!(
+            tick(&mut peers, later),
+            [format!("NOTICE kv :\u{1}AVATAR {URL2}\u{1}")]
+        );
+        // Several changes before the next notice: only the last is sent,
+        // and going back to what they know sends nothing.
+        let later = later + NOTIFY_INTERVAL;
+        peers.set_share(None);
+        peers.set_share(Some(URL.into()));
+        peers.set_share(Some(URL2.into()));
+        assert_eq!(peers.next_deadline(), None);
+        assert!(tick(&mut peers, later).is_empty());
+        peers.set_share(Some(URL.into()));
+        peers.set_share(None);
+        assert_eq!(tick(&mut peers, later), ["NOTICE kv \u{1}AVATAR\u{1}"]);
+        // Someone who asked while nothing was shared knows nothing: no
+        // empty notice, but the first URL is sent.
+        let mut peers = PeerAvatars::new(true, None);
+        ask(&mut peers, "kv", now);
+        peers.set_share(None);
+        assert_eq!(peers.next_deadline(), None);
+        peers.set_share(Some(URL.into()));
+        assert_eq!(
+            tick(&mut peers, now),
+            [format!("NOTICE kv :\u{1}AVATAR {URL}\u{1}")]
+        );
+        // A URL that cannot be shared stops sharing.
+        peers.set_share(Some("file:///etc/passwd".into()));
+        assert_eq!(
+            tick(&mut peers, now + NOTIFY_INTERVAL),
+            ["NOTICE kv \u{1}AVATAR\u{1}"]
+        );
+    }
+
+    #[test]
+    fn askers_who_left_are_forgotten_and_renamed_ones_followed() {
+        let now = Instant::now();
+        let mut peers = PeerAvatars::new(true, Some(URL.into()));
+        for nick in ["kv", "bob", "carol"] {
+            ask(&mut peers, nick, now);
+        }
+        let all = rosters();
+        peers.lifecycle(&line(":kv!u@h QUIT :bye"), &all, ME);
+        // bob leaves #a, the only channel they share with us.
+        peers.lifecycle(&line(":bob!u@h PART #a"), &all, ME);
+        // carol is still in #b after leaving #a.
+        peers.lifecycle(&line(":carol!u@h PART #a"), &all, ME);
+        assert_eq!(peers.askers.len(), 1);
+        peers.lifecycle(&line(":carol!u@h NICK carol2"), &all, ME);
+        let renamed = PresenceIndex::from_rosters(&HashMap::from([(
+            "#b".to_owned(),
+            vec!["alice".into(), "carol2".into()],
+        )]));
+        peers.set_share(None);
+        assert_eq!(
+            wire(&peers.tick(now, ME, &renamed).send),
+            ["NOTICE carol2 \u{1}AVATAR\u{1}"]
+        );
+        // Someone who stopped sharing a channel with us without an event
+        // we saw is dropped, not told.
+        let mut peers = PeerAvatars::new(true, Some(URL.into()));
+        ask(&mut peers, "kv", now);
+        peers.set_share(None);
+        assert!(peers.tick(now, ME, &renamed).send.is_empty());
+        assert!(peers.askers.is_empty());
+        assert_eq!(peers.next_deadline(), None);
+    }
+
+    #[test]
+    fn an_unanswered_query_does_not_hide_a_pending_clear() {
+        let now = Instant::now();
+        let mut peers = PeerAvatars::new(true, Some(URL.into()));
+        ask(&mut peers, "kv", now);
+        peers.set_share(Some(URL2.into()));
+        assert_eq!(tick(&mut peers, now).len(), 1);
+        peers.set_share(None);
+        // Asked again before the clear went out: nothing is answered, and
+        // the clear is still sent.
+        ask(&mut peers, "kv", now);
+        assert_eq!(
+            tick(&mut peers, now + NOTIFY_INTERVAL),
+            ["NOTICE kv \u{1}AVATAR\u{1}"]
+        );
+    }
+
+    #[test]
+    fn an_invalid_new_nickname_is_never_notified() {
+        let now = Instant::now();
+        let mut peers = PeerAvatars::new(true, Some(URL.into()));
+        ask(&mut peers, "kv", now);
+        peers.lifecycle(&line(":kv!u@h NICK :#a"), &rosters(), ME);
+        peers.set_share(None);
+        let channel = PresenceIndex::from_rosters(&HashMap::from([(
+            "#a".to_owned(),
+            vec!["alice".into(), "#a".into()],
+        )]));
+        assert!(peers.tick(now, ME, &channel).send.is_empty());
+        assert!(peers.askers.is_empty());
+    }
+
+    #[test]
+    fn askers_are_bounded() {
+        let now = Instant::now();
+        let names: Vec<String> = (0..MAX_NOTIFIED_USERS + 10)
+            .map(|index| format!("user{index}"))
+            .collect();
+        let presence = PresenceIndex::from_rosters(&HashMap::from([(
+            "#a".to_owned(),
+            std::iter::once("alice".to_owned())
+                .chain(names.clone())
+                .collect(),
+        )]));
+        let mut peers = PeerAvatars::new(true, Some(URL.into()));
+        for name in &names {
+            let text = format!(":{name}!u@h PRIVMSG alice :\u{1}AVATAR\u{1}");
+            peers.observe(&line(&text), ME, &presence, false, now);
+        }
+        assert_eq!(peers.askers.len(), MAX_NOTIFIED_USERS);
+        // Invalid nicknames are never kept.
+        peers.askers.clear();
+        peers.observe(
+            &line(":#chan!u@h PRIVMSG alice :\u{1}AVATAR\u{1}"),
+            ME,
+            &presence,
+            false,
+            now,
+        );
+        assert!(peers.askers.is_empty());
+    }
+
+    #[test]
+    fn a_notice_from_a_user_replaces_the_avatar_they_were_asked_for() {
+        let now = Instant::now();
+        let mut peers = with_kv_avatar("https://peer.example/old.png");
+        // kv is already queried (stage Queried); a later private notice
+        // still replaces it, and an empty one removes it.
+        let text = ":kv!u@h NOTICE alice :\u{1}AVATAR https://peer.example/new.png\u{1}";
+        let handled = observe(&mut peers, text, now).unwrap();
+        assert_eq!(
+            avatars(&handled.events),
+            ["kv=https://peer.example/new.png"]
+        );
+        let handled = observe(&mut peers, ":kv!u@h NOTICE alice :\u{1}AVATAR\u{1}", now).unwrap();
+        assert_eq!(avatars(&handled.events), ["kv=-"]);
     }
 }
