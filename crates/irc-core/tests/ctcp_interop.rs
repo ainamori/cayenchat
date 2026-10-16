@@ -236,10 +236,12 @@ fn ctcp_answers_through_a_real_server() {
     assert!(time.len() > format!(":{me}!").len() + 30, "{time:?}");
     let info = carol.expect(|line| line.contains("\u{1}CLIENTINFO "));
     assert!(
-        info.ends_with(":\u{1}CLIENTINFO ACTION CLIENTINFO PING TIME VERSION\u{1}"),
+        info.ends_with(
+            ":\u{1}CLIENTINFO ACTION CLIENTINFO ERRMSG FINGER PING SOURCE TIME USERINFO VERSION\u{1}"
+        ),
         "{info:?}"
     );
-    // Channel requests and USERINFO are shown but not answered.
+    // Channel requests are shown but not answered.
     dave.send(&format!("PRIVMSG {channel} :\u{1}VERSION\u{1}"));
     client.server_line(&format!(
         "CTCP VERSION request from dave{run} to {channel} (not answered)"
@@ -247,12 +249,100 @@ fn ctcp_answers_through_a_real_server() {
     for peer in [&mut bob, &mut carol, &mut dave] {
         assert!(peer.notices(Duration::from_secs(1)).is_empty());
     }
+    // The other fixed answers, ERRMSG for a unknown query, and no answer to
+    // DCC (never interpreted) or to a reply, so ERRMSG cannot loop.
     thread::sleep(WINDOW);
-    dave.send(&format!("PRIVMSG {me} :\u{1}USERINFO\u{1}"));
-    client.server_line(&format!(
-        "CTCP USERINFO request from dave{run} (not answered)"
+    for (peer, request) in [
+        (0, "USERINFO"),
+        (0, "FINGER"),
+        (1, "SOURCE"),
+        (1, "ERRMSG PING :x"),
+        (2, "FROBNICATE"),
+    ] {
+        [&mut dave, &mut bob, &mut carol][peer].send(&format!("PRIVMSG {me} :\u{1}{request}\u{1}"));
+    }
+    let mut answers = Vec::new();
+    for peer in [&mut bob, &mut carol, &mut dave] {
+        answers.extend(peer.notices(Duration::from_secs(2)));
+    }
+    let ends = |text: &str| answers.iter().any(|answer| answer.ends_with(text));
+    assert!(ends("\u{1}USERINFO CayenChat user\u{1}"), "{answers:?}");
+    assert!(ends("\u{1}FINGER CayenChat user\u{1}"), "{answers:?}");
+    assert!(
+        ends("\u{1}SOURCE https://github.com/koshian/cayenchat\u{1}"),
+        "{answers:?}"
+    );
+    assert!(ends("\u{1}ERRMSG PING :x :No error\u{1}"), "{answers:?}");
+    assert!(
+        ends("\u{1}ERRMSG FROBNICATE :Unknown query\u{1}"),
+        "{answers:?}"
+    );
+    assert_eq!(answers.len(), 5, "{answers:?}");
+    thread::sleep(WINDOW);
+    dave.send(&format!("PRIVMSG {me} :\u{1}DCC SEND f.txt 1 2 3\u{1}"));
+    dave.send(&format!(
+        "NOTICE {me} :\u{1}ERRMSG FROBNICATE :Unknown query\u{1}"
     ));
     assert!(dave.notices(Duration::from_secs(1)).is_empty());
+
+    // Our own requests: /ctcp shows the reply in the server log, and /ping
+    // reports a round trip only for the reply that echoes its token.
+    thread::sleep(WINDOW);
+    let bob_nick = format!("bob{run}");
+    client
+        .connection
+        .send_command(&format!("/ctcp {bob_nick} VERSION"), None)
+        .unwrap();
+    let asked = bob.expect(|line| line.contains("PRIVMSG") && line.contains("\u{1}VERSION"));
+    assert!(
+        asked.ends_with(&format!("PRIVMSG {bob_nick} :\u{1}VERSION\u{1}")),
+        "{asked:?}"
+    );
+    bob.send(&format!("NOTICE {me} :\u{1}VERSION fakeclient 1.0\u{1}"));
+    client.server_line(&format!(
+        "CTCP VERSION reply from {bob_nick}: fakeclient 1.0"
+    ));
+    client
+        .connection
+        .send_command(&format!("/ping {bob_nick}"), None)
+        .unwrap();
+    let asked = bob.expect(|line| line.contains("PRIVMSG") && line.contains("\u{1}PING "));
+    let token = asked
+        .rsplit_once("\u{1}PING ")
+        .and_then(|(_, rest)| rest.strip_suffix('\u{1}'))
+        .unwrap()
+        .to_owned();
+    // Another user echoing the token, and a wrong token, are no measurement.
+    carol.send(&format!("NOTICE {me} :\u{1}PING {token}\u{1}"));
+    bob.send(&format!("NOTICE {me} :\u{1}PING 0000\u{1}"));
+    bob.send(&format!("NOTICE {me} :\u{1}PING {token}\u{1}"));
+    let round_trip = client.wait(
+        "ping round trip",
+        |event| matches!(event, Event::ServerLine(line) if line.contains(" ms")),
+    );
+    println!("{round_trip:?}");
+    let Event::ServerLine(line) = round_trip else {
+        unreachable!()
+    };
+    assert!(
+        line.starts_with(&format!("CTCP PING reply from {bob_nick} on {host}: ")),
+        "{line}"
+    );
+    assert_eq!(
+        client
+            .events
+            .iter()
+            .filter(|event| matches!(event, Event::ServerLine(line) if line.contains(" ms")))
+            .count(),
+        1
+    );
+    // A request that would inject a command is refused before the wire.
+    assert!(
+        client
+            .connection
+            .send_command(&format!("/ctcp {bob_nick} PING x\r\nQUIT"), None)
+            .is_err()
+    );
 
     // A flood from several users: at most five answers, two per user, one
     // line saying the rest are ignored, and the connection stays up.

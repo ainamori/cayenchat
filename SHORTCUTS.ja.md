@@ -55,6 +55,8 @@ Windows/Linux では Alt 単独で押して離すか F10 でメニューバー�
 | `/me waves` | 選択中のチャンネルへ CTCP ACTION を送信 |
 | `/msg :hello everyone` または `/notice :hello everyone` | 選択中のチャンネルへ発言または通知 |
 | `/msg bob hello` または `/notice bob hello` | 指定した相手へ直接送信 |
+| `/ctcp bob VERSION` | ユーザーに CTCP 要求を送信。返信はサーバーログに表示（`SOURCE`、`USERINFO`、`FINGER`、`CLIENTINFO`、`TIME` など。DCC は非対応） |
+| `/ping bob` | ユーザーに CTCP PING を送り、往復時間を表示（サーバーへの PING は `/raw PING token`） |
 | `/nick newname`、`/whois bob`、`/raw WHO #channel` | その他の IRC コマンドを送信 |
 
 `/raw` と `/quote` は残りの行を IRC コマンドとして送ります。

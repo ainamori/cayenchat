@@ -1126,9 +1126,9 @@ are on (`peer_avatar` sees it first):
   (`Mon Sep 28 12:34:56 2026 +0900`), CLIENTINFO
   `ACTION [AVATAR] CLIENTINFO PING TIME VERSION` (AVATAR only while peer
   avatars are on).
-- **Not answered**: USERINFO (CayenChat has no user info to give; an empty
-  answer would only add traffic), FINGER, SOURCE, DCC and unknown tags; no
-  ERRMSG. Channel requests (STATUSMSG `@#chan` included) are never
+- **Not answered**: DCC and AVATAR while peer avatars are off, and tags
+  that are not plainly spelled. (Amended 2026-10-16, below: USERINFO,
+  FINGER, SOURCE, ERRMSG and unknown tags are now answered.) Channel requests (STATUSMSG `@#chan` included) are never
   answered: one request can reach a whole channel of clients, and
   answering is what floods.
 - **Shown** as one server line: `CTCP VERSION request from bob`,
@@ -1151,6 +1151,41 @@ are on (`peer_avatar` sees it first):
   only the version number. TIME reveals the time zone offset, which is the
   behavior users of other clients expect; a setting can be added later if
   asked for.
+
+**Amendment 2026-10-16 (issue 427): more answers, `/ctcp` and `/ping`.**
+
+- **More answers**, same rules (private, live, from a user, rate-limited):
+  USERINFO `CayenChat user`, FINGER `CayenChat user` and SOURCE
+  `https://github.com/koshian/cayenchat` are fixed public text. There is no
+  setting for a custom USERINFO/FINGER text yet, and no OS login name,
+  host, terminal or idle time is ever read or sent. ERRMSG echoes its query
+  (`ERRMSG <query> :No error`; no query: `ERRMSG ERRMSG :No error`; not
+  answered above 128 bytes or with an inner 0x01), and an unknown tag that
+  is plainly spelled gets `ERRMSG <TAG> :Unknown query`. Replies are NOTICEs
+  and a NOTICE is never answered, so ERRMSG cannot loop. DCC is still
+  shown and never interpreted, answered or acted on. CLIENTINFO lists
+  `ACTION [AVATAR] CLIENTINFO ERRMSG FINGER PING SOURCE TIME USERINFO
+  VERSION`, exactly what is answered.
+- **`/ctcp <nick> <command> [arguments]`** sends `PRIVMSG <nick> :\x01…\x01`
+  to a user (not a channel). Refused before the wire: an invalid nick or
+  tag, ACTION (use `/me`), DCC, AVATAR (follows the peer avatar setting),
+  arguments over 200 bytes or with any control character (0x01, CR, LF,
+  NUL), and anything while registration is not finished. The reply arrives
+  as the usual `CTCP VERSION reply from bob: …` server line.
+- **`/ping <nick>`** (and `/ctcp <nick> PING` without arguments) is a CTCP
+  PING, no longer the raw server `PING` (`/raw PING …` still sends that).
+  The request carries a per-connection random token. A NOTICE from the same
+  nick (case-mapped) to us whose argument is exactly that token is shown as
+  `CTCP PING reply from bob on <server>: 12.3 ms`, measured with the
+  monotonic clock; any other reply (other nick, other token, to a channel,
+  a repeat, or after the timeout) is only shown as a plain reply, not a
+  measurement. A ping without a reply is reported after 30 seconds
+  (`CTCP PING to bob on <server> timed out …`) and dropped; at most one
+  ping per nick and eight pings wait at once. Pending pings live in the
+  connection's worker, so a disconnect discards them silently.
+- **Pacing**: requests we send share the incoming limit (five per ten
+  seconds, two per nick); past it nothing is sent and the log says so. All
+  of this runs in the worker, so an unanswered ping blocks nothing.
 
 Checked against Ergo 2.19.1 (the pinned local server of D023's interop
 check), whose default channel modes include `+C` (no channel CTCP): answers

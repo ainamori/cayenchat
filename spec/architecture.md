@@ -1003,8 +1003,16 @@ Other CTCP (D029): `irc-core::ctcp::CtcpReplies` runs in the worker after
 `PeerAvatars` and before `translate_message`, and consumes every CTCP
 PRIVMSG or NOTICE except ACTION (and AVATAR while peer avatars are on). A
 live private request from a user is answered by `NOTICE <sender>` for PING,
-VERSION (`CayenChat <CARGO_PKG_VERSION>`), TIME (local, via chrono) and
-CLIENTINFO; nothing else and nothing sent to a channel is answered. Each
+VERSION (`CayenChat <CARGO_PKG_VERSION>`), TIME (local, via chrono),
+CLIENTINFO, USERINFO, FINGER, SOURCE and ERRMSG (an unknown plain tag gets
+`ERRMSG <TAG> :Unknown query`); DCC is never interpreted, and nothing sent
+to a channel is answered. `/ctcp` and `/ping` parse to `Outgoing::Ctcp`;
+the worker passes it to `CtcpReplies::request`, which paces it, tags a
+PING with a token and keeps at most eight pending pings with their
+monotonic send time. A NOTICE echoing the token from the same nick becomes
+the round trip line; `CtcpReplies::next_deadline`/`tick` report pings
+without a reply after 30 seconds, and the pending list ends with the
+worker. Each
 admitted request or reply becomes one `Event::ServerLine`
 (`CTCP VERSION request from bob`); replayed, own and misaddressed ones are
 dropped silently. Two budgets (requests; replies) each admit five per ten
