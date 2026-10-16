@@ -25,6 +25,11 @@ and record that here.
 | `image-up.svg` | `image-up` | 1.56.0 | Toolbar: upload an image |
 | `settings.svg` | `settings` | 1.56.0 | Toolbar: settings |
 | `bring-to-front.svg` | `bring-to-front` | 1.56.0 | Toolbar: keep the windows on top (Windows) |
+| `search.svg` | `search` | 1.56.0 | Toolbar: search the logs; search bar |
+| `chevron-up.svg` | `chevron-up` | 1.56.0 | Search bar: previous match |
+| `chevron-down.svg` | `chevron-down` | 1.56.0 | Search bar: next match |
+| `circle-x.svg` | `circle-x` | 1.56.0 | Search bar: clear the keyword |
+| `x.svg` | `x` | 1.56.0 | Search bar: close |
 
 The files are unchanged from upstream (`stroke="currentColor"`); the toolbar
 draws them as a mask in the theme's text color, so they show in both light and

@@ -1328,3 +1328,35 @@ unmodified fixture (no `--notify-every`) was not rerun; its lines never reach
 the queue. `--notify-every` prefixes the fixed nick `perfclient`, which is
 what `run_baseline.py` sets; a client with another nick would not be
 mentioned.
+
+## Log search (2026-10-15, issue #404)
+
+The search bar adds no work while it is closed: no scan, task or highlight
+exists, and the per-row hook (`ChatWindow::search_ranges`) returns an empty
+list without matching anything. While it is open and has a term, each drawn
+main-log row matches the term once (only the rows near the viewport are
+drawn), `render_chat` compares a revision (a sum over the conversations'
+lengths, or one log's ends for the "this channel" scope), and a scan reads the
+logs in slices of 20,000 cost units (a message costs 1 plus its bytes / 64) on
+the executor after a 120 ms pause; a re-read after the logs changed waits
+500 ms. Matching is linear in the text (Knuth-Morris-Pratt, with the byte
+origin of the last term-length lowercase characters kept in a ring so a match's
+start is known without walking back; a term opening inside the lowercase form
+of `İ` against 8,000 of them is covered by a test). Styling the matches of a
+row steps through them once (`styled_log_text`), so a line of thousands of
+matches costs no more than its length. Review round 1 measured the earlier restart-at-every-position
+matcher at 1.27 s for one slice (100 lines of 16,000 `a` against 128 `a` + `b`)
+and 5.11 s against 512 `a` + `b`.
+
+Measured with the ignored `search_cost` test in `cayenchat-app` (50
+conversations of the 2,000 retained lines each, 100,000 lines of about 60
+characters, release build, Linux): a full scan of the "all" scope with no
+match took 37 ms in six slices, the longest 7.4 ms; a term matching everything
+stops at the 10,000-hit cap after 2 ms. With 100 further lines of 16,000 `a`
+and the 512-`a`-plus-`b` term the scan took 60 ms in total in 11 slices, the
+longest 9.3 ms (it was 5.11 s in one slice before the matcher was made linear). The debug build takes about 250 ms in
+total and 55 ms for the longest slice. Memory is at most 10,000 hits of 16
+bytes each; no log is copied. The headless baseline of this document
+(`perf_baseline`, `run_baseline.py`) was not rerun: the receive path and the
+channel-switch path are unchanged, and a search that is closed does nothing in
+them.

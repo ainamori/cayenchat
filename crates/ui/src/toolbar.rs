@@ -12,7 +12,8 @@ use std::borrow::Cow;
 use gpui::{prelude::*, *};
 
 use crate::{
-    ChatWindow, Connect, Disconnect, OpenSettings, Reconnect, ircv3_settings::TextTooltip,
+    ChatWindow, Connect, Disconnect, FindInLog, OpenSettings, Reconnect,
+    ircv3_settings::TextTooltip,
 };
 use crate::{key_recorder, shortcuts, theme::Theme};
 use cayenchat_app::Command;
@@ -58,6 +59,7 @@ enum Click {
     NextUnread,
     Whois,
     Upload,
+    Search,
     AlwaysOnTop,
     Settings,
 }
@@ -204,6 +206,18 @@ impl State {
                 self.can_upload,
                 Click::Upload,
             )),
+            Some(button(
+                "search",
+                "search",
+                "toolbar_search",
+                Keys::Fixed(if cfg!(target_os = "macos") {
+                    "cmd-f"
+                } else {
+                    "ctrl-f"
+                }),
+                true,
+                Click::Search,
+            )),
             None,
         ];
         if always_on_top_button {
@@ -343,6 +357,7 @@ impl Toolbar {
                             }
                             Click::Whois => chat.toolbar_whois(cx),
                             Click::Upload => chat.toolbar_upload(window, cx),
+                            Click::Search => chat.open_search(&FindInLog, window, cx),
                             Click::Settings => chat.open_settings(&OpenSettings, window, cx),
                         });
                     }))
@@ -363,6 +378,11 @@ impl Toolbar {
                     .try_global::<crate::ShortcutPrefs>()
                     .map(|prefs| prefs.overrides.clone())
                     .unwrap_or_default();
+                // The search key follows the key theme (F3 under Emacs).
+                let keys = match keys {
+                    Keys::Fixed("ctrl-f" | "cmd-f") => Keys::Fixed(crate::find_in_log_key(cx)),
+                    other => other,
+                };
                 let mut text = tooltip_text(&name, &shown_keys(keys, &overrides));
                 if let Some(state) = state {
                     text = format!("{text}: {state}");
@@ -411,6 +431,26 @@ const ICONS: &[(&str, &[u8])] = &[
     (
         "icons/ui/bring-to-front.svg",
         include_bytes!("../../../assets/icons/ui/bring-to-front.svg"),
+    ),
+    (
+        "icons/ui/chevron-down.svg",
+        include_bytes!("../../../assets/icons/ui/chevron-down.svg"),
+    ),
+    (
+        "icons/ui/chevron-up.svg",
+        include_bytes!("../../../assets/icons/ui/chevron-up.svg"),
+    ),
+    (
+        "icons/ui/circle-x.svg",
+        include_bytes!("../../../assets/icons/ui/circle-x.svg"),
+    ),
+    (
+        "icons/ui/search.svg",
+        include_bytes!("../../../assets/icons/ui/search.svg"),
+    ),
+    (
+        "icons/ui/x.svg",
+        include_bytes!("../../../assets/icons/ui/x.svg"),
     ),
     (
         "icons/ui/chevrons-down.svg",
@@ -613,14 +653,32 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_buttons_are_disabled_and_settings_never_is() {
+    fn unavailable_buttons_are_disabled_and_settings_and_search_never_are() {
         let state = State::default();
         for shown in [false, true] {
             for button in state.layout_with(shown).into_iter().flatten() {
-                let always_enabled = button.id == "settings" || button.id == "always-on-top";
+                let always_enabled = ["settings", "always-on-top", "search"].contains(&button.id);
                 assert_eq!(button.enabled, always_enabled, "{}", button.id);
             }
         }
+    }
+
+    #[test]
+    fn the_search_button_names_the_shortcut_that_opens_the_same_bar() {
+        let search = State::default()
+            .layout_with(false)
+            .into_iter()
+            .flatten()
+            .find(|button| button.id == "search")
+            .unwrap();
+        assert_eq!(search.icon, "search");
+        let keys = shown_keys(search.keys, &shortcuts::Overrides::new());
+        let expected = if cfg!(target_os = "macos") {
+            "cmd-f"
+        } else {
+            "ctrl-f"
+        };
+        assert_eq!(keys, [key_recorder::describe(expected)]);
     }
 
     #[test]

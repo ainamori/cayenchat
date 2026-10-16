@@ -229,6 +229,18 @@ mod tests {
     }
 
     #[test]
+    fn a_search_hit_goes_to_the_top_whatever_the_rows_above_it_are() {
+        let mut log = LogList::new();
+        log.sync(1, &[3, 7, 9, 10, 11]);
+        log.scroll_to_sequence(10);
+        let top = log.state.logical_scroll_top();
+        assert_eq!((top.item_ix, top.offset_in_item), (1 + 3, px(0.)));
+        // A line the list no longer holds leaves the position alone.
+        log.scroll_to_sequence(8);
+        assert_eq!(log.state.logical_scroll_top().item_ix, 4);
+    }
+
+    #[test]
     fn unordered_keys_keep_the_row_count_and_the_row_at_the_top() {
         let mut log = LogList::new();
         log.sync_unordered(0, &[1, 2, 3, 4, 5, 6]);

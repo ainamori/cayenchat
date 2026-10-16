@@ -719,8 +719,12 @@ impl EntityInputHandler for TextInput {
             .map(|range| self.range_to_utf16(range))
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        self.marked_range = None;
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // Observers (the log search) hold back while composing, so ending the
+        // composition without a text change must still tell them.
+        if self.marked_range.take().is_some() {
+            cx.notify();
+        }
     }
 
     fn replace_text_in_range(
@@ -1069,6 +1073,7 @@ impl Render for TextInput {
         // and does not deliver the commit here; keep the text, drop the mark.
         if self.marked_range.is_some() && !self.focus_handle.is_focused(window) {
             self.marked_range = None;
+            cx.notify();
         }
         let theme = self.palette(cx);
         let native = self
