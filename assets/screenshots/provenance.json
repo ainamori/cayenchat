@@ -1,0 +1,30 @@
+{
+  "cayenchat-en.png": {
+    "binary_modified": "2026-10-16T22:35:38+09:00",
+    "captured": "2026-10-16T22:35:53+09:00",
+    "commit": "4c1ed493adda34210f9889db27661678c250e1cb",
+    "dirty": false,
+    "features": [
+      "demo"
+    ],
+    "language": "english",
+    "os": "Linux 6.12.111+deb13-amd64",
+    "show_toolbar": true,
+    "size": "1280x800",
+    "theme": "light"
+  },
+  "cayenchat-ja.png": {
+    "binary_modified": "2026-10-16T22:35:38+09:00",
+    "captured": "2026-10-16T22:36:07+09:00",
+    "commit": "4c1ed493adda34210f9889db27661678c250e1cb",
+    "dirty": false,
+    "features": [
+      "demo"
+    ],
+    "language": "japanese",
+    "os": "Linux 6.12.111+deb13-amd64",
+    "show_toolbar": true,
+    "size": "1280x800",
+    "theme": "light"
+  }
+}
