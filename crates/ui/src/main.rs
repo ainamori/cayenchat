@@ -2032,6 +2032,45 @@ impl ChatWindow {
         }
     }
 
+    /// Asks whether to disconnect every server (a long press on the toolbar's
+    /// Disconnect button), then does so. Servers with nothing to stop are
+    /// left alone.
+    fn disconnect_all_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self
+            .sessions
+            .keys()
+            .any(|network| self.can_disconnect(*network))
+        {
+            return;
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &self.i18n.text("disconnect_all_title"),
+            Some(&self.i18n.text("disconnect_all_detail")),
+            &[
+                PromptButton::ok(self.i18n.text("disconnect_all_confirm")),
+                PromptButton::cancel(self.i18n.text("cancel")),
+            ],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await == Ok(0) {
+                let _ = this.update(cx, |this, cx| {
+                    let networks: Vec<_> = this
+                        .sessions
+                        .keys()
+                        .copied()
+                        .filter(|network| this.can_disconnect(*network))
+                        .collect();
+                    for network in networks {
+                        this.disconnect(network, cx);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
     /// Whether Connect applies: the selected server has not been connected in
     /// this run, or there is no server yet (it then opens settings).
     fn can_connect_selected(&self) -> bool {

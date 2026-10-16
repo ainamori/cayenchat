@@ -22,6 +22,8 @@ use cayenchat_app::Command;
 pub const HEIGHT: Pixels = px(34.);
 const BUTTON: f32 = 28.;
 const ICON: f32 = 16.;
+/// How long the Disconnect button is held to ask about every server.
+const LONG_PRESS: std::time::Duration = std::time::Duration::from_millis(600);
 
 /// What the buttons can do right now.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -275,6 +277,11 @@ fn shown_keys(keys: Keys, overrides: &shortcuts::Overrides) -> Vec<String> {
 struct Toolbar {
     chat: WeakEntity<ChatWindow>,
     state: State,
+    /// Counts down a hold on the Disconnect button; dropped on release.
+    hold: Option<Task<()>>,
+    /// The hold ran out, so the click that follows the release is not a
+    /// plain Disconnect.
+    held: bool,
     _subscriptions: [Subscription; 2],
 }
 
@@ -284,6 +291,8 @@ pub fn view(state: State, cx: &mut Context<ChatWindow>) -> AnyView {
     cx.new(|cx: &mut Context<Toolbar>| Toolbar {
         chat: chat.downgrade(),
         state,
+        hold: None,
+        held: false,
         _subscriptions: [
             // The state is worked out when the chat window changes, and the
             // bar redraws only if a button's availability or name did.
@@ -342,7 +351,39 @@ impl Toolbar {
                 button
                     .cursor_pointer()
                     .hover(move |style| style.bg(hover))
+                    .when(matches!(click, Click::Disconnect), |button| {
+                        // Holding the button asks about disconnecting every
+                        // server; a plain click only ends the selected one.
+                        button
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    this.held = false;
+                                    this.hold = Some(cx.spawn_in(window, async move |this, cx| {
+                                        cx.background_executor().timer(LONG_PRESS).await;
+                                        let _ = this.update_in(cx, |this, window, cx| {
+                                            this.hold = None;
+                                            this.held = true;
+                                            let _ = this.chat.update(cx, |chat, cx| {
+                                                chat.disconnect_all_action(window, cx)
+                                            });
+                                        });
+                                    }));
+                                }),
+                            )
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, _| this.hold = None),
+                            )
+                            .on_mouse_up_out(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, _| this.hold = None),
+                            )
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| {
+                        if std::mem::take(&mut this.held) {
+                            return;
+                        }
                         let _ = this.chat.update(cx, |chat, cx| match click {
                             Click::Connect => chat.connect_action(&Connect, window, cx),
                             Click::Disconnect => chat.disconnect_action(&Disconnect, window, cx),
