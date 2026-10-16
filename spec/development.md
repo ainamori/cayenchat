@@ -995,6 +995,20 @@ verified: macOS and Windows, a real IRC server, IME, HiDPI sharpness, and
 whether no image file is read while off (the file system's `relatime` made
 access times inconclusive; the GPUI tests cover it).
 
+### Avatar downscaling quality (2026-10-16)
+
+`media::decode::thumbnail` now shrinks with Lanczos3 instead of
+`thumbnail_exact`, premultiplying images that have transparency before the
+filter so transparent pixels leave no dark or light fringe (output stays
+straight alpha). Crop, sizes, limits and cache budgets are unchanged; images
+are still never enlarged. Default avatars are rasterized by GPUI at the
+SVG's own pixel size, so `Avatars::default_sized(nick, pixels)` makes one
+per look and size (log and members keep 32 px; a larger slot such as WHOIS
+asks for twice its logical size) instead of enlarging the 32 px image.
+Tests: transparent-edge and sharp-edge regressions in `decode`, sized
+defaults in `avatars`. Not compared: screenshots at 1×/2×/150% on
+Windows/macOS, which need a person.
+
 ### GUI end-to-end test (Linux)
 
 `scripts/e2e/history_gui.py` runs the real `cayenchat` binary on a virtual

@@ -126,9 +126,7 @@ pub fn thumbnail(
     let small = if (thumb_width, thumb_height) == (crop_width, crop_height) {
         image
     } else {
-        let small = image.thumbnail_exact(thumb_width, thumb_height);
-        drop(image);
-        small
+        downscale(image, thumb_width, thumb_height)
     };
     Ok(Thumbnail {
         width: thumb_width,
@@ -137,6 +135,40 @@ pub fn thumbnail(
         source_height: height,
         bgra: into_bgra(small),
     })
+}
+
+/// `image` scaled down to exactly `width` × `height` with Lanczos3, which
+/// keeps outlines and fine detail sharper than the box-like filter of
+/// `thumbnail_exact`. Images with transparency are filtered premultiplied, so
+/// the color of fully transparent pixels does not bleed into the edge as a
+/// dark or light fringe; the result is straight (not premultiplied) again.
+fn downscale(image: DynamicImage, width: u32, height: u32) -> DynamicImage {
+    let mut rgba = image.into_rgba8();
+    let translucent = rgba.pixels().any(|pixel| pixel.0[3] != 255);
+    if translucent {
+        for pixel in rgba.pixels_mut() {
+            let alpha = u32::from(pixel.0[3]);
+            for channel in &mut pixel.0[..3] {
+                *channel = ((u32::from(*channel) * alpha + 127) / 255) as u8;
+            }
+        }
+    }
+    let mut small =
+        image::imageops::resize(&rgba, width, height, image::imageops::FilterType::Lanczos3);
+    drop(rgba);
+    if translucent {
+        for pixel in small.pixels_mut() {
+            let alpha = u32::from(pixel.0[3]);
+            if alpha == 0 {
+                pixel.0 = [0; 4];
+                continue;
+            }
+            for channel in &mut pixel.0[..3] {
+                *channel = ((u32::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+            }
+        }
+    }
+    DynamicImage::ImageRgba8(small)
 }
 
 /// The pixels of `image` in the BGRA order GPUI draws.
@@ -254,6 +286,57 @@ mod tests {
         assert_eq!(fit(3000, 300, 400, 200), (400, 40));
         assert_eq!(fit(100, 50, 400, 200), (100, 50));
         assert_eq!(fit(10_000, 1, 400, 200), (400, 1));
+    }
+
+    fn png_from(image: image::RgbaImage) -> Vec<u8> {
+        let mut out = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn transparent_pixels_do_not_tint_the_edge() {
+        // Opaque white left half, fully transparent black right half: the
+        // old straight-alpha filtering darkened the edge.
+        let source = image::RgbaImage::from_fn(128, 128, |x, _| {
+            if x < 64 {
+                image::Rgba([255, 255, 255, 255])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            }
+        });
+        let limits = Limits::avatar(32);
+        let thumb = thumbnail(&png_from(source), &limits, &CancelFlag::default()).unwrap();
+        for pixel in thumb.bgra.as_chunks::<4>().0 {
+            if pixel[3] > 0 {
+                assert!(pixel[..3].iter().all(|&c| c >= 250), "{pixel:?}");
+            }
+        }
+        assert!(thumb.bgra.as_chunks::<4>().0.iter().any(|p| p[3] == 0));
+    }
+
+    #[test]
+    fn opaque_downscaling_keeps_a_sharp_edge_and_flat_areas() {
+        let source = image::RgbaImage::from_fn(128, 128, |x, _| {
+            if x < 64 {
+                image::Rgba([0, 0, 0, 255])
+            } else {
+                image::Rgba([255, 255, 255, 255])
+            }
+        });
+        let thumb = thumbnail(
+            &png_from(source),
+            &Limits::avatar(32),
+            &CancelFlag::default(),
+        )
+        .unwrap();
+        let row = &thumb.bgra[..32 * 4];
+        assert!(row[0] <= 2 && row[4 * 31] >= 253);
+        // The transition is at most a few pixels wide.
+        let gray = (0..32).filter(|&x| (3..252).contains(&row[x * 4])).count();
+        assert!(gray <= 3, "{gray}");
     }
 
     #[test]
