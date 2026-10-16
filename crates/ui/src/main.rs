@@ -6042,14 +6042,7 @@ impl ChatWindow {
             .child(self.input_to_draft(&self.members_focus, cx))
             .child(panes.members.clone().cached(pane_style()));
 
-        // The search bar sits above the log, inside its pane.
-        let mut main_pane = div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .children(search_bar)
-            .child(main_log);
+        let mut main_pane = div().flex().flex_col().flex_1().min_h_0().child(main_log);
         main_pane.style().flex_grow = Some(self.log_split * 2.);
         // The bottom edge of the draft row is the handle between the logs;
         // a double click restores the even split.
@@ -6744,6 +6737,7 @@ impl ChatWindow {
             }))
             .size_full()
             .flex()
+            .flex_col()
             .text_size(px(13.))
             .line_height(px(20.))
             .text_color(theme.text)
@@ -6774,9 +6768,18 @@ impl ChatWindow {
             // window handles About itself; `open_about` covers other windows.
             .on_action(cx.listener(|this, _: &About, _, cx| about::open(&this.i18n, cx)))
             .on_action(cx.listener(Self::paste_image))
-            .child(left)
-            .child(right_split)
-            .child(right)
+            // The search bar spans both columns above them.
+            .children(search_bar)
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(left)
+                    .child(right_split)
+                    .child(right),
+            )
             .when_some(
                 self.server_menu.as_ref().zip(server_menu),
                 |d, (at, menu)| d.child(snapped_menu(at.position, menu)),

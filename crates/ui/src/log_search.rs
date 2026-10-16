@@ -741,7 +741,7 @@ impl ChatWindow {
                 |this, window, cx| this.close_search(&CloseSearch, window, cx),
                 cx,
             ));
-        // The bar slides down from the top edge of the log: its box grows
+        // The bar slides down from the top edge of the window content: its box grows
         // over a moment while the bar itself keeps its size, so the log below
         // is pushed down rather than covered, and keeps its scroll position.
         Some(
