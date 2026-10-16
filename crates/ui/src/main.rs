@@ -2386,15 +2386,11 @@ impl ChatWindow {
                     .map(|avatar| self.avatars.lookup(&avatar))
                     .unwrap_or(avatars::Shown::None);
                 // Loading keeps the slot empty; no image falls back to the
-                // nickname's default icon.
-                let (image, default) = match shown {
-                    avatars::Shown::Image(image) => (Some(image), None),
-                    avatars::Shown::Pending => {
-                        pending = true;
-                        (None, None)
-                    }
-                    avatars::Shown::None => (None, Some(self.avatars.default_for(&nickname))),
-                };
+                // icon made from the nickname as the server reported it
+                // (the lowercased key only if the window is gone).
+                let (image, default, loading) =
+                    whois::slot_contents(shown, || self.avatars.default_for(&nickname));
+                pending |= loading;
                 (*handle, image, default, self.peer_avatars_on(*network))
             })
             .collect();

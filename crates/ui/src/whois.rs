@@ -133,12 +133,7 @@ impl WhoisWindow {
         cx: &mut Context<Self>,
     ) {
         let mut changed = swap_avatar(&mut self.avatar, &mut self.retired, avatar);
-        let same_default = match (&self.default_avatar, &default_avatar) {
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-            (None, None) => true,
-            _ => false,
-        };
-        if !same_default {
+        if !same_arc(&self.default_avatar, &default_avatar) {
             self.default_avatar = default_avatar;
             changed = true;
         }
@@ -578,23 +573,73 @@ fn swap_avatar(
     retired: &mut Vec<Arc<RenderImage>>,
     new: Option<Arc<RenderImage>>,
 ) -> bool {
-    let same = match (&*current, &new) {
-        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-        (None, None) => true,
-        _ => false,
-    };
-    if same {
+    if same_arc(&*current, &new) {
         return false;
     }
     retired.extend(std::mem::replace(current, new));
     true
 }
 
+/// Whether both hold the same allocation (or neither holds one).
+fn same_arc<T>(a: &Option<Arc<T>>, b: &Option<Arc<T>>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// What the icon slot gets for a lookup result: the image, or the default
+/// icon when there is none. Loading keeps the slot empty. The last value
+/// says a load is pending.
+pub fn slot_contents<D>(
+    shown: crate::avatars::Shown,
+    default: impl FnOnce() -> D,
+) -> (Option<Arc<RenderImage>>, Option<D>, bool) {
+    use crate::avatars::Shown;
+    match shown {
+        Shown::Image(image) => (Some(image), None, false),
+        Shown::Pending => (None, None, true),
+        Shown::None => (None, Some(default()), false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{WhoisInfo, channel_name, idle_text, swap_avatar, window_title};
+    use super::{
+        WhoisInfo, channel_name, idle_text, same_arc, slot_contents, swap_avatar, window_title,
+    };
+    use crate::avatars::Shown;
     use gpui::RenderImage;
     use std::sync::Arc;
+
+    #[test]
+    fn slot_shows_image_default_or_nothing_while_loading() {
+        let a = image();
+        let (img, default, pending) = slot_contents(Shown::Image(a.clone()), || "d");
+        assert!(Arc::ptr_eq(&img.unwrap(), &a));
+        assert!(default.is_none() && !pending);
+        let (img, default, pending) = slot_contents(Shown::Pending, || "d");
+        assert!(img.is_none() && default.is_none() && pending);
+        // No avatar, a failed fetch or avatars switched off.
+        let (img, default, pending) = slot_contents(Shown::None, || "d");
+        assert!(img.is_none() && default == Some("d") && !pending);
+    }
+
+    #[test]
+    fn default_is_only_built_when_needed() {
+        slot_contents(Shown::Pending, || -> () { panic!("built") });
+        slot_contents(Shown::Image(image()), || -> () { panic!("built") });
+    }
+
+    #[test]
+    fn same_arc_compares_identity() {
+        let (a, b) = (Arc::new(1), Arc::new(1));
+        assert!(same_arc(&Some(a.clone()), &Some(a.clone())));
+        assert!(!same_arc(&Some(a.clone()), &Some(b)));
+        assert!(!same_arc(&Some(a), &None));
+        assert!(same_arc::<i32>(&None, &None));
+    }
 
     fn image() -> Arc<RenderImage> {
         let buffer = image::RgbaImage::from_raw(1, 1, vec![0; 4]).unwrap();
