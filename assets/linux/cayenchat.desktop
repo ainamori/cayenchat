@@ -7,3 +7,4 @@ Icon=cayenchat
 Terminal=false
 Categories=Network;Chat;IRCClient;
 StartupNotify=true
+StartupWMClass=cayenchat
