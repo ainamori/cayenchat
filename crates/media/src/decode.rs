@@ -73,6 +73,22 @@ pub fn fit(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u3
     )
 }
 
+/// Whether `bytes` are a supported image small enough, in bytes and in
+/// header-declared pixels, to be kept as an avatar original.
+pub fn is_small_original(bytes: &[u8]) -> bool {
+    bytes.len() <= crate::ORIGINAL_MAX_BYTES
+        && format(bytes)
+            .ok()
+            .and_then(|format| {
+                ImageReader::with_format(Cursor::new(bytes), format)
+                    .into_dimensions()
+                    .ok()
+            })
+            .is_some_and(|(width, height)| {
+                width <= crate::ORIGINAL_MAX_SIDE && height <= crate::ORIGINAL_MAX_SIDE
+            })
+}
+
 pub fn thumbnail(
     bytes: &[u8],
     limits: &Limits,
