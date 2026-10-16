@@ -559,6 +559,11 @@ is offline. The chat window pushes its joined-channel set into WHOIS windows;
 they must not read the chat window while rendering, because opening a window
 renders synchronously inside the chat window's update and re-entry aborts on
 macOS.
+The WHOIS icon slot shows the user's avatar image (for ourselves
+`own_avatar_for`: the server-confirmed avatar, then the shared URL), nothing
+while it loads, and otherwise the nickname's default icon (the log's
+`default_for`). The chat window pushes both into the window; unmarked users and
+ourselves are never queried for it.
 The core preserves displayed rank across nick changes because the current IRC
 library drops user access levels on rename; a later MODE or completed NAMES
 snapshot replaces that carried rank.
