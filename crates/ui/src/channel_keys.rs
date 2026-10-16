@@ -12,11 +12,14 @@
 use std::collections::BTreeMap;
 
 use cayenchat_irc_core::{ConnectionConfig, valid_channel_key};
-use cayenchat_model::NetworkId;
+use cayenchat_model::{NetworkId, names::CaseMapping};
 use cayenchat_storage::{CredentialStore, Secret, SecretKey, ServerProfile};
 use gpui::{prelude::*, *};
 
-use crate::{ChatWindow, button_order, input::TextInput, secrets, settings_theme, theme};
+use crate::{
+    ChatWindow, button_order, input::TextInput, secrets, session::ServerSession, settings_theme,
+    theme,
+};
 
 /// JOINs tracked per server, so a long auto-join list does not grow it
 /// without bound.
@@ -26,6 +29,10 @@ const MAX_JOIN_CHANNELS: usize = 32;
 
 /// A JOIN waiting for the server's answer.
 pub struct KeyJoin {
+    /// The channel as it was requested. Names are compared under the
+    /// server's current casemapping, which may change after the JOIN was
+    /// sent (CASEMAPPING arrives in the first ISUPPORT).
+    pub channel: String,
     /// The key typed in the dialog for this attempt, if it came from there.
     pub typed: Option<Secret>,
     /// Whether to save `typed` once the JOIN worked.
@@ -39,10 +46,9 @@ pub struct KeyJoin {
 pub struct KeyPrompt {
     pub network: NetworkId,
     pub channel: String,
-    folded: String,
     stale: bool,
     rejected: bool,
-    remember: bool,
+    pub(crate) remember: bool,
     input: Entity<TextInput>,
     error: Option<String>,
     focus_pending: bool,
@@ -99,6 +105,7 @@ fn stored_channel_keys(
 
 impl ChatWindow {
     /// Sends `JOIN` for each channel with its saved key, if there is one.
+    /// The keys are read off the UI thread; the JOINs go out when they are in.
     pub(crate) fn join_channels(
         &mut self,
         network: NetworkId,
@@ -110,40 +117,84 @@ impl ChatWindow {
             .get(&network)
             .map(|session| session.profile_id.clone())
             .ok_or_else(|| self.i18n.text("not_connected"))?;
+        self.registered_connection(network)?;
         let store = secrets::store(cx);
-        for channel in channels {
-            let saved = store
-                .get(&SecretKey::channel_key(&profile, channel))
-                .ok()
-                .flatten()
-                .filter(|key| valid_channel_key(key.expose()));
-            self.registered_connection(network)?
-                .join_channel(channel, saved.as_ref().map(Secret::expose))?;
-            self.note_join(network, channel, saved.is_some());
-        }
+        let channels = channels.to_vec();
+        let reading = cx.background_spawn({
+            let profile = profile.clone();
+            async move {
+                channels
+                    .into_iter()
+                    .map(|channel| {
+                        let saved = store
+                            .get(&SecretKey::channel_key(&profile, &channel))
+                            .ok()
+                            .flatten()
+                            .filter(|key| valid_channel_key(key.expose()));
+                        (channel, saved)
+                    })
+                    .collect::<Vec<_>>()
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let keyed = reading.await;
+            let _ = this.update(cx, |this, cx| this.send_joins(network, &profile, keyed, cx));
+        })
+        .detach();
         Ok(())
+    }
+
+    /// Sends the JOINs whose keys were read, unless the connection went away
+    /// or became another server's meanwhile.
+    fn send_joins(
+        &mut self,
+        network: NetworkId,
+        profile: &str,
+        keyed: Vec<(String, Option<Secret>)>,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .sessions
+            .get(&network)
+            .is_none_or(|session| session.profile_id != profile)
+        {
+            return;
+        }
+        for (channel, saved) in keyed {
+            let sent = self.registered_connection(network).and_then(|connection| {
+                connection.join_channel(&channel, saved.as_ref().map(Secret::expose))
+            });
+            match sent {
+                Ok(()) => self.note_join(network, &channel, saved.is_some()),
+                Err(error) => {
+                    self.set_feedback(Some(error));
+                    break;
+                }
+            }
+        }
+        cx.notify();
     }
 
     /// Remembers a JOIN just sent: a refusal of a channel with no conversation
     /// yet can be shown, and a 475 for it asks for the key. `stale` says a
     /// saved key was sent.
     pub(crate) fn note_join(&mut self, network: NetworkId, channel: &str, stale: bool) {
-        let folded = self.state.casemapping(network).fold(channel);
+        let casemapping = self.state.casemapping(network);
+        let folded = casemapping.fold(channel);
         let Some(session) = self.sessions.get_mut(&network) else {
             return;
         };
         if session.pending_joins.len() >= 32 {
             session.pending_joins.clear();
         }
-        session.pending_joins.insert(folded.clone());
-        track(session, folded, KeyJoin::untyped(stale));
+        session.pending_joins.insert(folded);
+        track(session, KeyJoin::untyped(channel, stale));
     }
 
     /// A new connection registered: its auto-join JOINs (with the saved keys
     /// it was configured with) are about to be answered.
     pub(crate) fn start_key_tracking(&mut self, network: NetworkId) {
         self.key_prompts.retain(|prompt| prompt.network != network);
-        let casemapping = self.state.casemapping(network);
         let Some(session) = self.sessions.get_mut(&network) else {
             return;
         };
@@ -151,18 +202,13 @@ impl ChatWindow {
         let Some(config) = session.active_config.as_ref() else {
             return;
         };
-        let joins: Vec<(String, bool)> = config
+        let joins: Vec<KeyJoin> = config
             .channels
             .iter()
-            .map(|channel| {
-                (
-                    casemapping.fold(channel),
-                    config.channel_keys.contains_key(channel),
-                )
-            })
+            .map(|channel| KeyJoin::untyped(channel, config.channel_keys.contains_key(channel)))
             .collect();
-        for (folded, stale) in joins {
-            track(session, folded, KeyJoin::untyped(stale));
+        for join in joins {
+            track(session, join);
         }
     }
 
@@ -174,6 +220,25 @@ impl ChatWindow {
         }
     }
 
+    /// Takes the tracked JOIN of `channel`, if there is one.
+    fn take_key_join(&mut self, network: NetworkId, channel: &str) -> Option<KeyJoin> {
+        let casemapping = self.state.casemapping(network);
+        let folded = casemapping.fold(channel);
+        let session = self.sessions.get_mut(&network)?;
+        let index = session
+            .key_joins
+            .iter()
+            .position(|join| casemapping.fold(&join.channel) == folded)?;
+        Some(session.key_joins.remove(index))
+    }
+
+    fn key_prompt_index(&self, network: NetworkId, channel: &str) -> Option<usize> {
+        let casemapping = self.state.casemapping(network);
+        self.key_prompts.iter().position(|prompt| {
+            prompt.network == network && same_channel(casemapping, &prompt.channel, channel)
+        })
+    }
+
     /// The server refused our JOIN of `channel`. Only 475 for a JOIN we
     /// sent asks for a key; 471, 473, 474 and the like cannot be cured by one.
     pub(crate) fn key_join_refused(
@@ -183,23 +248,15 @@ impl ChatWindow {
         bad_key: bool,
         cx: &mut Context<Self>,
     ) {
-        let folded = self.state.casemapping(network).fold(channel);
-        let Some(join) = self
-            .sessions
-            .get_mut(&network)
-            .and_then(|session| session.key_joins.remove(&folded))
-        else {
+        let Some(join) = self.take_key_join(network, channel) else {
             return;
         };
         if !bad_key {
             return;
         }
         let rejected = join.typed.is_some();
-        if let Some(prompt) = self
-            .key_prompts
-            .iter_mut()
-            .find(|prompt| prompt.network == network && prompt.folded == folded)
-        {
+        if let Some(index) = self.key_prompt_index(network, channel) {
+            let prompt = &mut self.key_prompts[index];
             prompt.stale |= join.stale;
             prompt.rejected = rejected;
             prompt.focus_pending = true;
@@ -210,10 +267,10 @@ impl ChatWindow {
         self.key_prompts.push(KeyPrompt {
             network,
             channel: channel.to_owned(),
-            folded,
             stale: join.stale,
             rejected,
-            remember: true,
+            // The choice made for the attempt that was refused stands.
+            remember: if rejected { join.remember } else { true },
             input,
             error: None,
             focus_pending: true,
@@ -226,60 +283,133 @@ impl ChatWindow {
     }
 
     /// We are in `channel`: the JOIN worked, so the key typed for it may now
-    /// be saved, or a saved key that stopped working removed.
+    /// be saved, or a saved key that stopped working removed. The store is
+    /// written off the UI thread.
     pub(crate) fn key_join_succeeded(
         &mut self,
         network: NetworkId,
         channel: &str,
         cx: &mut Context<Self>,
     ) {
-        let folded = self.state.casemapping(network).fold(channel);
-        let Some(session) = self.sessions.get_mut(&network) else {
+        let Some(profile) = self
+            .sessions
+            .get(&network)
+            .map(|session| session.profile_id.clone())
+        else {
             return;
         };
-        let profile = session.profile_id.clone();
-        let Some(join) = session.key_joins.remove(&folded) else {
+        let Some(join) = self.take_key_join(network, channel) else {
             return;
+        };
+        let change = match (join.typed, join.remember) {
+            (Some(typed), true) => StoreChange::Save(typed),
+            (Some(_), false) if join.stale => StoreChange::Forget,
+            _ => return,
         };
         let store = secrets::store(cx);
         let key = SecretKey::channel_key(&profile, channel);
-        let failure = match (&join.typed, join.remember) {
-            (Some(typed), true) => store
-                .set(&key, typed)
-                .err()
-                .map(|error| ("channel_key_save_failed", error)),
-            _ if join.stale && join.typed.is_some() => store
-                .delete(&key)
-                .err()
-                .map(|error| ("channel_key_forget_failed", error)),
-            _ => None,
+        let channel = channel.to_owned();
+        let remembered = match &change {
+            StoreChange::Save(typed) => Some(typed.expose().to_owned()),
+            StoreChange::Forget => None,
         };
-        let saved = match (&join.typed, join.remember, &failure) {
-            (Some(typed), true, None) => Some(Some(typed.expose().to_owned())),
-            (Some(_), false, None) if join.stale => Some(None),
-            _ => None,
-        };
-        if let Some(saved) = saved {
-            self.sync_config_key(network, channel, saved);
+        let writing = cx.background_spawn(async move {
+            match change {
+                StoreChange::Save(typed) => store
+                    .set(&key, &typed)
+                    .map_err(|error| ("channel_key_save_failed", error)),
+                StoreChange::Forget => store
+                    .delete(&key)
+                    .map_err(|error| ("channel_key_forget_failed", error)),
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = writing.await;
+            let _ = this.update(cx, |this, cx| {
+                this.key_store_written(network, &profile, &channel, remembered, result, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// The store answered a save or removal.
+    fn key_store_written(
+        &mut self,
+        network: NetworkId,
+        profile: &str,
+        channel: &str,
+        key: Option<String>,
+        result: Result<(), (&'static str, cayenchat_storage::CredentialError)>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(()) => {
+                // Only the connection the key was confirmed on is updated.
+                if self
+                    .sessions
+                    .get(&network)
+                    .is_some_and(|session| session.profile_id == profile)
+                {
+                    self.sync_config_key(network, channel, key);
+                }
+            }
+            Err((message, error)) => {
+                let text = self.i18n.format(
+                    message,
+                    &[
+                        (
+                            "channel",
+                            &cayenchat_model::display::neutralize_bidi(channel),
+                        ),
+                        ("error", &secrets::error_text(&self.i18n, &error)),
+                    ],
+                );
+                self.state.append_server_message(network, text.clone());
+                self.set_feedback(Some(text));
+            }
         }
-        if let Some((message, error)) = failure {
-            let text = self.i18n.format(
-                message,
-                &[
-                    (
-                        "channel",
-                        &cayenchat_model::display::neutralize_bidi(channel),
-                    ),
-                    ("error", &secrets::error_text(&self.i18n, &error)),
-                ],
-            );
-            self.state.append_server_message(network, text.clone());
-            self.set_feedback(Some(text));
-        }
+        cx.notify();
+    }
+
+    /// Gives the running connection's configuration the saved keys of its
+    /// profile's auto-join channels, read off the UI thread, so reconnects
+    /// use them.
+    pub(crate) fn refresh_stored_keys(
+        &mut self,
+        network: NetworkId,
+        profile: &ServerProfile,
+        cx: &mut Context<Self>,
+    ) {
+        let store = secrets::store(cx);
+        let profile = profile.clone();
+        let reading = cx.background_spawn({
+            let profile = profile.clone();
+            async move { stored_channel_keys(&profile, &store) }
+        });
+        cx.spawn(async move |this, cx| {
+            let keys = reading.await;
+            let _ = this.update(cx, |this, _| {
+                let Some(session) = this.sessions.get_mut(&network) else {
+                    return;
+                };
+                if session.profile_id != profile.id {
+                    return;
+                }
+                if let Some(config) = session.active_config.as_mut() {
+                    let before = std::mem::replace(&mut config.channel_keys, keys);
+                    if config.validate().is_err() {
+                        config.channel_keys = before;
+                        config.channel_keys.clear();
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     /// Keeps the configuration reconnects reuse in step with the store.
     fn sync_config_key(&mut self, network: NetworkId, channel: &str, key: Option<String>) {
+        let casemapping = self.state.casemapping(network);
         let Some(config) = self
             .sessions
             .get_mut(&network)
@@ -290,7 +420,7 @@ impl ChatWindow {
         let Some(name) = config
             .channels
             .iter()
-            .find(|name| name.eq_ignore_ascii_case(channel))
+            .find(|name| same_channel(casemapping, name, channel))
             .cloned()
         else {
             return;
@@ -310,21 +440,17 @@ impl ChatWindow {
         self.key_prompts
             .iter()
             .find(|prompt| prompt.input.read(cx).focus_handle(cx).is_focused(window))
-            .map(|prompt| (prompt.network, prompt.folded.clone()))
+            .map(|prompt| (prompt.network, prompt.channel.clone()))
     }
 
     pub(crate) fn submit_key_prompt(
         &mut self,
         network: NetworkId,
-        folded: &str,
+        channel: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(index) = self
-            .key_prompts
-            .iter()
-            .position(|prompt| prompt.network == network && prompt.folded == folded)
-        else {
+        let Some(index) = self.key_prompt_index(network, channel) else {
             return;
         };
         let prompt = &self.key_prompts[index];
@@ -344,16 +470,16 @@ impl ChatWindow {
         };
         match sent {
             Ok(()) => {
-                let session = self.sessions.get_mut(&network);
-                if let Some(session) = session {
+                let casemapping = self.state.casemapping(network);
+                if let Some(session) = self.sessions.get_mut(&network) {
                     if session.pending_joins.len() >= 32 {
                         session.pending_joins.clear();
                     }
-                    session.pending_joins.insert(folded.to_owned());
+                    session.pending_joins.insert(casemapping.fold(&channel));
                     track(
                         session,
-                        folded.to_owned(),
                         KeyJoin {
+                            channel,
                             typed: Some(key),
                             remember,
                             stale,
@@ -371,15 +497,11 @@ impl ChatWindow {
     pub(crate) fn cancel_key_prompt(
         &mut self,
         network: NetworkId,
-        folded: &str,
+        channel: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(index) = self
-            .key_prompts
-            .iter()
-            .position(|prompt| prompt.network == network && prompt.folded == folded)
-        {
+        if let Some(index) = self.key_prompt_index(network, channel) {
             self.close_key_prompt(index, window, cx);
         }
         cx.notify();
@@ -436,7 +558,7 @@ impl ChatWindow {
             .gap_2();
         for (index, prompt) in self.key_prompts.iter().enumerate() {
             let network = prompt.network;
-            let folded = prompt.folded.clone();
+            let channel = prompt.channel.clone();
             let server = self
                 .state
                 .networks()
@@ -459,8 +581,8 @@ impl ChatWindow {
                 None
             };
             let remember = prompt.remember;
-            let (submit_folded, cancel_folded, toggle_folded) =
-                (folded.clone(), folded.clone(), folded.clone());
+            let (submit_channel, cancel_channel, toggle_channel) =
+                (channel.clone(), channel.clone(), channel);
             dialog = dialog
                 .when(index > 0, |d| {
                     d.child(div().border_t_1().border_color(theme.separator))
@@ -486,11 +608,9 @@ impl ChatWindow {
                                 .child(settings_theme::checkbox(remember, true, cx))
                                 .child(self.i18n.text("key_prompt_remember"))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(prompt) = this
-                                        .key_prompts
-                                        .iter_mut()
-                                        .find(|p| p.network == network && p.folded == toggle_folded)
-                                    {
+                                    if let Some(prompt) = this.key_prompts.iter_mut().find(|p| {
+                                        p.network == network && p.channel == toggle_channel
+                                    }) {
                                         prompt.remember = !prompt.remember;
                                     }
                                     cx.notify();
@@ -512,7 +632,7 @@ impl ChatWindow {
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.submit_key_prompt(
                                                 network,
-                                                &submit_folded,
+                                                &submit_channel,
                                                 window,
                                                 cx,
                                             )
@@ -530,7 +650,7 @@ impl ChatWindow {
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.cancel_key_prompt(
                                                 network,
-                                                &cancel_folded,
+                                                &cancel_channel,
                                                 window,
                                                 cx,
                                             )
@@ -550,8 +670,9 @@ impl KeyPrompt {
 }
 
 impl KeyJoin {
-    fn untyped(stale: bool) -> Self {
+    fn untyped(channel: &str, stale: bool) -> Self {
         Self {
+            channel: channel.to_owned(),
             typed: None,
             remember: false,
             stale,
@@ -559,8 +680,28 @@ impl KeyJoin {
     }
 }
 
-fn track(session: &mut crate::session::ServerSession, folded: String, join: KeyJoin) {
-    if session.key_joins.len() < MAX_TRACKED || session.key_joins.contains_key(&folded) {
-        session.key_joins.insert(folded, join);
+/// Tracks `join`, replacing an earlier one for the same channel. Only names
+/// differing in ASCII case count as the same here: `#x[` and `#x{` are one
+/// channel under the default mapping but two under `ascii`, which the server
+/// may announce later.
+fn track(session: &mut ServerSession, join: KeyJoin) {
+    let same = session
+        .key_joins
+        .iter()
+        .position(|other| other.channel.eq_ignore_ascii_case(&join.channel));
+    match same {
+        Some(index) => session.key_joins[index] = join,
+        None if session.key_joins.len() < MAX_TRACKED => session.key_joins.push(join),
+        None => {}
     }
+}
+
+fn same_channel(casemapping: CaseMapping, a: &str, b: &str) -> bool {
+    casemapping.fold(a) == casemapping.fold(b)
+}
+
+/// What the store is asked to do once a JOIN worked.
+enum StoreChange {
+    Save(Secret),
+    Forget,
 }

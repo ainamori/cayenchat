@@ -1252,10 +1252,20 @@ stands. Saved keys are used by manual joins (`/join #a,#b` without a key, the
 menus and prompts) and, at connection start, by the auto-join list; `/join
 #channel key` is sent as typed and never saved.
 
-- **Tracking.** `ServerSession::key_joins` (case-folded with the server's
-  CASEMAPPING, at most 256) holds the JOINs awaiting an answer; it is cleared on
+- **Tracking.** `ServerSession::key_joins` (at most 256) holds the JOINs
+  awaiting an answer with the channel name as requested; names are compared
+  under the CASEMAPPING in force when the answer arrives, so a mapping announced
+  after registration (`001` then `005`) still matches. It is cleared on
   registration and disconnect, so a late answer of an old connection opens no
   dialog. Auto-join channels are added when the connection registers.
+- **Off the UI thread.** Reading saved keys for a manual `/join`, saving or
+  deleting a key after our JOIN, and refreshing the running connection's keys
+  after the auto-join list changes run in background tasks; the results are
+  applied only if the session still belongs to the same profile. The keys of a
+  connection started from saved settings are read while its configuration is
+  built, like the passwords it already reads there.
+- **Remember choice.** A dialog reopened after a refused typed key keeps the
+  checkbox the user chose for that attempt.
 - **Storage name.** The channel is lowercased by ASCII only, because the
   server's case mapping is unknown when a connection starts; a server that folds
   more finds no saved key and asks for one.

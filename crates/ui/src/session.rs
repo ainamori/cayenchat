@@ -36,9 +36,9 @@ pub struct ServerSession {
     /// Case-folded channels this client asked to join and has no answer for
     /// yet, bounded, so a refusal of a new channel can be shown.
     pub pending_joins: HashSet<String>,
-    /// Case-folded channels whose JOIN the server has not answered, for the
+    /// Channels whose JOIN the server has not answered, for the
     /// channel key dialog and for saving a key; bounded.
-    pub key_joins: HashMap<String, crate::channel_keys::KeyJoin>,
+    pub key_joins: Vec<crate::channel_keys::KeyJoin>,
     /// Parsed IRC transcript and connection stages, bounded.
     pub diagnostics: VecDeque<String>,
     pub connection_started: Option<Instant>,
@@ -90,7 +90,7 @@ impl ServerSession {
             own_nickname: None,
             pending_whois: HashSet::new(),
             pending_joins: HashSet::new(),
-            key_joins: HashMap::new(),
+            key_joins: Vec::new(),
             diagnostics: VecDeque::new(),
             connection_started: None,
             disconnected_at: None,

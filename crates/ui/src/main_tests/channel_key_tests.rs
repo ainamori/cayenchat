@@ -132,31 +132,28 @@ fn a_typed_key_is_saved_only_after_our_join(cx: &mut TestAppContext) {
     chat.update(cx, |chat, cx| {
         event(chat, registered(), cx);
         let join = KeyJoin {
+            channel: "#secret".into(),
             typed: Some(Secret::new("hunter2")),
             remember: true,
             stale: false,
         };
-        chat.sessions
-            .get_mut(&NET)
-            .unwrap()
-            .key_joins
-            .insert("#secret".into(), join);
+        chat.sessions.get_mut(&NET).unwrap().key_joins.push(join);
         assert_eq!(key_of(&store, chat), None, "sending saves nothing");
         // The key is wrong again: nothing is saved and the dialog returns.
         event(chat, refused("#secret", true), cx);
         assert_eq!(key_of(&store, chat), None);
         assert_eq!(chat.key_prompts.len(), 1);
         let join = KeyJoin {
+            channel: "#secret".into(),
             typed: Some(Secret::new("hunter2")),
             remember: true,
             stale: false,
         };
-        chat.sessions
-            .get_mut(&NET)
-            .unwrap()
-            .key_joins
-            .insert("#secret".into(), join);
+        chat.sessions.get_mut(&NET).unwrap().key_joins.push(join);
         event(chat, joined("#SECRET"), cx);
+    });
+    cx.run_until_parked();
+    chat.update(cx, |chat, _| {
         assert_eq!(key_of(&store, chat).as_deref(), Some("hunter2"));
         let config = chat.sessions[&NET].active_config.as_ref().unwrap();
         assert_eq!(config.channel_keys["#Secret"], "hunter2");
@@ -172,15 +169,20 @@ fn without_remembering_nothing_is_saved_and_a_stale_key_is_removed(cx: &mut Test
         event(chat, refused("#secret", true), cx);
         assert_eq!(chat.key_prompts.len(), 1);
         assert_eq!(key_of(&store, chat).as_deref(), Some("old"));
-        chat.sessions.get_mut(&NET).unwrap().key_joins.insert(
-            "#secret".into(),
-            KeyJoin {
+        chat.sessions
+            .get_mut(&NET)
+            .unwrap()
+            .key_joins
+            .push(KeyJoin {
+                channel: "#secret".into(),
                 typed: Some(Secret::new("new")),
                 remember: false,
                 stale: true,
-            },
-        );
+            });
         event(chat, joined("#secret"), cx);
+    });
+    cx.run_until_parked();
+    chat.update(cx, |chat, _| {
         assert_eq!(key_of(&store, chat), None);
         let config = chat.sessions[&NET].active_config.as_ref().unwrap();
         assert!(config.channel_keys.is_empty());
@@ -211,15 +213,21 @@ fn a_failing_store_is_reported_and_the_join_stands(cx: &mut TestAppContext) {
     });
     chat.update(cx, |chat, cx| {
         event(chat, registered(), cx);
-        chat.sessions.get_mut(&NET).unwrap().key_joins.insert(
-            "#secret".into(),
-            KeyJoin {
+        chat.sessions.get_mut(&NET).unwrap().key_joins.clear();
+        chat.sessions
+            .get_mut(&NET)
+            .unwrap()
+            .key_joins
+            .push(KeyJoin {
+                channel: "#secret".into(),
                 typed: Some(Secret::new("hunter2")),
                 remember: true,
                 stale: false,
-            },
-        );
+            });
         event(chat, joined("#secret"), cx);
+    });
+    cx.run_until_parked();
+    chat.update(cx, |chat, _| {
         let log: Vec<&str> = chat
             .state
             .server_messages(NET)
@@ -282,4 +290,76 @@ fn only_a_plain_join_of_channels_is_looked_up() {
     ] {
         assert_eq!(plain_join_channels(text), None, "{text}");
     }
+}
+
+#[gpui::test]
+fn the_choice_not_to_remember_survives_a_refused_retry(cx: &mut TestAppContext) {
+    let (chat, store, cx) = open_chat(None, cx);
+    chat.update(cx, |chat, cx| {
+        event(chat, registered(), cx);
+        event(chat, refused("#secret", true), cx);
+        assert!(chat.key_prompts[0].remember, "a new dialog starts ON");
+        chat.key_prompts[0].remember = false;
+        // The dialog is submitted (and closed); the key is wrong.
+        chat.key_prompts.clear();
+        chat.sessions
+            .get_mut(&NET)
+            .unwrap()
+            .key_joins
+            .push(KeyJoin {
+                channel: "#secret".into(),
+                typed: Some(Secret::new("wrong")),
+                remember: false,
+                stale: false,
+            });
+        event(chat, refused("#secret", true), cx);
+        assert!(!chat.key_prompts[0].remember);
+        // The right key, with the choice carried over, saves nothing.
+        chat.key_prompts.clear();
+        chat.sessions
+            .get_mut(&NET)
+            .unwrap()
+            .key_joins
+            .push(KeyJoin {
+                channel: "#secret".into(),
+                typed: Some(Secret::new("right")),
+                remember: false,
+                stale: false,
+            });
+        event(chat, joined("#secret"), cx);
+    });
+    cx.run_until_parked();
+    chat.update(cx, |chat, _| assert_eq!(key_of(&store, chat), None));
+}
+
+#[gpui::test]
+fn names_are_matched_under_the_casemapping_announced_later(cx: &mut TestAppContext) {
+    let (chat, _store, cx) = open_chat(None, cx);
+    chat.update(cx, |chat, cx| {
+        // 001 arrives under the default mapping, the first 005 changes it.
+        chat.sessions
+            .get_mut(&NET)
+            .unwrap()
+            .active_config
+            .as_mut()
+            .unwrap()
+            .channels = vec!["#x[".into(), "#x{".into(), "#needs[".into()];
+        event(chat, registered(), cx);
+        event(
+            chat,
+            Event::CaseMapping(cayenchat_model::names::CaseMapping::Ascii),
+            cx,
+        );
+        // `[` and `{` are different channels now; each has its own JOIN.
+        assert_eq!(chat.sessions[&NET].key_joins.len(), 3);
+        event(chat, refused("#x{", true), cx);
+        assert_eq!(chat.key_prompts.len(), 1);
+        assert_eq!(chat.sessions[&NET].key_joins.len(), 2);
+        event(chat, refused("#x[", true), cx);
+        assert_eq!(chat.key_prompts.len(), 2);
+        // Same name under ascii: matched, with case ignored.
+        event(chat, refused("#NEEDS[", true), cx);
+        assert_eq!(chat.key_prompts.len(), 3);
+        assert!(chat.sessions[&NET].key_joins.is_empty());
+    });
 }

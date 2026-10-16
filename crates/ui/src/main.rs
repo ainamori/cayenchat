@@ -1806,6 +1806,7 @@ impl ChatWindow {
     fn apply_servers(&mut self, settings: Settings, cx: &mut Context<Self>) {
         let mut networks = Vec::new();
         let mut realname_errors = Vec::new();
+        let mut key_refreshes = Vec::new();
         for profile in settings.ordered_servers() {
             let id = match self.network_of_profile(&profile.id) {
                 Some(id) => id,
@@ -1828,7 +1829,7 @@ impl ChatWindow {
                     config.shared_avatar = shared.clone();
                     // The auto-join list too: reconnects join the saved one.
                     config.channels = profile.channels();
-                    channel_keys::use_stored_keys(config, profile, &secrets::store(cx));
+                    key_refreshes.push((id, profile.clone()));
                     config.channel_encodings = channel_encodings(profile);
                     // A new realname is sent at once with SETNAME when the
                     // connection has it; the server's answer says otherwise.
@@ -1854,6 +1855,9 @@ impl ChatWindow {
                 name: profile.host.clone(),
                 channels: profile.channels(),
             });
+        }
+        for (id, profile) in key_refreshes {
+            self.refresh_stored_keys(id, &profile, cx);
         }
         for (id, error) in realname_errors {
             self.state.append_server_message(id, error);
@@ -2821,7 +2825,7 @@ impl ChatWindow {
                     settings.servers.iter().find(|p| p.id == profile_id),
                 ) {
                     config.channels = profile.channels();
-                    channel_keys::use_stored_keys(config, profile, &secrets::store(cx));
+                    self.refresh_stored_keys(menu.network, profile, cx);
                 }
                 None
             }
