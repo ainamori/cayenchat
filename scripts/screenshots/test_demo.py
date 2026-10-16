@@ -3,7 +3,7 @@
 
     python3 -m unittest discover -s scripts/screenshots -p 'test_*.py'
 """
-import argparse, os, shutil, sys, tempfile, time, unittest
+import argparse, json, os, shutil, sys, tempfile, time, unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -62,13 +62,23 @@ class Build(unittest.TestCase):
             file.write(content)
         return path
 
-    def test_no_app_is_the_fresh_build(self):
-        self.assertEqual(self.resolve(None), self.built)
+    def test_no_app_runs_a_staged_copy_of_the_fresh_build(self):
+        staged = self.resolve(None)
+        self.assertNotEqual(staged, self.built)
+        self.assertEqual(demo.sha256(staged), demo.sha256(self.built))
 
-    def test_a_copy_of_the_build_is_accepted(self):
+    def test_a_copy_of_the_build_is_accepted_but_the_staged_file_runs(self):
         copy = os.path.join(self.scratch.name, "copy")
         shutil.copyfile(self.built, copy)
-        self.assertEqual(self.resolve(copy), copy)
+        self.assertNotEqual(self.resolve(copy), copy)
+
+    def test_the_staged_copy_has_the_current_catalogs_beside_it(self):
+        staged = self.resolve(None)
+        for name in ("en.json", "ja.json"):
+            with open(os.path.join(demo.ROOT, "locales", name), "rb") as file:
+                current = file.read()
+            with open(os.path.join(os.path.dirname(staged), "locales", name), "rb") as file:
+                self.assertEqual(file.read(), current)
 
     def test_an_old_build_with_a_new_time_is_refused(self):
         old = self.other(b"demo build of older sources")
@@ -83,6 +93,21 @@ class Build(unittest.TestCase):
     def test_a_missing_binary_is_refused(self):
         with self.assertRaises(SystemExit):
             self.resolve(os.path.join(self.scratch.name, "missing"))
+
+
+class Artifact(unittest.TestCase):
+    def test_the_executable_is_the_one_cargo_reports(self):
+        messages = "\n".join(json.dumps(message) for message in [
+            {"reason": "compiler-artifact", "executable": "/dep/tool",
+             "target": {"name": "tool", "kind": ["bin"]}},
+            {"reason": "compiler-artifact", "executable": "/elsewhere/release/cayenchat",
+             "target": {"name": "cayenchat", "kind": ["bin"]}},
+            {"reason": "build-finished", "success": True},
+        ]) + "\nnot json"
+        self.assertEqual(demo.executable_of(messages), "/elsewhere/release/cayenchat")
+
+    def test_no_artifact_is_none(self):
+        self.assertIsNone(demo.executable_of('{"reason": "build-finished"}'))
 
 
 if __name__ == "__main__":

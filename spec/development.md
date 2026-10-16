@@ -1195,8 +1195,14 @@ is a separate option of `settings()`.
 `demo.py run` and `readme` always build the `demo` build of the checked-out
 sources first (`cargo build --release --locked -p cayenchat-ui --features
 demo`; cargo decides from file contents what is out of date, so `locales/`
-and `assets/` count too). An `--app` is accepted only when it is byte for byte
-(SHA-256) that build, e.g. a copy of it; nothing is guessed from file times or
+and `assets/` count too) and take the executable from cargo's own JSON
+artifact message, so `CARGO_TARGET_DIR` or `build.target` do not matter. The
+picture is taken from a staged copy in `target/tmp/demo-app/` with the current
+`locales/` beside it, because the app prefers catalogs next to the executable
+(or in a bundle or `/usr/share`) over the compiled-in ones. An `--app` is
+accepted only when it is byte for byte
+(SHA-256) that build, e.g. a copy of it, and the staged copy runs instead of
+it; nothing is guessed from file times or
 strings, so an old build, another feature set such as `test-build` or a
 rebuilt-by-copying binary is refused. A signed or repackaged Windows/macOS
 bundle differs from the build and is refused too: take the store pictures

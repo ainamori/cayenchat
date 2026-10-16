@@ -448,24 +448,60 @@ def sha256(path):
     return digest.hexdigest()
 
 
+def executable_of(messages):
+    """The executable cargo reports for the `cayenchat` binary in its JSON
+    messages (wherever target-dir or build.target put it)."""
+    found = None
+    for line in messages.splitlines():
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if (message.get("reason") == "compiler-artifact" and message.get("executable")
+                and message.get("target", {}).get("name") == "cayenchat"
+                and "bin" in message["target"].get("kind", [])):
+            found = message["executable"]
+    return found
+
+
 def build_demo():
     """Builds the `demo` build of the checked-out sources (cargo decides what
-    is out of date, from the file contents it tracks) and returns it."""
-    subprocess.run(["cargo", "build", "--release", "--locked", "-p", "cayenchat-ui",
-                    "--features", "demo"], cwd=ROOT, check=True)
-    return os.path.join(ROOT, "target", "release",
-                        "cayenchat.exe" if os.name == "nt" else "cayenchat")
+    is out of date, from the file contents it tracks) and returns the
+    executable cargo itself reports for that build."""
+    result = subprocess.run(
+        ["cargo", "build", "--release", "--locked", "-p", "cayenchat-ui", "--features", "demo",
+         "--message-format=json-render-diagnostics"],
+        cwd=ROOT, check=True, stdout=subprocess.PIPE, text=True)
+    built = executable_of(result.stdout)
+    if not built or not os.path.isfile(built):
+        sys.exit("cargo did not report the cayenchat executable of the demo build")
+    return built
+
+
+def stage(built):
+    """A private copy of the build with the current `locales/` beside it. The
+    app prefers catalogs next to the executable, in a bundle or installed
+    under /usr/share over the ones compiled in, so the picture is taken from
+    a copy whose neighbours are the current sources."""
+    directory = os.path.join(ROOT, "target", "tmp", "demo-app")
+    shutil.rmtree(directory, ignore_errors=True)
+    os.makedirs(directory)
+    staged = os.path.join(directory, os.path.basename(built))
+    shutil.copy2(built, staged)
+    shutil.copytree(os.path.join(ROOT, "locales"), os.path.join(directory, "locales"))
+    return staged
 
 
 def resolve_app(args):
-    """The binary to run: the demo build made now. An --app is accepted only
-    when it is byte for byte that build (a copy of it), so it has the current
-    sources and the `demo` feature; nothing is guessed from times or strings."""
+    """The binary to run: a staged copy of the demo build made now. An --app
+    is accepted only when it is byte for byte that build, so it has the current
+    sources and the `demo` feature; nothing is guessed from times or strings.
+    The file that runs is always the staged copy, not --app."""
     built = build_demo()
     if args.app and (not os.path.isfile(args.app) or sha256(args.app) != sha256(built)):
         sys.exit(f"refusing {args.app}: it is not identical to the demo build of the current "
                  f"sources ({built}); copy that file, or leave out --app")
-    return args.app or built
+    return stage(built)
 
 
 def provenance(app, args, size):
