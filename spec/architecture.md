@@ -276,6 +276,15 @@ The window's position and size, whether it is maximized, and the pane sizes
 are saved to `window.json` (D037) and restored at startup by
 `ui::window_layout`, which fits the saved rectangle to the connected displays.
 
+A newly opened settings window (#380) is placed by
+`window_layout::secondary_bounds` on the chat window's display, on Windows and
+macOS (`WindowOptions.display_id`): horizontally centered on the chat window,
+48 px below its top (above it when that would leave the display), then moved
+onto the whole display, not its work area. On Linux, GPUI cannot place windows,
+so it keeps the usual centered place; shrinking below the minimum size and
+work-area (taskbar, Dock) avoidance are not done. An open settings window is
+only raised. The quit question is drawn inside the chat window (`quit_dialog`).
+
 Pane boundaries use `ui::splitter`: a thin handle that turns pointer drags
 into a pane size within the owner's minimum and maximum, measured from where
 the button went down (GPUI starts a drag only after a small movement). The

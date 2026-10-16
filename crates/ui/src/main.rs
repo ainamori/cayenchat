@@ -3616,12 +3616,29 @@ impl ChatWindow {
             settings.selected_server = profile;
         }
         let owner = window.window_handle().downcast::<ChatWindow>().unwrap();
-        let bounds = Bounds::centered(None, size(px(900.), px(750.)), cx);
+        let min_size = size(px(760.), px(540.));
+        let wanted = size(px(900.), px(750.));
+        // Beside the chat window on its own display. Windows and macOS only:
+        // GPUI cannot place a window on Linux, where the usual place stays.
+        let owner_display = window.display(cx);
+        let (bounds, display_id) = match owner_display {
+            Some(display) if cfg!(any(target_os = "windows", target_os = "macos")) => (
+                window_layout::secondary_bounds(
+                    window.bounds(),
+                    display.bounds(),
+                    wanted,
+                    min_size,
+                ),
+                Some(display.id()),
+            ),
+            _ => (Bounds::centered(None, wanted, cx), None),
+        };
         match cx.open_window(
             WindowOptions {
                 app_id: Some(APP_ID.into()),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(760.), px(540.))),
+                display_id,
+                window_min_size: Some(min_size),
                 titlebar: Some(TitlebarOptions {
                     title: Some(self.i18n.text("settings_title").into()),
                     ..Default::default()

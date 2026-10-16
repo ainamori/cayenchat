@@ -70,10 +70,105 @@ pub fn restored_bounds(
     })
 }
 
+/// How much of the owner's top (title bar and a little more) a window placed
+/// below or above it overlaps.
+const OWNER_OVERLAP: f32 = 48.;
+
+/// Where a new secondary window of `wanted` size goes relative to `owner`.
+///
+/// Its horizontal center is the owner's. It sits a little below the owner's
+/// top, or above the owner when that would leave the display, and is finally
+/// moved onto the whole `display` (not its work area). A window larger than the
+/// display is shrunk to it but never below `min`. `owner` and `display` must
+/// be in the same coordinate space.
+pub fn secondary_bounds(
+    owner: Bounds<Pixels>,
+    display: Bounds<Pixels>,
+    wanted: Size<Pixels>,
+    min: Size<Pixels>,
+) -> Bounds<Pixels> {
+    let (left, top) = (f32::from(display.left()), f32::from(display.top()));
+    let (screen_width, screen_height) = (
+        f32::from(display.size.width),
+        f32::from(display.size.height),
+    );
+    let width = f32::from(wanted.width)
+        .min(screen_width)
+        .max(f32::from(min.width));
+    let height = f32::from(wanted.height)
+        .min(screen_height)
+        .max(f32::from(min.height));
+    let center = f32::from(owner.origin.x) + f32::from(owner.size.width) / 2.;
+    let below = f32::from(owner.origin.y) + OWNER_OVERLAP;
+    let y = if below + height <= top + screen_height {
+        below
+    } else {
+        f32::from(owner.origin.y) + OWNER_OVERLAP - height
+    };
+    let x = (center - width / 2.)
+        .min(left + screen_width - width)
+        .max(left);
+    let y = y.min(top + screen_height - height).max(top);
+    Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use cayenchat_storage::layout::WindowRect;
+
+    fn secondary(
+        owner: (f32, f32, f32, f32),
+        screen: (f32, f32, f32, f32),
+    ) -> (f32, f32, f32, f32) {
+        let rect = |(x, y, w, h): (f32, f32, f32, f32)| display(x, y, w, h);
+        let b = secondary_bounds(
+            rect(owner),
+            rect(screen),
+            size(px(900.), px(750.)),
+            size(px(760.), px(540.)),
+        );
+        (
+            f32::from(b.origin.x),
+            f32::from(b.origin.y),
+            f32::from(b.size.width),
+            f32::from(b.size.height),
+        )
+    }
+
+    #[test]
+    fn a_secondary_window_is_centered_on_the_owner_a_little_below_its_top() {
+        let got = secondary((500., 100., 960., 600.), (0., 0., 1920., 1080.));
+        assert_eq!(got, (530., 148., 900., 750.));
+    }
+
+    #[test]
+    fn a_secondary_window_goes_above_the_owner_when_below_leaves_the_display() {
+        // 848 + 750 > 1100: above, its bottom 48 below the owner's top.
+        let got = secondary((500., 800., 960., 300.), (0., 0., 1920., 1100.));
+        assert_eq!(got, (530., 98., 900., 750.));
+    }
+
+    #[test]
+    fn a_secondary_window_stays_on_the_display_at_edges_and_on_other_monitors() {
+        let screens = (0., 0., 1920., 1080.);
+        assert_eq!(
+            secondary((0., 0., 400., 300.), screens),
+            (0., 48., 900., 750.)
+        );
+        assert_eq!(
+            secondary((1600., 700., 320., 380.), screens),
+            (1020., 0., 900., 750.)
+        );
+        // A monitor to the left with negative coordinates.
+        let got = secondary((-1200., 50., 800., 600.), (-1280., 0., 1280., 1024.));
+        assert_eq!(got, (-1250., 98., 900., 750.));
+        // Shrunk to a small display, but not below the minimum.
+        let got = secondary((0., 0., 800., 600.), (0., 0., 800., 600.));
+        assert_eq!(got, (0., 0., 800., 600.));
+        let got = secondary((0., 0., 500., 400.), (0., 0., 700., 500.));
+        assert_eq!(got, (0., 0., 760., 540.));
+    }
 
     const MIN: fn() -> Size<Pixels> = || size(px(320.), px(240.));
 
