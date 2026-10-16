@@ -42,6 +42,8 @@ pub fn is_sensitive(text: &str, private_peer: Option<&str>) -> bool {
     match verb.as_str() {
         "OPER" | "PASS" | "AUTH" | "AUTHENTICATE" | "NS" | "NICKSERV" | "CS" | "CHANSERV"
         | "AUTHSERV" => true,
+        // `/join #channel key`: the second word is a channel key.
+        "JOIN" => words.nth(1).is_some(),
         "MSG" | "PRIVMSG" | "NOTICE" | "SQUERY" => {
             // `/msg :text` and `/msg text` leave out the target: the
             // conversation's peer.
@@ -223,6 +225,9 @@ mod tests {
             "/msg AuthServ auth alice pw",
             "/authserv auth alice pw",
             "/quote AUTH alice pw",
+            "/join #secret hunter2",
+            "/ JOIN #a,#b k1,k2",
+            "/raw JOIN #secret hunter2",
         ];
         let mut history = InputHistory::default();
         for line in secret {
@@ -251,6 +256,7 @@ mod tests {
             "/msg alice identify yourself",
             "/ msg alice identify yourself",
             "/join #nickserv",
+            "/join #a,#b",
             "/me waves",
             "/raw WHO #c",
             "/nick alice",

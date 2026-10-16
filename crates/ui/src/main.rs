@@ -7,6 +7,7 @@ mod autostart;
 mod avatar_editor;
 mod avatars;
 mod button_order;
+mod channel_keys;
 mod char_refs;
 mod charset_command;
 mod color_picker;
@@ -156,7 +157,7 @@ fn channel_activity_text(actor: &str, kind: ChannelActivityKind) -> String {
         ChannelActivityKind::Kicked { target, reason, .. } => {
             with_detail(&format!("{target} was kicked by"), actor, reason)
         }
-        ChannelActivityKind::JoinFailed { banned, reason } => {
+        ChannelActivityKind::JoinFailed { banned, reason, .. } => {
             if banned {
                 format!("Cannot join: you are banned from this channel ({reason})")
             } else {
@@ -335,7 +336,9 @@ fn saved_connection_config(
 ) -> Result<ConnectionConfig, String> {
     let i18n = Localizer::new(language);
     let (server_password, sasl_password) = saved_connection_secrets(profile, store, &i18n)?;
-    connection_config(profile, language, server_password, sasl_password)
+    let mut config = connection_config(profile, language, server_password, sasl_password)?;
+    channel_keys::use_stored_keys(&mut config, profile, store);
+    Ok(config)
 }
 
 /// Servers marked to connect at startup, in tree order, with their configs.
@@ -590,6 +593,8 @@ struct ChatWindow {
     /// One row per server whose nickname was rejected during registration,
     /// in the order the rejections arrived.
     nick_prompts: Vec<NickPrompt>,
+    /// One row per channel whose JOIN a server refused for want of a key.
+    key_prompts: Vec<channel_keys::KeyPrompt>,
     startup_connections: Vec<(NetworkId, Result<ConnectionConfig, String>)>,
     settings_window: Option<WindowHandle<SettingsWindow>>,
     window_handle: Option<WindowHandle<ChatWindow>>,
@@ -1080,6 +1085,7 @@ impl ChatWindow {
             member_selection: Default::default(),
             input_history: Default::default(),
             nick_prompts: Vec::new(),
+            key_prompts: Vec::new(),
             startup_connections,
             settings_window: None,
             #[cfg(target_os = "windows")]
@@ -1822,6 +1828,7 @@ impl ChatWindow {
                     config.shared_avatar = shared.clone();
                     // The auto-join list too: reconnects join the saved one.
                     config.channels = profile.channels();
+                    channel_keys::use_stored_keys(config, profile, &secrets::store(cx));
                     config.channel_encodings = channel_encodings(profile);
                     // A new realname is sent at once with SETNAME when the
                     // connection has it; the server's answer says otherwise.
@@ -1865,6 +1872,7 @@ impl ChatWindow {
             self.main_lists.remove(&Selection::Server(id));
             self.whois_windows.retain(|(network, _), _| *network != id);
             self.nick_prompts.retain(|prompt| prompt.network != id);
+            self.key_prompts.retain(|prompt| prompt.network != id);
             if self
                 .member_prompt
                 .as_ref()
@@ -2461,6 +2469,7 @@ impl ChatWindow {
             .values()
             .chain(self.member_prompt.iter().map(|prompt| &prompt.input))
             .chain(self.nick_prompts.iter().map(|prompt| &prompt.input))
+            .chain(self.key_prompts.iter().map(|prompt| prompt.input()))
             .any(|input| input.read(cx).is_composing())
     }
 
@@ -2812,6 +2821,7 @@ impl ChatWindow {
                     settings.servers.iter().find(|p| p.id == profile_id),
                 ) {
                     config.channels = profile.channels();
+                    channel_keys::use_stored_keys(config, profile, &secrets::store(cx));
                 }
                 None
             }
@@ -3035,15 +3045,8 @@ impl ChatWindow {
         let Some(channels) = words.next() else {
             return;
         };
-        let casemapping = self.state.casemapping(network);
-        let Some(session) = self.sessions.get_mut(&network) else {
-            return;
-        };
         for channel in channels.split(',').filter(|name| valid_channel(name)) {
-            if session.pending_joins.len() >= 32 {
-                session.pending_joins.clear();
-            }
-            session.pending_joins.insert(casemapping.fold(channel));
+            self.note_join(network, channel, false);
         }
     }
 
@@ -3053,9 +3056,7 @@ impl ChatWindow {
         channel: &str,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        self.registered_connection(network)?
-            .send_command(&format!("/join {channel}"), None)?;
-        self.note_join_request(network, &format!("/join {channel}"));
+        self.join_channels(network, &[channel.to_owned()], cx)?;
         cx.notify();
         Ok(())
     }
@@ -3373,46 +3374,54 @@ impl ChatWindow {
         }
         let value = prompt.input.read(cx).text().to_owned();
         let network = prompt.network;
-        let result = match self.registered_connection(network) {
-            Ok(connection) => match prompt.kind {
-                MemberPromptKind::PrivateMessage if value.trim().is_empty() => {
-                    Err(self.i18n.text("member_message_required"))
-                }
-                MemberPromptKind::PrivateMessage => {
-                    connection.send_private_message(&prompt.nickname, &value, false)
-                }
-                MemberPromptKind::Invite => connection.send_member_command(
-                    &prompt.nickname,
-                    MemberCommand::Invite {
-                        channel: value.trim().to_owned(),
-                    },
-                ),
-                MemberPromptKind::Join if value.trim().is_empty() => {
-                    Err(self.i18n.text("channel_join_required"))
-                }
-                MemberPromptKind::Join => {
-                    connection.send_command(&format!("/join {}", value.trim()), None)
-                }
-                MemberPromptKind::Nick if value.trim().is_empty() => {
-                    Err(self.i18n.text("nickname_change_required"))
-                }
-                MemberPromptKind::Nick => connection.change_nickname(value.trim()),
-                // The prompt's nickname is the channel. The value is not
-                // echoed anywhere: a mode may carry a channel key.
-                MemberPromptKind::Mode if value.trim().is_empty() => {
-                    Err(self.i18n.text("channel_mode_required"))
-                }
-                MemberPromptKind::Mode => connection
-                    .send_command(&format!("/mode {} {}", prompt.nickname, value.trim()), None),
-                MemberPromptKind::Topic if value.trim().is_empty() => {
-                    Err(self.i18n.text("channel_topic_required"))
-                }
-                MemberPromptKind::Topic => connection.send_command(
-                    &format!("/topic {} :{}", prompt.nickname, value.trim()),
-                    None,
-                ),
-            },
-            Err(error) => Err(error),
+        let kind = prompt.kind;
+        let nickname = prompt.nickname.clone();
+        // A channel list without a key joins with the saved keys.
+        let plain_join = matches!(kind, MemberPromptKind::Join)
+            .then(|| channel_keys::plain_join_channels(&format!("/join {}", value.trim())))
+            .flatten();
+        let result = if let Some(channels) = &plain_join {
+            self.join_channels(network, channels, cx)
+        } else {
+            match self.registered_connection(network) {
+                Ok(connection) => match kind {
+                    MemberPromptKind::PrivateMessage if value.trim().is_empty() => {
+                        Err(self.i18n.text("member_message_required"))
+                    }
+                    MemberPromptKind::PrivateMessage => {
+                        connection.send_private_message(&nickname, &value, false)
+                    }
+                    MemberPromptKind::Invite => connection.send_member_command(
+                        &nickname,
+                        MemberCommand::Invite {
+                            channel: value.trim().to_owned(),
+                        },
+                    ),
+                    MemberPromptKind::Join if value.trim().is_empty() => {
+                        Err(self.i18n.text("channel_join_required"))
+                    }
+                    MemberPromptKind::Join => {
+                        connection.send_command(&format!("/join {}", value.trim()), None)
+                    }
+                    MemberPromptKind::Nick if value.trim().is_empty() => {
+                        Err(self.i18n.text("nickname_change_required"))
+                    }
+                    MemberPromptKind::Nick => connection.change_nickname(value.trim()),
+                    // The prompt's nickname is the channel. The value is not
+                    // echoed anywhere: a mode may carry a channel key.
+                    MemberPromptKind::Mode if value.trim().is_empty() => {
+                        Err(self.i18n.text("channel_mode_required"))
+                    }
+                    MemberPromptKind::Mode => connection
+                        .send_command(&format!("/mode {} {}", nickname, value.trim()), None),
+                    MemberPromptKind::Topic if value.trim().is_empty() => {
+                        Err(self.i18n.text("channel_topic_required"))
+                    }
+                    MemberPromptKind::Topic => connection
+                        .send_command(&format!("/topic {} :{}", nickname, value.trim()), None),
+                },
+                Err(error) => Err(error),
+            }
         };
         match result {
             Ok(()) => {
@@ -3420,6 +3429,7 @@ impl ChatWindow {
                     .member_prompt
                     .take()
                     .filter(|prompt| matches!(prompt.kind, MemberPromptKind::Join))
+                    && plain_join.is_none()
                 {
                     self.note_join_request(prompt.network, &format!("/join {}", value.trim()));
                 }
@@ -3993,6 +4003,7 @@ impl ChatWindow {
             .as_ref()
             .is_some_and(|prompt| prompt.input.read(cx).focus_handle(cx).is_focused(window))
             || self.focused_nick_prompt(window, cx).is_some()
+            || self.focused_key_prompt(window, cx).is_some()
         {
             return;
         }
@@ -4069,7 +4080,14 @@ impl ChatWindow {
                 }
                 Event::Registered { .. } => {
                     self.nick_prompts.retain(|prompt| prompt.network != network);
+                    self.start_key_tracking(network);
                 }
+                Event::Joined { channel } => self.key_join_succeeded(network, channel, cx),
+                Event::ChannelActivity {
+                    channel,
+                    kind: ChannelActivityKind::JoinFailed { bad_key, .. },
+                    ..
+                } => self.key_join_refused(network, channel, *bad_key, cx),
                 _ => {}
             }
             self.handle_event(network, event);
@@ -4107,6 +4125,7 @@ impl ChatWindow {
             if let Some(session) = self.sessions.get_mut(&network) {
                 session.irc = None;
             }
+            self.end_key_tracking(network);
             if refused {
                 // Retrying rejected credentials risks account lockout or a ban.
                 self.state
@@ -4825,6 +4844,15 @@ impl ChatWindow {
                 Ok(request) => self.run_charset(request, cx),
                 Err(problem) => Err(self.charset_problem(&problem)),
             }
+        } else if let Some((network, channels)) = network
+            .filter(|network| {
+                connection.is_some()
+                    && self.state.status(*network) == Some(&ConnectionStatus::Registered)
+            })
+            .zip(channel_keys::plain_join_channels(&text))
+        {
+            // Joins with the saved keys; `/join #c key` is sent as typed.
+            self.join_channels(network, &channels, cx)
         } else if let Some(connection) = connection {
             if network.and_then(|network| self.state.status(network))
                 != Some(&ConnectionStatus::Registered)
@@ -4849,7 +4877,10 @@ impl ChatWindow {
         self.send_failure = None;
         self.feedback = match result {
             Ok(()) => {
-                if let Some(network) = network {
+                // A plain `/join` was noted when it was sent, with its keys.
+                if let Some(network) = network
+                    && channel_keys::plain_join_channels(&text).is_none()
+                {
                     self.note_join_request(network, &text);
                 }
                 self.input_history.record(&text, private_peer.as_deref());
@@ -4909,6 +4940,8 @@ impl ChatWindow {
     fn send_message(&mut self, _: &SendMessage, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(network) = self.focused_nick_prompt(window, cx) {
             self.submit_nick_prompt(network, window, cx);
+        } else if let Some((network, channel)) = self.focused_key_prompt(window, cx) {
+            self.submit_key_prompt(network, &channel, window, cx);
         } else if self
             .member_prompt
             .as_ref()
@@ -4923,6 +4956,8 @@ impl ChatWindow {
     fn notice(&mut self, _: &Notice, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(network) = self.focused_nick_prompt(window, cx) {
             self.submit_nick_prompt(network, window, cx);
+        } else if let Some((network, channel)) = self.focused_key_prompt(window, cx) {
+            self.submit_key_prompt(network, &channel, window, cx);
         } else if self
             .member_prompt
             .as_ref()
@@ -6553,6 +6588,7 @@ impl ChatWindow {
                 )
         });
         let nick_prompts = self.render_nick_prompts(origin, window, cx);
+        let key_prompts = self.render_key_prompts(origin, window, cx);
         let quit_dialog = self.render_quit_dialog(window, cx);
         div()
             .id("chat-window")
@@ -6631,6 +6667,7 @@ impl ChatWindow {
             })
             .when_some(member_prompt, |d, prompt| d.child(prompt))
             .when_some(nick_prompts, |d, prompts| d.child(prompts))
+            .when_some(key_prompts, |d, prompts| d.child(prompts))
             .when_some(quit_dialog, |d, dialog| d.child(dialog))
             .into_any_element()
     }
@@ -8438,3 +8475,7 @@ mod charset_command_tests;
 #[cfg(test)]
 #[path = "main_tests/search_tests.rs"]
 mod search_tests;
+
+#[cfg(test)]
+#[path = "main_tests/channel_key_tests.rs"]
+mod channel_key_tests;

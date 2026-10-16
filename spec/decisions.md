@@ -1234,6 +1234,39 @@ point's reference is IRC's concern and is not a generic sync token.
 Private-message recovery, persistence and echo-message reconciliation are
 future work. Details in `architecture.md` (Channel history).
 
+## D051 — Channel keys (`+k`) asked for on 475 and kept in the credential store (#414)
+
+**Status:** Implemented
+
+A JOIN is sent without a key unless one is saved. `475 ERR_BADCHANNELKEY` for a
+JOIN this client sent (manual, or the auto-join of the connection) opens a
+dialog naming the server and channel, with a masked key field and a "remember"
+checkbox that starts on. Only 475 asks for a key; 471, 473 and 474 do not.
+Pressing Join sends `JOIN #channel key`. The key is saved to the credential
+store (`connection/<profile-id>/channel-key/<channel>`) only when the server
+reports our own JOIN, never on sending or on a refusal; with the checkbox off
+nothing is saved, and a saved key that had just been refused is deleted. A wrong
+key reopens the dialog (no automatic retry); Cancel does nothing. A store that
+cannot save is reported in the server log and the status line, and the JOIN
+stands. Saved keys are used by manual joins (`/join #a,#b` without a key, the
+menus and prompts) and, at connection start, by the auto-join list; `/join
+#channel key` is sent as typed and never saved.
+
+- **Tracking.** `ServerSession::key_joins` (case-folded with the server's
+  CASEMAPPING, at most 256) holds the JOINs awaiting an answer; it is cleared on
+  registration and disconnect, so a late answer of an old connection opens no
+  dialog. Auto-join channels are added when the connection registers.
+- **Storage name.** The channel is lowercased by ASCII only, because the
+  server's case mapping is unknown when a connection starts; a server that folds
+  more finds no saved key and asks for one.
+- **No leaks.** The key is not in the settings file, logs, the transcript
+  (`JOIN #c [redacted]`), `Debug` output or the input history (`/join` with a
+  second word is never recorded). A key must be one IRC parameter: no
+  whitespace, controls or commas, and not starting with `:`.
+- **Limits.** Keys are not enumerable, so removing a server profile or switching
+  the credential backend does not remove or move them; a missing key is
+  asked for again. The auto-join manager has no key field.
+
 ## D050 — Per-channel text encodings with `/charset` (#396)
 
 **Status:** Implemented

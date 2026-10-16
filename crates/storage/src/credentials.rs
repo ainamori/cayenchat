@@ -82,6 +82,9 @@ pub enum SecretKey {
     SaslPassword { profile: String },
     /// Token authenticating an external image uploader account.
     UploaderToken { provider: String, account: String },
+    /// The `+k` key of a channel on a server profile. `channel` is the name
+    /// folded by [`SecretKey::channel_key`].
+    ChannelKey { profile: String, channel: String },
 }
 
 impl SecretKey {
@@ -104,6 +107,17 @@ impl SecretKey {
         }
     }
 
+    /// The `+k` key of `channel` on a server profile. The name is lowercased
+    /// (ASCII) so the entry does not depend on a server's case mapping, which
+    /// is unknown when a connection starts; a server that folds more than
+    /// that just finds no saved key and asks for one.
+    pub fn channel_key(profile: &str, channel: &str) -> Self {
+        Self::ChannelKey {
+            profile: profile.to_owned(),
+            channel: channel.to_ascii_lowercase(),
+        }
+    }
+
     /// The name used in every backend, e.g. `connection/ircnet/sasl-password`.
     pub fn name(&self) -> String {
         match self {
@@ -111,6 +125,9 @@ impl SecretKey {
             Self::SaslPassword { profile } => format!("connection/{profile}/sasl-password"),
             Self::UploaderToken { provider, account } => {
                 format!("uploader/{provider}/{account}/credential")
+            }
+            Self::ChannelKey { profile, channel } => {
+                format!("connection/{profile}/channel-key/{channel}")
             }
         }
     }
@@ -787,6 +804,18 @@ mod tests {
         assert_eq!(
             SecretKey::uploader_token("imgbb").name(),
             "uploader/imgbb/default/credential"
+        );
+        assert_eq!(
+            SecretKey::channel_key("ircnet", "#Secret").name(),
+            "connection/ircnet/channel-key/#secret"
+        );
+        assert_eq!(
+            SecretKey::channel_key("ircnet", "#SECRET"),
+            SecretKey::channel_key("ircnet", "#secret")
+        );
+        assert_ne!(
+            SecretKey::channel_key("a", "#x"),
+            SecretKey::channel_key("b", "#x")
         );
     }
 

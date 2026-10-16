@@ -1486,6 +1486,7 @@ fn kicks_and_refused_joins_reach_the_channel_log() {
                 "server".to_owned(),
                 ChannelActivityKind::JoinFailed {
                     banned: true,
+                    bad_key: false,
                     reason: "Cannot join channel (+b)".into(),
                 },
             ),
@@ -5287,4 +5288,77 @@ fn utf8_only_announced_after_acceptance_keeps_legacy_bytes_off_the_wire() {
     let sent = server.join().unwrap();
     assert_eq!(sent.len(), accepted, "{sent:?}");
     assert!(sent.iter().all(|line| line.contains(&0x82)));
+}
+
+#[test]
+fn channel_keys_are_sent_with_the_join_and_475_is_told_apart() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut lines = BufReader::new(socket.try_clone().unwrap()).lines();
+        while !lines.next().unwrap().unwrap().starts_with("USER ") {}
+        socket
+            .write_all(b":server 001 alice :Welcome\r\n:server 376 alice :End of MOTD\r\n")
+            .unwrap();
+        assert_eq!(lines.next().unwrap().unwrap(), "JOIN #secret old-key");
+        socket
+            .write_all(b":server 475 alice #secret :Cannot join channel (+k)\r\n:server 471 alice #full :Cannot join channel (+l)\r\n")
+            .unwrap();
+        assert_eq!(lines.next().unwrap().unwrap(), "JOIN #secret new-key");
+        socket.write_all(b":alice!u@h JOIN #secret\r\n").unwrap();
+    });
+    let mut config =
+        ConnectionConfig::tls("127.0.0.1".into(), "alice".into(), vec!["#secret".into()]);
+    config.port = port;
+    config.use_tls = false;
+    config
+        .channel_keys
+        .insert("#secret".into(), "old-key".into());
+    assert!(!format!("{config:?}").contains("old-key"));
+    let mut connection = Connection::connect(config).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut refused = Vec::new();
+    let mut retried = false;
+    let mut joined = false;
+    while Instant::now() < deadline && !joined {
+        match connection.try_recv() {
+            Some(Event::ChannelActivity {
+                channel,
+                kind: ChannelActivityKind::JoinFailed { bad_key, .. },
+                ..
+            }) => {
+                refused.push((channel, bad_key));
+                if refused.len() == 2 && !retried {
+                    retried = true;
+                    connection.join_channel("#secret", Some("new-key")).unwrap();
+                }
+            }
+            Some(Event::Joined { channel }) => joined = channel == "#secret",
+            Some(_) => {}
+            None => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    assert!(joined);
+    assert_eq!(
+        refused,
+        [("#secret".to_owned(), true), ("#full".to_owned(), false)]
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn unusable_channel_keys_are_refused() {
+    let mut config = ConnectionConfig::tls("irc.example.org".into(), "alice".into(), Vec::new());
+    for key in ["", "has space", "a,b", "tab\t", ":lead", "nl\n"] {
+        config.channel_keys.insert("#c".into(), key.into());
+        assert!(config.validate().is_err(), "{key:?}");
+    }
+    config.channel_keys.insert("#c".into(), "fine:key".into());
+    assert_eq!(config.validate(), Ok(()));
+    assert!(!valid_channel_key("x y"));
+    assert!(valid_channel_key("p@ss-w0rd"));
 }
