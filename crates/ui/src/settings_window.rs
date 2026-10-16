@@ -431,7 +431,9 @@ impl SettingsForm {
                 profile.display_name = value(&self.display_name);
                 profile.channels = value(&self.channels);
                 profile.sasl_username = value(&self.sasl_username);
-                profile.avatar_url = value(&self.avatar_url);
+                let avatar = value(&self.avatar_url);
+                crate::ircv3_settings::stop_sharing_if_avatar_differs(profile, &avatar);
+                profile.avatar_url = avatar;
             }
         }
         settings.appearance = Appearance {

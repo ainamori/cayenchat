@@ -1052,7 +1052,9 @@ avatar option is on: the shared URL (`ServerProfile::peer_avatar_url`),
 it, "Stop Sharing" when one is shared, and the reconnect line from
 `ircv3_settings::peer_reconnect_needed`. Share copies the checked draft
 (`share_draft_with_peers`; `peer_avatar_url_problem` adds the `{size}`
-refusal); `toggle_feature` clears the shared URL when the option goes off.
+refusal); `toggle_feature` clears the shared URL when the option goes off, and
+`stop_sharing_if_avatar_differs` clears it when the draft, an upload or a
+snapshot gives an own avatar other than the shared one.
 `ChatWindow::apply_servers` (autosave) writes `shared_peer_avatar(profile)`
 into `active_config` and, when the current connection was made with the
 option (`ServerSession::peer_avatars`, recorded by
