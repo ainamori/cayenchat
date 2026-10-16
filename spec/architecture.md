@@ -1580,7 +1580,7 @@ storage::credentials::CredentialStore
 Secrets are addressed by `SecretKey`, whose names come from stable internal
 IDs: `connection/<profile-id>/server-password`,
 `connection/<profile-id>/sasl-password`,
-`connection/<profile-id>/channel-key/<channel>` (D051) and
+`connection/<profile-id>/channel-key/<channel>` (D052) and
 `uploader/<provider-id>/<account>/credential`. Profile IDs are the existing
 `ircnet`, `ircnet-ipv6` and legacy `custom-N` IDs remain unchanged. New custom
 profiles use `custom-<UUID v4>` so deleting and adding a profile before saving,

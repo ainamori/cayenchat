@@ -4148,3 +4148,76 @@ fn quit_question_sits_near_the_top_of_the_window(cx: &mut TestAppContext) {
     let boxed = cx.debug_bounds("quit-dialog-box").unwrap();
     assert!(boxed.origin.y - overlay.origin.y <= gpui::px(24.));
 }
+
+#[gpui::test]
+fn the_title_leads_with_the_known_modes_of_the_selected_channel(cx: &mut TestAppContext) {
+    use cayenchat_irc_core::Event;
+
+    cx.update(|cx| {
+        crate::secrets::install_memory(cx);
+        cx.set_global(crate::theme::Theme::new(
+            cayenchat_storage::ThemeMode::Light,
+            gpui::WindowAppearance::Light,
+            &cayenchat_storage::Appearance::default(),
+        ));
+    });
+    let settings = crate::settings_with_channels("#a");
+    let (chat, cx) = cx.add_window_view(|window, cx| {
+        ChatWindow::with_settings(settings.clone(), None, window, cx)
+    });
+    chat.update(cx, |chat, cx| {
+        let modes = |flags: &str| Event::ChannelModes {
+            channel: "#a".into(),
+            flags: flags.into(),
+        };
+        chat.handle_events(
+            NetworkId(1),
+            vec![
+                Event::Registered {
+                    nickname: "me".into(),
+                },
+                Event::Joined {
+                    channel: "#a".into(),
+                },
+            ],
+            Worker::Running,
+            cx,
+        );
+        let channel = chat.state.conversations()[0].id;
+        chat.state
+            .dispatch(cayenchat_app::Command::SelectChannel(channel));
+        // Unknown modes are left out rather than shown as `[+]`.
+        assert!(chat.window_title().starts_with("#a @ "));
+        chat.handle_events(NetworkId(1), vec![modes("snt")], Worker::Running, cx);
+        assert!(
+            chat.window_title().starts_with("[+snt] #a @ "),
+            "{}",
+            chat.window_title()
+        );
+        // Known and empty: no brackets.
+        chat.handle_events(NetworkId(1), vec![modes("")], Worker::Running, cx);
+        assert!(chat.window_title().starts_with("#a @ "));
+        // Leaving forgets the modes.
+        chat.handle_events(NetworkId(1), vec![modes("m")], Worker::Running, cx);
+        chat.handle_events(
+            NetworkId(1),
+            vec![Event::Parted {
+                channel: "#a".into(),
+            }],
+            Worker::Running,
+            cx,
+        );
+        assert!(
+            !chat.window_title().contains("[+"),
+            "{}",
+            chat.window_title()
+        );
+        // A late reply for a channel that is no longer joined is ignored.
+        chat.handle_events(NetworkId(1), vec![modes("m")], Worker::Running, cx);
+        assert!(
+            !chat.window_title().contains("[+"),
+            "{}",
+            chat.window_title()
+        );
+    });
+}

@@ -361,6 +361,7 @@ impl AppState {
                     })
                     .collect(),
                 members: sorted_members(members.into_iter().map(str::to_owned).collect()),
+                modes: None,
             },
         )
         .collect();
@@ -418,6 +419,7 @@ impl AppState {
                 topic: String::new(),
                 messages: Vec::new(),
                 members: Vec::new(),
+                modes: None,
             })
             .collect();
         let selected = conversations
@@ -848,6 +850,7 @@ impl AppState {
                     self.pending_history.remove(&channel.id);
                     self.older_history.remove(&channel.id);
                     channel.members.clear();
+                    channel.modes = None;
                 }
             }
             self.statuses.insert(id, status);
@@ -1172,6 +1175,7 @@ impl AppState {
                 topic: String::new(),
                 messages: Vec::new(),
                 members: Vec::new(),
+                modes: None,
             },
         );
         Some(id)
@@ -1180,6 +1184,21 @@ impl AppState {
     pub fn joined_channel(&mut self, network: NetworkId, name: &str) {
         if let Some(id) = self.ensure_channel(network, name) {
             self.active_channels.insert(id);
+            // A new join starts without modes until the server states them.
+            if let Some(channel) = self.conversation_mut(id) {
+                channel.modes = None;
+            }
+        }
+    }
+
+    /// Sets the mode letters of a joined channel. Ignored for channels that
+    /// are not joined, so a late reply cannot revive a left channel's modes.
+    pub fn set_channel_modes(&mut self, network: NetworkId, name: &str, modes: &str) {
+        if let Some(id) = self.channel_id(network, name)
+            && self.active_channels.contains(&id)
+            && let Some(channel) = self.conversation_mut(id)
+        {
+            channel.modes = Some(modes.to_owned());
         }
     }
 
@@ -1192,6 +1211,7 @@ impl AppState {
             self.resume_points.remove(&id);
             if let Some(channel) = self.conversation_mut(id) {
                 channel.members.clear();
+                channel.modes = None;
             }
         }
     }

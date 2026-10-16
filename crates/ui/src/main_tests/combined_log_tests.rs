@@ -41,6 +41,7 @@ fn merged_tails_match_collecting_and_sorting() {
             topic: String::new(),
             messages: Vec::new(),
             members: Vec::new(),
+            modes: None,
         })
         .collect();
     for sequence in 1..=500u64 {
