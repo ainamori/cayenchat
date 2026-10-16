@@ -28,7 +28,7 @@ pub use modes::MemberMode;
 pub use peer_avatar::shareable as shareable_avatar;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
     ops::ControlFlow,
     sync::{
@@ -142,6 +142,9 @@ pub struct ConnectionConfig {
     /// no reason. Independent of `quit_message`.
     pub part_message: String,
     pub channels: Vec<String>,
+    /// Keys (`+k`) sent with the JOIN of the auto-join `channels` they are
+    /// listed for. Secret: never shown in `Debug` output or the transcript.
+    pub channel_keys: BTreeMap<String, String>,
     pub use_tls: bool,
     pub verify_tls_certificates: bool,
     pub encoding: String,
@@ -182,6 +185,7 @@ impl fmt::Debug for ConnectionConfig {
             .field("quit_message", &self.quit_message)
             .field("part_message", &self.part_message)
             .field("channels", &self.channels)
+            .field("channel_keys", &self.channel_keys.len())
             .field("use_tls", &self.use_tls)
             .field("verify_tls_certificates", &self.verify_tls_certificates)
             .field("encoding", &self.encoding)
@@ -213,6 +217,7 @@ impl ConnectionConfig {
             part_message: String::new(),
             nickname,
             channels,
+            channel_keys: BTreeMap::new(),
             use_tls: true,
             verify_tls_certificates: true,
             encoding: "UTF-8".into(),
@@ -313,6 +318,13 @@ impl ConnectionConfig {
                 return Err(format!("Invalid channel name: {channel}"));
             }
             validate_wire(&format!("JOIN {channel}\r\n"), &self.encoding)?;
+        }
+        for (channel, key) in &self.channel_keys {
+            if !valid_channel(channel) || !valid_channel_key(key) {
+                return Err("Channel key must not be empty or contain spaces or controls.".into());
+            }
+            validate_wire(&format!("JOIN {channel} {key}\r\n"), &self.encoding)
+                .map_err(|_| "Channel key is too long or cannot be encoded.".to_owned())?;
         }
         validate_wire(&format!("NICK {}\r\n", self.nickname), &self.encoding)?;
         validate_wire(
@@ -518,6 +530,17 @@ fn requires_utf8(message: &IrcMessage) -> bool {
 pub fn valid_channel(value: &str) -> bool {
     value.starts_with(['#', '&', '!'])
         && value.len() > 1
+        && !value
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control() || ch == ',')
+}
+
+/// Whether `value` can be sent as a channel key: one IRC parameter, so no
+/// spaces, controls or commas (a comma separates the keys of several
+/// channels), and not starting with `:`.
+pub fn valid_channel_key(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with(':')
         && !value
             .chars()
             .any(|ch| ch.is_whitespace() || ch.is_control() || ch == ',')
@@ -840,9 +863,11 @@ pub enum ChannelActivityKind {
         own: bool,
     },
     /// The server refused our JOIN (the actor is `server`). `banned` is set
-    /// for `ERR_BANNEDFROMCHAN`; `reason` is the server's text.
+    /// for `ERR_BANNEDFROMCHAN`; `bad_key` for `ERR_BADCHANNELKEY` (475),
+    /// the only refusal a channel key can cure; `reason` is the server's text.
     JoinFailed {
         banned: bool,
+        bad_key: bool,
         reason: String,
     },
 }
@@ -1923,6 +1948,26 @@ impl Connection {
             .map_err(|error| format!("Could not queue IRC command: {error}"))
     }
 
+    /// Sends `JOIN channel [key]`. The key is a secret: it is validated here,
+    /// and the transcript shows `[redacted]` for it.
+    pub fn join_channel(&self, channel: &str, key: Option<&str>) -> Result<(), String> {
+        if !valid_channel(channel) {
+            return Err("Invalid channel name.".into());
+        }
+        if key.is_some_and(|key| !valid_channel_key(key)) {
+            return Err("Channel key must not be empty or contain spaces or controls.".into());
+        }
+        let outgoing = checked_command(IrcCommand::JOIN(
+            channel.to_owned(),
+            key.map(str::to_owned),
+            None,
+        ))?;
+        self.validate(&outgoing)?;
+        self.commands
+            .try_send(outgoing)
+            .map_err(|error| format!("Could not queue IRC command: {error}"))
+    }
+
     pub fn change_nickname(&self, nickname: &str) -> Result<(), String> {
         if !valid_nickname(nickname) {
             return Err("Invalid nickname.".into());
@@ -2054,6 +2099,11 @@ fn library_config(config: &ConnectionConfig) -> Config {
         realname: Some(config.wire_realname()),
         password: config.server_password.clone(),
         channels: config.channels.clone(),
+        channel_keys: config
+            .channel_keys
+            .iter()
+            .map(|(channel, key)| (channel.clone(), key.clone()))
+            .collect(),
         ping_timeout: Some(PING_TIMEOUT_SECS),
         use_tls: Some(config.use_tls),
         encoding: Some(config.encoding.clone()),
@@ -3942,6 +3992,7 @@ fn translate_message(
                 actor: "server".into(),
                 kind: ChannelActivityKind::JoinFailed {
                     banned: *response == Response::ERR_BANNEDFROMCHAN,
+                    bad_key: *response == Response::ERR_BADCHANNELKEY,
                     reason: reason.clone(),
                 },
                 server_time,

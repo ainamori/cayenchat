@@ -228,7 +228,7 @@ scoped to the focused draft; Up/Down there recall the last 20 sent drafts
 conversation changes). Commands that carry credentials (to the services
 `irc-core::is_credential_service` names: NickServ, ChanServ, UserServ,
 QuakeNet's Q, Undernet's X, GameSurge's AuthServ; `/oper`, `/pass`,
-`/auth`, and `/raw` forms of those) and anything typed in a private
+`/auth`, `/join` with a channel key, and `/raw` forms of those) and anything typed in a private
 conversation with such a service are never kept. Ctrl+Tab / Ctrl+Shift+Tab visit unread channels only.
 On macOS Cmd+[ / Cmd+] move to the previous / next channel and Cmd+Shift+[ /
 Cmd+Shift+] to the previous / next server (decided in #72, which is the source
@@ -1579,7 +1579,8 @@ storage::credentials::CredentialStore
 
 Secrets are addressed by `SecretKey`, whose names come from stable internal
 IDs: `connection/<profile-id>/server-password`,
-`connection/<profile-id>/sasl-password` and
+`connection/<profile-id>/sasl-password`,
+`connection/<profile-id>/channel-key/<channel>` (D052) and
 `uploader/<provider-id>/<account>/credential`. Profile IDs are the existing
 `ircnet`, `ircnet-ipv6` and legacy `custom-N` IDs remain unchanged. New custom
 profiles use `custom-<UUID v4>` so deleting and adding a profile before saving,

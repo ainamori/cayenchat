@@ -72,6 +72,7 @@ fn channel_activity_uses_english_phrases_with_optional_details() {
             "server",
             ChannelActivityKind::JoinFailed {
                 banned: true,
+                bad_key: false,
                 reason: "Cannot join channel (+b)".into(),
             },
         ),

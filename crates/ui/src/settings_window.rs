@@ -505,12 +505,14 @@ impl SettingsForm {
             .selected_profile()
             .ok_or_else(|| i18n.text("server_required"))?;
         let (saved_server, saved_sasl) = saved_connection_secrets(profile, store, i18n)?;
-        connection_config(
+        let mut config = connection_config(
             profile,
             settings.language,
             typed(&self.server_password).or(saved_server),
             typed(&self.sasl_password).or(saved_sasl),
-        )
+        )?;
+        crate::channel_keys::use_stored_keys(&mut config, profile, store);
+        Ok(config)
     }
 
     /// Every text field, so edits to any of them can trigger an autosave.
