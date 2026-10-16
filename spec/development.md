@@ -1192,20 +1192,24 @@ settings always say `show_toolbar: true`, so the picture does not depend on
 the default or on an older saved file; hiding a part of the window on purpose
 is a separate option of `settings()`.
 
-Every `--app` (also of `run`) is checked: it must contain the `demo` feature's
-markers and be newer than the newest tracked file under `crates/`,
-`Cargo.toml` and `Cargo.lock`; otherwise `demo.py` refuses it
-(`--allow-stale-build` skips the check). Without `--app` it builds
-`target/release/cayenchat` first. This also covers the Windows and macOS
-bundles: build them from the current checkout, then run `demo.py run --app`.
+`demo.py run` and `readme` always build the `demo` build of the checked-out
+sources first (`cargo build --release --locked -p cayenchat-ui --features
+demo`; cargo decides from file contents what is out of date, so `locales/`
+and `assets/` count too). An `--app` is accepted only when it is byte for byte
+(SHA-256) that build, e.g. a copy of it; nothing is guessed from file times or
+strings, so an old build, another feature set such as `test-build` or a
+rebuilt-by-copying binary is refused. A signed or repackaged Windows/macOS
+bundle differs from the build and is refused too: take the store pictures
+from `demo.py run` without `--app`, which starts the build itself.
 `run` writes `provenance.json` next to its settings, and `readme` records
-the commit, whether the sources were uncommitted, features, binary and capture
-times, OS, language, theme and size for each picture in
-`assets/screenshots/provenance.json`. `check` fails when a recorded picture
+the commit, whether the sources were uncommitted, features, the binary's and
+the picture's SHA-256, capture time, OS, language, theme and size for each picture in
+`assets/screenshots/provenance.json`. `check` fails when the English or Japanese picture has no entry, a
+file is not the recorded one (hash), or a recorded picture
 is more than 25 commits to `crates/ui` and `crates/app` behind `HEAD` (or was
 taken from uncommitted sources); run it before a release and after changes to
 what the window shows. `python3 -m unittest discover -s scripts/screenshots -p
-'test_*.py'` checks the settings and the build check.
+'test_*.py'` checks the settings and the `--app` check (also run in CI).
 
 Without `CAYENCHAT_PREVIEW_FIXTURE_DIR` the image previews and avatars do not
 load (`readme` sets it). The picture should show the toolbar, the avatars,

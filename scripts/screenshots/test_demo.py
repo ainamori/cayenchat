@@ -3,7 +3,8 @@
 
     python3 -m unittest discover -s scripts/screenshots -p 'test_*.py'
 """
-import os, sys, tempfile, time, unittest
+import argparse, os, shutil, sys, tempfile, time, unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import demo  # noqa: E402
@@ -38,34 +39,50 @@ class Settings(unittest.TestCase):
 
 
 class Build(unittest.TestCase):
+    """resolve_app takes only the file identical to the demo build made now."""
+
     def setUp(self):
         self.scratch = tempfile.TemporaryDirectory()
-        self.path = os.path.join(self.scratch.name, "cayenchat")
+        self.built = os.path.join(self.scratch.name, "built")
+        with open(self.built, "wb") as file:
+            file.write(b"demo build of the current sources")
+        self.build = mock.patch.object(demo, "build_demo", return_value=self.built)
+        self.build.start()
 
     def tearDown(self):
+        self.build.stop()
         self.scratch.cleanup()
 
-    def write(self, markers):
-        with open(self.path, "wb") as file:
-            file.write(b"\0".join(markers))
+    def resolve(self, app):
+        return demo.resolve_app(argparse.Namespace(app=app))
+
+    def other(self, content):
+        path = os.path.join(self.scratch.name, "other")
+        with open(path, "wb") as file:
+            file.write(content)
+        return path
+
+    def test_no_app_is_the_fresh_build(self):
+        self.assertEqual(self.resolve(None), self.built)
+
+    def test_a_copy_of_the_build_is_accepted(self):
+        copy = os.path.join(self.scratch.name, "copy")
+        shutil.copyfile(self.built, copy)
+        self.assertEqual(self.resolve(copy), copy)
+
+    def test_an_old_build_with_a_new_time_is_refused(self):
+        old = self.other(b"demo build of older sources")
+        os.utime(old, (time.time() + 3600,) * 2)
+        with self.assertRaises(SystemExit):
+            self.resolve(old)
+
+    def test_a_build_with_other_features_is_refused(self):
+        with self.assertRaises(SystemExit):
+            self.resolve(self.other(b"test-build,preview-fixture"))
 
     def test_a_missing_binary_is_refused(self):
-        self.assertTrue(demo.build_problems(self.path))
-
-    def test_a_build_without_the_demo_feature_is_refused(self):
-        self.write([])
-        os.utime(self.path, (time.time() + 3600,) * 2)
-        self.assertTrue(any("demo" in p for p in demo.build_problems(self.path)))
-
-    def test_a_build_older_than_the_sources_is_refused(self):
-        self.write(demo.DEMO_MARKERS)
-        os.utime(self.path, (1, 1))
-        self.assertTrue(any("older" in p for p in demo.build_problems(self.path)))
-
-    def test_a_fresh_demo_build_is_accepted(self):
-        self.write(demo.DEMO_MARKERS)
-        os.utime(self.path, (time.time() + 3600,) * 2)
-        self.assertEqual(demo.build_problems(self.path), [])
+        with self.assertRaises(SystemExit):
+            self.resolve(os.path.join(self.scratch.name, "missing"))
 
 
 if __name__ == "__main__":

@@ -12,8 +12,8 @@
 throwaway settings and images under --dir, starts the demo IRC server on
 127.0.0.1, launches a `demo` build of CayenChat (cargo feature `demo`) and
 waits until the conversation has been played. Take the screenshots, then press
-Enter to quit. Without --app it builds the demo build first; an --app that is
-no demo build or is older than the sources is refused. `readme` does the
+Enter to quit. The demo build is always made first; an --app that is not
+byte for byte that build is refused. `readme` does the
 Linux/Xvfb flow in one go (build, picture, a toolbar-less run to prove the
 toolbar is on screen, entry in assets/screenshots/provenance.json) and `check`
 fails when those pictures lag behind the app. `serve` and `settings` are the
@@ -429,9 +429,7 @@ async def serve(script, port, played, ready=None):
 
 # ------------------------------------------------------- build and provenance
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-# Present in the binary only when the `demo` (`preview-fixture`) feature is on.
-DEMO_MARKERS = (b"CAYENCHAT_PREVIEW_FIXTURE_DIR", b"CAYENCHAT_TEST_DIR")
-SOURCES = ("crates", "Cargo.toml", "Cargo.lock")
+REQUIRED_PICTURES = ("cayenchat-en.png", "cayenchat-ja.png")
 PROVENANCE = os.path.join(ROOT, "assets", "screenshots", "provenance.json")
 # Ends the README check: more commits than this to the app since a picture.
 README_MAX_BEHIND = 25
@@ -442,30 +440,17 @@ def git(*args):
                           check=True).stdout.strip()
 
 
-def newest_source():
-    """(mtime, path) of the newest file in the checked-out sources."""
-    names = git("ls-files", "-z", "--", *SOURCES).split("\0")
-    return max((os.path.getmtime(os.path.join(ROOT, n)), n) for n in names
-               if n and os.path.exists(os.path.join(ROOT, n)))
-
-
-def build_problems(app):
-    """Why `app` cannot be taken for a demo build of these sources; empty
-    when it can."""
-    if not os.path.isfile(app):
-        return [f"{app} does not exist"]
-    problems = []
-    with open(app, "rb") as file:
-        binary = file.read()
-    if not all(marker in binary for marker in DEMO_MARKERS):
-        problems.append("it was not built with --features demo")
-    modified, source = newest_source()
-    if os.path.getmtime(app) < modified:
-        problems.append(f"it is older than {source}; build again from the current sources")
-    return problems
+def sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as file:
+        for block in iter(lambda: file.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def build_demo():
+    """Builds the `demo` build of the checked-out sources (cargo decides what
+    is out of date, from the file contents it tracks) and returns it."""
     subprocess.run(["cargo", "build", "--release", "--locked", "-p", "cayenchat-ui",
                     "--features", "demo"], cwd=ROOT, check=True)
     return os.path.join(ROOT, "target", "release",
@@ -473,24 +458,23 @@ def build_demo():
 
 
 def resolve_app(args):
-    """The binary to run, built now unless --app names one, and checked
-    unless --allow-stale-build says otherwise."""
-    app = args.app or build_demo()
-    if not args.allow_stale_build:
-        problems = build_problems(app)
-        if problems:
-            sys.exit(f"refusing {app}: {'; '.join(problems)} "
-                     "(--allow-stale-build skips this check)")
-    return app
+    """The binary to run: the demo build made now. An --app is accepted only
+    when it is byte for byte that build (a copy of it), so it has the current
+    sources and the `demo` feature; nothing is guessed from times or strings."""
+    built = build_demo()
+    if args.app and (not os.path.isfile(args.app) or sha256(args.app) != sha256(built)):
+        sys.exit(f"refusing {args.app}: it is not identical to the demo build of the current "
+                 f"sources ({built}); copy that file, or leave out --app")
+    return args.app or built
 
 
 def provenance(app, args, size):
+    """What was verified: `app` is the demo build of HEAD (resolve_app)."""
     return {
         "commit": git("rev-parse", "HEAD"),
-        "dirty": bool(git("status", "--porcelain", "--", *SOURCES)),
+        "dirty": bool(git("status", "--porcelain", "--", ".", ":!assets/screenshots")),
         "features": ["demo"],
-        "binary_modified": datetime.datetime.fromtimestamp(os.path.getmtime(app))
-        .astimezone().isoformat(timespec="seconds"),
+        "binary_sha256": sha256(app),
         "captured": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
         "os": f"{platform.system()} {platform.release()}",
         "language": args.language,
@@ -640,7 +624,9 @@ def command_readme(args):
             recorded = json.load(file)
     except FileNotFoundError:
         recorded = {}
-    recorded[os.path.basename(args.out)] = provenance(args.app_path, args, args.size)
+    entry = provenance(args.app_path, args, args.size)
+    entry["image_sha256"] = sha256(args.out)
+    recorded[os.path.basename(args.out)] = entry
     os.makedirs(os.path.dirname(PROVENANCE), exist_ok=True)
     with open(PROVENANCE, "w", encoding="utf-8") as file:
         json.dump(recorded, file, indent=2, sort_keys=True)
@@ -654,6 +640,10 @@ def command_check(args):
     with open(PROVENANCE, encoding="utf-8") as file:
         recorded = json.load(file)
     late = False
+    for name in REQUIRED_PICTURES:
+        if name not in recorded:
+            print(f"{name}: no entry")
+            late = True
     for name, entry in sorted(recorded.items()):
         try:
             behind = int(git("rev-list", "--count", f"{entry['commit']}..HEAD", "--",
@@ -663,6 +653,10 @@ def command_check(args):
         note = "unknown commit" if behind is None else f"{behind} commits behind"
         if entry.get("dirty"):
             note += ", taken from uncommitted sources"
+        path = os.path.join(os.path.dirname(PROVENANCE), name)
+        if not os.path.isfile(path) or sha256(path) != entry.get("image_sha256"):
+            note += ", the file is not the recorded picture"
+            late = True
         print(f"{name}: {entry['commit'][:10]} {entry['captured']}, {note}")
         late |= behind is None or behind > args.max_behind or bool(entry.get("dirty"))
     if late:
@@ -680,10 +674,8 @@ def main():
             command.add_argument("--port", type=int, default=36690)
 
     def app_options(command):
-        command.add_argument("--app", help="a CayenChat binary built with --features demo "
-                             "(default: build target/release/cayenchat now)")
-        command.add_argument("--allow-stale-build", action="store_true",
-                             help="skip the check that --app is a demo build newer than the sources")
+        command.add_argument("--app", help="must be identical to the demo build made now "
+                             "(default: that build, target/release/cayenchat)")
 
     command = commands.add_parser("run", help="start the server and a demo build, then wait")
     common(command)
