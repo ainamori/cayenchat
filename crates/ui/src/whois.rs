@@ -70,6 +70,7 @@ impl WhoisWindow {
         let title = window_title(&info);
         cx.open_window(
             WindowOptions {
+                app_id: Some(crate::APP_ID.into()),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(360.), px(300.))),
                 titlebar: Some(TitlebarOptions {
