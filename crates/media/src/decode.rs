@@ -125,8 +125,10 @@ pub fn thumbnail(
     );
     let small = if (thumb_width, thumb_height) == (crop_width, crop_height) {
         image
-    } else {
+    } else if limits.smooth_resize {
         downscale(image, thumb_width, thumb_height)
+    } else {
+        image.thumbnail_exact(thumb_width, thumb_height)
     };
     Ok(Thumbnail {
         width: thumb_width,
@@ -337,6 +339,22 @@ mod tests {
         // The transition is at most a few pixels wide.
         let gray = (0..32).filter(|&x| (3..252).contains(&row[x * 4])).count();
         assert!(gray <= 3, "{gray}");
+    }
+
+    #[test]
+    fn previews_keep_the_plain_thumbnail_filter() {
+        let source = image::RgbaImage::from_fn(800, 400, |x, y| {
+            image::Rgba([(x % 251) as u8, (y % 241) as u8, ((x ^ y) % 256) as u8, 255])
+        });
+        let expected =
+            into_bgra(DynamicImage::ImageRgba8(source.clone()).thumbnail_exact(400, 200));
+        let thumb = thumbnail(
+            &png_from(source),
+            &Limits::default(),
+            &CancelFlag::default(),
+        )
+        .unwrap();
+        assert_eq!(thumb.bgra, expected);
     }
 
     #[test]

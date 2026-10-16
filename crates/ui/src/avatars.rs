@@ -34,6 +34,8 @@ pub const SLOT: f32 = 16.;
 /// Thumbnail size in pixels (sharp on 2× displays), also the size asked for
 /// through the registry's `{size}` placeholder.
 pub const PIXELS: u32 = 32;
+/// Largest default avatar `default_sized` rasterizes.
+const MAX_DEFAULT_PIXELS: u32 = 512;
 /// Image fetches in flight across avatars and previews together, so turning
 /// both on does not double the peak of network and memory use. Decoding is
 /// already one at a time in the whole process (`media::decode`).
@@ -125,6 +127,8 @@ impl Avatars {
     /// 48 px one in WHOIS, asks for twice its logical size instead of
     /// enlarging the 32 px image).
     pub fn default_sized(&self, nickname: &str, pixels: u32) -> Arc<gpui::Image> {
+        // Bounds the cache even if a caller passes a wild size.
+        let pixels = pixels.clamp(1, MAX_DEFAULT_PIXELS);
         let params = default_avatar::params(nickname);
         self.defaults
             .borrow_mut()
