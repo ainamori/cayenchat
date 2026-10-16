@@ -3172,6 +3172,7 @@ impl Worker {
             self.roster.presence.set_casemapping(announced);
             self.history.set_casemapping(announced);
             self.accounts.set_casemapping(announced);
+            self.ctcp.set_casemapping(announced);
             self.channel_modes.set_casemapping(announced);
             self.emit(Event::CaseMapping(announced)).await?;
         }
