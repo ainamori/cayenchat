@@ -547,6 +547,15 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
+        // Past either edge a drag selects to that end of the text. The text
+        // scrolls only when painted, so a pointer held still outside the box
+        // would otherwise stop at the first visible character.
+        if position.x < bounds.left() {
+            return 0;
+        }
+        if position.x > bounds.right() {
+            return self.content.len();
+        }
         line.closest_index_for_x(position.x - bounds.left() + self.scroll_x)
     }
 
@@ -1064,7 +1073,9 @@ impl Element for TextElement {
         // A drag keeps selecting after the pointer leaves the field (a div's
         // own move handler only fires while hovered, which dropped the first
         // characters when the pointer overshot the left edge) and ends on a
-        // release anywhere in the window.
+        // release anywhere in the window. The release position is applied
+        // too: a fast drag coalesces move events, so the last one can stop
+        // short of where the button came up.
         let input = self.input.clone();
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
             if phase == DispatchPhase::Capture {
@@ -1072,9 +1083,14 @@ impl Element for TextElement {
             }
         });
         let input = self.input.clone();
-        window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
             if phase == DispatchPhase::Capture {
-                input.update(cx, |input, _| input.is_selecting = false);
+                input.update(cx, |input, cx| {
+                    if input.is_selecting {
+                        input.select_to(input.index_for_mouse_position(event.position), cx);
+                    }
+                    input.is_selecting = false;
+                });
             }
         });
     }
@@ -1411,6 +1427,103 @@ mod tests {
         input.read_with(cx, |input, _| {
             assert_eq!(input.selected_range, 0..7);
             assert!(!input.is_selecting);
+        });
+    }
+
+    /// A fast drag can deliver no move event past the field's inner part; the
+    /// release position alone must extend the selection to the start.
+    #[gpui::test]
+    fn release_position_extends_the_selection(cx: &mut gpui::TestAppContext) {
+        use gpui::{Modifiers, MouseButton};
+
+        struct Host(Entity<TextInput>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().pl(px(100.)).w(px(300.)).child(self.0.clone())
+            }
+        }
+
+        cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::new(
+                cayenchat_storage::ThemeMode::Light,
+                gpui::WindowAppearance::Light,
+                &cayenchat_storage::Appearance::default(),
+            ));
+        });
+        let input = cx.new(|cx| {
+            let mut input = TextInput::new(cx);
+            input.content = "example".into();
+            input
+        });
+        let (_host, cx) = cx.add_window_view(|_, _| Host(input.clone()));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        cx.simulate_mouse_down(
+            point(px(100. + 4. + 150.), px(10.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(
+            point(px(100. + 4. + 60.), px(10.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_up(
+            point(px(20.), px(10.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.selected_range, 0..7);
+        });
+    }
+
+    /// A scrolled long text must still select to its start when the pointer
+    /// is held outside the box, where no repaint scrolls it back.
+    #[gpui::test]
+    fn drag_outside_a_scrolled_text_selects_to_the_start(cx: &mut gpui::TestAppContext) {
+        use gpui::{Modifiers, MouseButton};
+
+        struct Host(Entity<TextInput>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().pl(px(100.)).w(px(300.)).child(self.0.clone())
+            }
+        }
+
+        cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::new(
+                cayenchat_storage::ThemeMode::Light,
+                gpui::WindowAppearance::Light,
+                &cayenchat_storage::Appearance::default(),
+            ));
+        });
+        let text = "START-".to_string() + &"abcdefghijklmnopqrstuvwxyz-".repeat(8) + "END";
+        let input = cx.new(|cx| {
+            let mut input = TextInput::new(cx);
+            input.content = text.clone().into();
+            input.selected_range = text.len()..text.len();
+            input
+        });
+        let (_host, cx) = cx.add_window_view(|_, _| Host(input.clone()));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        input.read_with(cx, |input, _| assert!(input.scroll_x > px(0.)));
+
+        cx.simulate_mouse_down(
+            point(px(100. + 4. + 180.), px(10.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(
+            point(px(20.), px(10.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.selected_range.start, 0);
         });
     }
 
