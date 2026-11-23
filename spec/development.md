@@ -173,10 +173,15 @@ belongs to the separate GPUI workspace that CI builds its GPUI unit tests
 from; it pins some versions differently (libc, for example) and never ships.
 cargo-deny does not read it: the job checks the root workspace only, and
 `deny.toml` (license and ban policy) is written for that tree, so for the GPUI
-test build the OSV scan is the only advisory check. It is not a pull request check, so a
+test build the OSV scan is the only advisory check. Accepted findings are
+listed with a reason in `osv-scanner.toml` (passed to the scan with
+`--config`), the way cargo-deny's accepted advisories are listed in
+`deny.toml`, so the job fails only when a new finding appears. It is not a
+pull request check, so a
 finding in a transitive GPUI dependency does not block unrelated changes. When
 it fails, decide whether the crate is reachable from our code: update it, or
-record the finding and why it is accepted in the issue. Nothing detects an
+record the finding and why it is accepted in the issue and in
+`osv-scanner.toml`. Nothing detects an
 advisory in the five vendored crates (`gpui`, `irc`, `irc-proto`, `zed-xim`,
 `native-theme`), which are path dependencies outside any database; when the
 OSV job runs, also check their upstreams' releases and security advisories and
@@ -221,6 +226,13 @@ reports as usual:
   here can replace them; they are accepted until GPUI or the upstream crate
   moves. `rustybuzz` and `ttf-parser` parse font files, which are the user's
   installed fonts and embedded fonts, not network data.
+
+OSV triage of 2026-11-23 (weekly run on the current lock files): `url` 2.5.8
+(RUSTSEC-2026-0592, stack overflow in `Url::origin()` on nested `blob:` URLs)
+is a direct dependency of `app` and `media`, so it is updated to 2.5.9 in
+both lock files rather than accepted. Every other current report is one
+accepted in the 2026-11-18 triage; its reason is recorded in
+`osv-scanner.toml`.
 
 On pull requests, CI runs only the jobs the changed paths can affect
 (`scripts/ci-jobs.sh`): documentation (`*.md`, `spec/`, `.claude/`,

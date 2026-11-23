@@ -6,7 +6,12 @@ name: OSV advisories
 # one for grid (#726). A new advisory can appear without any change here, so
 # this runs on a schedule and by hand. It is not a pull request check: a
 # finding in a transitive GPUI dependency would block unrelated changes.
-# Triage findings in spec/development.md, "Dependency advisories".
+# Triage findings in spec/development.md, "Dependency advisories". The scan
+# fails on every reported finding, and the GPUI tree always carries a few
+# accepted unmaintained and unsound notices, so the accepted ones are listed
+# with reasons in osv-scanner.toml (passed with `--config`), the way
+# cargo-deny's accepted advisories go in deny.toml; a failure then means a
+# new finding.
 
 on:
   schedule:
@@ -33,3 +38,4 @@ jobs:
           scan-args: |-
             --lockfile=Cargo.lock
             --lockfile=vendor/gpui/Cargo.lock
+            --config=osv-scanner.toml

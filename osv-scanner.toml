@@ -1,0 +1,114 @@
+# osv-scanner configuration for the weekly "OSV advisories" scan
+# (.github/workflows/osv.yml, run with `--config=osv-scanner.toml`).
+#
+# osv-scanner exits non-zero on every reported finding, including the
+# unmaintained and unsound (informational) RUSTSEC notices that arrive
+# through GPUI and can only be fixed by an upstream update. Accepted
+# findings are listed here with a reason, the way cargo-deny's accepted
+# advisories are listed in deny.toml, so the job fails only when a new
+# finding appears. Re-evaluate an entry when the dependency path, an
+# enabled feature or a version changes, or when the advisory's text
+# changes; the full triage of 2026-11-18 is in spec/development.md,
+# "Dependency advisories".
+
+# grid 0.18 (GHSA-38c5-483c-4qqp, integer overflow in Grid::expand_rows):
+# pinned by taffy 0.9, which GPUI pins. CayenChat's UI uses no CSS-grid
+# layout and its sizes are small and fixed, so the overflow cannot be
+# triggered; it needs a GPUI/taffy update.
+[[IgnoredVulns]]
+id = "GHSA-38c5-483c-4qqp"
+reason = "grid 0.18 is pinned by taffy 0.9 (GPUI); no CSS-grid layout is used, so the overflow is unreachable. Re-evaluate on a GPUI/taffy update."
+
+# git2 0.20 (RUSTSEC-2026-0183, potential UB in Remote::list on a remote
+# that advertises no refs): comes through gpui_util for its test support
+# alone; the app never calls Remote::list or blame_buffer. Updating needs
+# git2 0.21 from gpui_util.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0183"
+reason = "git2 0.20 comes through gpui_util test support only; the app never calls Remote::list. Updating needs git2 0.21 from gpui_util."
+
+# git2 0.20 (RUSTSEC-2026-0184, potential UB in a Signature from a
+# buffer-created BlameHunk): same reachability as RUSTSEC-2026-0183.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0184"
+reason = "Same reachability as RUSTSEC-2026-0183: gpui_util test support only, blame_buffer never called."
+
+# async-std is discontinued (RUSTSEC-2025-0052). It is a transitive
+# dependency through GPUI; nothing here can replace it.
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0052"
+reason = "Unmaintained notice, transitive through GPUI; accepted until GPUI moves."
+
+# chrono is unmaintained (RUSTSEC-2026-0543). The workspace crates use
+# jiff (#1068); chrono remains only through gpui-component and
+# native-theme-gpui and goes with the GPUI migration (#1025).
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0543"
+reason = "Unmaintained notice; workspace crates use jiff, chrono remains only through gpui-component and native-theme-gpui."
+
+# instant is unmaintained (RUSTSEC-2024-0384). Transitive through GPUI.
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0384"
+reason = "Unmaintained notice, transitive through GPUI; accepted until GPUI moves."
+
+# paste is no longer maintained (RUSTSEC-2024-0436). Build-time code
+# generation, transitive through GPUI.
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+reason = "Unmaintained notice in build-time code generation, transitive through GPUI; accepted until GPUI moves."
+
+# pin-utils is unmaintained, its repository archived in October 2026
+# (RUSTSEC-2026-0441). Compile-time pinning, transitive through GPUI.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0441"
+reason = "Unmaintained notice in compile-time pinning, transitive through GPUI; accepted until GPUI moves."
+
+# proc-macro-error2 is unmaintained (RUSTSEC-2026-0173). Build-time proc
+# macros, transitive through GPUI.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0173"
+reason = "Unmaintained notice in build-time proc macros, transitive through GPUI; accepted until GPUI moves."
+
+# rustls-pemfile is unmaintained, its repository archived since August
+# 2025 (RUSTSEC-2025-0134). It comes through vendor/irc and reads TLS
+# certificates from disk, not network data.
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0134"
+reason = "Unmaintained notice through vendor/irc; it reads certificate files from disk, not network data."
+
+# rustybuzz is unmaintained (RUSTSEC-2026-0206). Font shaping, transitive
+# through GPUI.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0206"
+reason = "Unmaintained notice in font shaping, transitive through GPUI; accepted until GPUI moves."
+
+# ttf-parser is unmaintained (RUSTSEC-2026-0192). It parses font files,
+# which are the user's installed fonts and embedded fonts, not network
+# data.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0192"
+reason = "Unmaintained notice; parses font files (installed and embedded), not network data."
+
+# unsafe-libyaml is unmaintained, its repository archived in March 2024
+# (RUSTSEC-2024-0449). It comes through gpui-component's rust-i18n.
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0449"
+reason = "Unmaintained notice through gpui-component (rust-i18n); accepted until GPUI moves."
+
+# zbus_names is unmaintained (RUSTSEC-2026-0371). Transitive through
+# ashpd/oo7 portal calls.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0371"
+reason = "Unmaintained notice, transitive through ashpd/oo7; accepted until GPUI moves."
+
+# zvariant is unmaintained (RUSTSEC-2026-0370). Transitive through
+# ashpd/oo7 portal calls.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0370"
+reason = "Unmaintained notice, transitive through ashpd/oo7; accepted until GPUI moves."
+
+# zvariant_derive is unmaintained (RUSTSEC-2026-0372). Build-time proc
+# macros for zvariant, transitive through ashpd/oo7.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0372"
+reason = "Unmaintained notice in zvariant build-time proc macros, transitive through ashpd/oo7; accepted until GPUI moves."
